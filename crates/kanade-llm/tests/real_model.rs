@@ -4,7 +4,7 @@
 //! Build the worker with `--features llama` and pass the model explicitly:
 //!
 //! ```sh
-//! KANADE_LLM_MODEL=/path/to/kanade-tsumugi-v0.1.0-s-F16.gguf \
+//! KANADE_LLM_MODEL=/path/to/tsumugi.gguf \
 //!   cargo test -p kanade-llm --features llama --test real_model -- --ignored --nocapture --test-threads 1
 //! ```
 //!

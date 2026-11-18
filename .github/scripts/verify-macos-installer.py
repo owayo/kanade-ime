@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from bundled_model import locked_model, verify_model
+from bundled_model import check_model_files, locked_model, verify_model
 
 
 def verify_dmg(image: Path, version: str) -> None:
@@ -56,7 +56,9 @@ def verify_dmg(image: Path, version: str) -> None:
                 ):
                     raise ValueError("installer and app versions differ")
             model = locked_model()
-            verify_model(settings / "Contents/Resources/models" / model["file"], model)
+            gguf = settings / "Contents/Resources/models" / model["file"]
+            check_model_files(installer, gguf)
+            verify_model(gguf, model)
             for manifest, binary in [
                 ("manifest.json", "kanade-mozc-worker"),
                 ("project-analyzer.json", "kanade-project-analyzer"),

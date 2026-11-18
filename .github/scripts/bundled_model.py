@@ -13,7 +13,8 @@ from pathlib import Path
 def locked_model():
     lock = Path(__file__).resolve().parents[2] / "locks/llm.lock.toml"
     with lock.open("rb") as stream:
-        return tomllib.load(stream)["model"]["tsumugi-s-f16"]
+        (model,) = tomllib.load(stream)["model"].values()
+        return model
 
 
 def verify_model(path, model):
@@ -22,6 +23,12 @@ def verify_model(path, model):
     with path.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != model["sha256"]:
             raise ValueError(f"Tsumugi SHA-256 mismatch: {path}")
+
+
+def check_model_files(root, expected):
+    files = [p for p in root.rglob("*") if p.suffix.lower() == ".gguf"]
+    if files != [expected]:
+        raise ValueError(f"Expected exactly one bundled model at {expected}, found {files}")
 
 
 def stage(directory, source):
@@ -41,6 +48,7 @@ def stage(directory, source):
             shutil.copyfile(source, staged)
         verify_model(staged, model)
         staged.replace(target)
+    check_model_files(directory, target)
 
 
 if __name__ == "__main__":

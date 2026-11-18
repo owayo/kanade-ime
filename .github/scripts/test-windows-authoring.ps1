@@ -15,6 +15,8 @@ $previousRollForward = $env:DOTNET_ROLL_FORWARD
 Push-Location $fixture
 try {
     $payload = 'artifacts/windows/payload'
+    New-Item -ItemType Directory "$payload/models" | Out-Null
+    Set-Content "$payload/models/tsumugi.gguf" 'authoring fixture'
     foreach ($name in @('kanade-engine.exe', 'kanade-ui.exe', 'kanade_tip.dll', 'kanade-mozc-worker.exe', 'kanade-project-analyzer.exe')) {
         Copy-Item "$env:WINDIR/System32/cmd.exe" "$payload/$name"
     }

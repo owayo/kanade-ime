@@ -7,9 +7,12 @@ import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from bundled_model import check_model_files, locked_model
+
 NS = "http://wixtoolset.org/schemas/v4/wxs"
 ET.register_namespace("", NS)
 payload = Path("artifacts/windows/payload").resolve()
+check_model_files(payload, payload / "models" / locked_model()["file"])
 version = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"][
     "version"
 ]

@@ -16,7 +16,7 @@ if errorlevel 1 exit /b 1
 echo Kanade IME is installed. Restart apps that were open during the update.
 echo For apps in the system tray, choose Quit before reopening them.
 echo Select Kanade in the Japanese input methods.
-set "model=%ProgramW6432%\Kanade\models\kanade-tsumugi-v0.1.0-s-F16.gguf"
+set "model=%ProgramW6432%\Kanade\models\tsumugi.gguf"
 if not exist "%model%" (
     echo Bundled Tsumugi model is missing. Repair the installation.
     exit /b 2

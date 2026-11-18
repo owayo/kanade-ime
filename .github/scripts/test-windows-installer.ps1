@@ -62,7 +62,9 @@ try {
     $engine = $null
     try {
         $application = Join-Path $env:ProgramFiles Kanade
-        $model = Join-Path $application 'models/kanade-tsumugi-v0.1.0-s-F16.gguf'
+        $model = Join-Path $application 'models/tsumugi.gguf'
+        $models = @(Get-ChildItem -LiteralPath $application -Filter '*.gguf' -File -Recurse)
+        if ($models.Count -ne 1 -or $models[0].FullName -ne [IO.Path]::GetFullPath($model)) { throw 'Expected only the bundled Tsumugi model' }
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $model).Hash
         $locked = Get-Content locks/llm.lock.toml -Raw
         if (-not ($locked -match ('(?m)^sha256 = "' + $hash + '"$'))) { throw 'Installed model digest does not match lock' }

@@ -32,7 +32,7 @@ The key loop copies a few short strings into a queue of two jobs and later looks
 
 ## Tsumugi model
 
-Kanade accepts one local reranker, **Tsumugi S**. Its F16 GGUF contains 28,058,112 parameters and occupies 56,386,208 bytes. The engine, worker and settings use the same pinned identity. The Windows EXE installs the GGUF in the application’s `models` directory. The macOS DMG includes it under `Settings.app/Contents/Resources/models` inside Kanade.app. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml)
+Kanade accepts one local reranker, **Tsumugi**. Its F16 GGUF contains 28,058,112 parameters and occupies 56,386,208 bytes. The engine, worker and settings use the same pinned identity. The Windows EXE installs the GGUF in the application’s `models` directory. The macOS DMG includes it under `Settings.app/Contents/Resources/models` inside Kanade.app. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml)
 
 A Windows x64 installation matched all 373 tokenizer references and ranked the expected candidate first in 78 of 85 context tests (91.76%). Every case received a score. Repeated runs agreed. CPU scoring took 21 ms at the median and 33 ms at the 95th percentile on the installation PC. The 85 examples exercise selected homophones.
 
@@ -99,7 +99,7 @@ Because the preedit is never changed and choices only move within the first nine
 Import the supplied Tsumugi GGUF after reviewing the displayed model and local-processing terms. The engine qualifies the file through its CPU worker. Qualification records bind the file, vocabulary, prompt and worker digests.
 
 ```sh
-kanade-ui models import /path/to/kanade-tsumugi-v0.1.0-s-F16.gguf --accept-license --accept-local-processing
+kanade-ui models import /path/to/tsumugi.gguf --accept-license --accept-local-processing
 kanade-ui models status
 ```
 
@@ -108,5 +108,5 @@ kanade-ui models status
 The worker must reproduce 373 independent tokenizer examples. On the 85 context-dependent ranking fixtures it must score every candidate, produce deterministic results, respect request bounds, choose at least 77 expected spellings and finish 95 percent of requests within 300 ms.
 
 ```sh
-KANADE_LLM_MODEL=/path/to/kanade-tsumugi-v0.1.0-s-F16.gguf cargo test --release -p kanade-llm --features llama --test real_model -- --ignored --test-threads 1
+KANADE_LLM_MODEL=/path/to/tsumugi.gguf cargo test --release -p kanade-llm --features llama --test real_model -- --ignored --test-threads 1
 ```

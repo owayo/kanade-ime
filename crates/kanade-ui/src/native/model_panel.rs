@@ -106,7 +106,7 @@ impl Settings {
             let resources = exe.parent()?.to_owned();
             #[cfg(target_os = "macos")]
             let resources = exe.parent()?.parent()?.join("Resources");
-            Some(resources.join("models/kanade-tsumugi-v0.1.0-s-F16.gguf"))
+            Some(resources.join("models/tsumugi.gguf"))
         });
         if let Some(path) = bundled.filter(|p| p.is_file()) {
             self.model_operation(move || crate::models::import(&path, &model, true, true), cx);
@@ -180,13 +180,11 @@ impl Settings {
                         cx.notify();
                     })))
                 .child(separator())
-                .child("使用モデル: Tsumugi S")
 
                 .when_some(selected, |view, model| {
                     let source = model.source_url.clone();
                     let license = model.license_url.clone();
-                    view.child(separator())
-                        .child(format!("{}（約{}MB）", model.name, model.size.div_ceil(1_000_000)))
+                    view.child(format!("使用モデル　{}（約{}MB）", model.name, model.size.div_ceil(1_000_000)))
                         .child(div().text_sm().child(format!("提供: {} / {}", model.attribution, model.license)))
                         .child(div().flex().flex_wrap().gap_2()
                             .child(button("model-source", "配布元を開く", "モデルの配布元を開く").on_click(move |_, _, cx| cx.open_url(&source)))

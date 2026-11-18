@@ -7,8 +7,8 @@
   <String Id="CheckingForUpdatesLabel" Value="更新を確認中" />
   <String Id="UpdateButton" Value="[WixStdBAUpdateAvailable]へ更新(&amp;U)" />
   <String Id="InstallHeader" Value="Kanadeをインストール" />
-  <String Id="InstallMessage" Value="日本語入力IMEのKanadeと文脈モデルTsumugi Sをインストールします。入力中の文章を確定してから進めてください。導入後はWindowsからサインアウトし、再度サインインしてください。" />
-  <String Id="InstallMessageOptions" Value="日本語入力IMEのKanadeと文脈モデルTsumugi Sをインストールします。導入後はサインアウトしてから再度サインインしてください。" />
+  <String Id="InstallMessage" Value="日本語入力IMEのKanadeと文脈モデルTsumugiをインストールします。入力中の文章を確定してから進めてください。導入後はWindowsからサインアウトし、再度サインインしてください。" />
+  <String Id="InstallMessageOptions" Value="日本語入力IMEのKanadeと文脈モデルTsumugiをインストールします。導入後はサインアウトしてから再度サインインしてください。" />
   <String Id="InstallVersion" Value="バージョン [WixBundleVersion]" />
   <String Id="ConfirmCancelMessage" Value="インストールを中止しますか？" />
   <String Id="ExecuteUpgradeRelatedBundleMessage" Value="以前のバージョン" />

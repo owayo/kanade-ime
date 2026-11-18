@@ -185,7 +185,8 @@ fn token(id: Option<u32>) -> String {
 }
 
 /// The sole model accepted by ordinary builds. Token IDs and weights are pinned together.
-pub static TSUMUGI_S: Profile = Profile {
+// Keep persistent profile and model IDs stable for installed qualifications and consents.
+pub static TSUMUGI: Profile = Profile {
     id: "tsumugi-s",
     version: 1,
     vocab_sha256: "9026a21e3c4c916f5cfe37d0c081e32b08eafad1cdb08d616f81cfacd0f8c7f0",
@@ -218,8 +219,8 @@ pub static TSUMUGI_S: Profile = Profile {
 /// The fixed model used by the engine and isolated worker.
 pub static CATALOG: &[Model] = &[Model {
     id: "tsumugi-s-f16",
-    name: "Tsumugi S (F16)",
-    file_name: "kanade-tsumugi-v0.1.0-s-F16.gguf",
+    name: "Tsumugi",
+    file_name: "tsumugi.gguf",
     size: 56386208,
     sha256: "dd7ed97afd42b5c64b2e6713b66395fbe57d3fbc560f7218a4bfc89fc0efb10b",
     license: "LicenseRef-Kanade-Model-1.0",
@@ -227,7 +228,7 @@ pub static CATALOG: &[Model] = &[Model {
     source_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md",
     revision: "43367b2a92d179cca0c5d92dabd53b3cdfe191b321316247361efe74ea7325ff",
     attribution: "Kanade",
-    profile: &TSUMUGI_S,
+    profile: &TSUMUGI,
 }];
 
 /// Every model this build accepts: the catalogue, plus the fixtures in a test
@@ -305,8 +306,8 @@ pub mod fixture {
     pub static ALT_PROFILE: Profile = Profile {
         id: "fixture-alt",
         version: 3,
-        vocab_sha256: TSUMUGI_S.vocab_sha256,
-        vocab_size: TSUMUGI_S.vocab_size,
+        vocab_sha256: TSUMUGI.vocab_sha256,
+        vocab_size: TSUMUGI.vocab_size,
         tokenizer: Tokenizer {
             overrides: &[("tokenizer.ggml.pre", "gpt-2")],
             unknown: Some(0),
@@ -643,7 +644,7 @@ mod tests {
     }
     #[test]
     fn profiles_share_no_prompt_tokenizer_end_token_corpus_or_gate() {
-        let tsumugi = &TSUMUGI_S;
+        let tsumugi = &TSUMUGI;
         let alt = &fixture::ALT_PROFILE;
         let other = &fixture::OTHER_PROFILE;
         // `alt` is bound to the same file and vocabulary, and still differs in
@@ -689,7 +690,7 @@ mod tests {
                 processing: p.processing,
             }
         }
-        let base = &TSUMUGI_S;
+        let base = &TSUMUGI;
         assert_eq!(copy(base).sha256(), base.sha256());
         let edits: [fn(&mut Profile); 16] = [
             |p| p.id = "tsumugi-v3.2-small-b",
