@@ -1,0 +1,195 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  MISE_LOCKED: "1"
+  MISE_DISABLE_TOOLS: cargo:owayo/astro-sight
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-registration:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust
+      - name: Build both input DLLs
+        run: |
+          rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+          cargo build --release --locked --target x86_64-pc-windows-msvc -p kanade-tip
+          cargo build --release --locked --target i686-pc-windows-msvc -p kanade-tip
+      - name: Test shared registration and repeated removal
+        shell: pwsh
+        run: ./.github/scripts/test-windows-registration.ps1
+  windows-bazel-paths:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust bazelisk python
+      - name: Verify Git paths and Bazel output staging
+        run: cargo xtask check-bazel-paths
+  windows-authoring:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      MISE_DISABLE_TOOLS: rust,bazelisk,cargo:owayo/astro-sight
+    steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: python
+      - name: Compile the Windows installer definitions
+        shell: pwsh
+        run: ./.github/scripts/test-windows-authoring.ps1
+  quality:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust bazelisk
+      - run: make setup SETUP_TOOLS="rust bazelisk python"
+      - run: make ci
+  build:
+    needs: [windows-authoring, windows-bazel-paths, windows-registration]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      MISE_DISABLE_TOOLS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Test Windows
+        if: runner.os == 'Windows'
+        run: cargo test --locked --workspace --no-fail-fast
+      - name: Build the native frontends
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kanade-engine -p kanade-ui -p kanade-tip -p kanade-llm -p kanade-indexer --features kanade-ui/native,kanade-llm/llama
+      - name: Build the macOS installer launcher
+        if: runner.os == 'macOS'
+        run: swift build --package-path packaging/macos/installer --scratch-path artifacts/swift-installer --configuration release --product KanadeInstaller -Xswiftc -warnings-as-errors -Xswiftc -gnone
+      - name: Build the 32-bit Windows frontend
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo build --release --locked --target i686-pc-windows-msvc -p kanade-tip
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/package-windows.ps1 -Unsigned
+      - name: Test Windows installation and rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/test-windows-installer.ps1
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          path: artifacts/release/kanade-ime-x86_64-pc-windows-msvc.exe
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: ${{ failure() && runner.os == 'Windows' }}
+        with:
+          name: windows-installer-debug
+          path: |
+            artifacts/windows/*.log
+            artifacts/windows/*.msi
+            artifacts/windows/*.exe
+            artifacts/windows/payload/
+            artifacts/mozc/
+          if-no-files-found: ignore
+  project-indexer:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      MISE_DISABLE_TOOLS: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust bazelisk cargo:owayo/astro-sight
+      - run: mise run project-contract
+  real-worker:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust bazelisk
+      - run: mise run prepare
+      - run: mise run build-worker
+      - run: mise run contract
+      - run: mise run evaluate
+      - uses: actions/upload-artifact@v7
+        with:
+          name: worker-manifest
+          path: artifacts/mozc/manifest.json

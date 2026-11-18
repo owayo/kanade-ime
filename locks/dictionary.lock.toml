@@ -1,0 +1,7 @@
+[dictionary]
+tag = "v26.11.103"
+url = "https://github.com/owayo/hasami/releases/download/v26.11.103/ipadic.hsd"
+sha256 = "06582b57be69fe139dbef5fafcbd91ba45add8107fa8fdaa9ae65816c70dce3f"
+size = 15714402
+notices_url = "https://github.com/owayo/hasami/releases/download/v26.11.103/THIRD_PARTY_LICENSES.md"
+notices_sha256 = "75ea2ae253d9e1a83c954b845a23b1920dac7bff82d575317b2f5c2da86c7957"

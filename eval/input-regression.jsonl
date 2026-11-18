@@ -1,0 +1,152 @@
+{"romaji": "nihongo", "accepted": ["日本語"], "domain": "general"}
+{"romaji": "kanji", "accepted": ["漢字"], "domain": "general"}
+{"romaji": "hiragana", "accepted": ["ひらがな", "平仮名"], "domain": "general"}
+{"romaji": "katakana", "accepted": ["カタカナ", "片仮名"], "domain": "general"}
+{"romaji": "eisuu", "accepted": ["英数"], "domain": "input"}
+{"romaji": "henkan", "accepted": ["変換"], "domain": "input"}
+{"romaji": "moji", "accepted": ["文字"], "domain": "input"}
+{"romaji": "kuuhaku", "accepted": ["空白"], "domain": "input"}
+{"romaji": "sakujo", "accepted": ["削除"], "domain": "input"}
+{"romaji": "sentaku", "accepted": ["選択"], "domain": "input"}
+{"romaji": "nyuuryokuhousiki", "accepted": ["入力方式"], "domain": "input"}
+{"romaji": "hensuumei", "accepted": ["変数名"], "domain": "technical"}
+{"romaji": "kansuu", "accepted": ["関数"], "domain": "technical"}
+{"romaji": "hairetsu", "accepted": ["配列"], "domain": "technical"}
+{"romaji": "mojiretsu", "accepted": ["文字列"], "domain": "technical"}
+{"romaji": "kaisuu", "accepted": ["回数"], "domain": "general"}
+{"romaji": "jikan", "accepted": ["時間"], "domain": "general"}
+{"romaji": "settei", "accepted": ["設定"], "domain": "input"}
+{"romaji": "saihyouji", "accepted": ["再表示"], "domain": "input"}
+{"romaji": "hozon", "accepted": ["保存"], "domain": "input"}
+{"romaji": "yomikomi", "accepted": ["読み込み", "読込"], "domain": "technical"}
+{"romaji": "kakidashi", "accepted": ["書き出し"], "domain": "technical"}
+{"romaji": "kouho", "accepted": ["候補"], "domain": "input"}
+{"romaji": "ki-bo-do", "accepted": ["キーボード"], "domain": "loanwords"}
+{"romaji": "mausu", "accepted": ["マウス"], "domain": "loanwords"}
+{"romaji": "konpyu-ta", "accepted": ["コンピュータ", "コンピューター"], "domain": "loanwords"}
+{"romaji": "pasokon", "accepted": ["パソコン"], "domain": "loanwords"}
+{"romaji": "burauza", "accepted": ["ブラウザ", "ブラウザー"], "domain": "loanwords"}
+{"romaji": "puroguramu", "accepted": ["プログラム"], "domain": "loanwords"}
+{"romaji": "dezainn", "accepted": ["デザイン"], "domain": "loanwords"}
+{"romaji": "nihonngo", "accepted": ["日本語"], "domain": "romaji"}
+{"romaji": "shinbun", "accepted": ["新聞"], "domain": "romaji"}
+{"romaji": "kin'youbi", "accepted": ["金曜日"], "domain": "romaji"}
+{"romaji": "annai", "accepted": ["案内"], "domain": "romaji"}
+{"romaji": "konnichiha", "accepted": ["こんにちは"], "domain": "romaji"}
+{"romaji": "gakkou", "accepted": ["学校"], "domain": "romaji"}
+{"romaji": "kippu", "accepted": ["切符"], "domain": "romaji"}
+{"romaji": "cyotto", "accepted": ["ちょっと"], "domain": "romaji"}
+{"romaji": "chotto", "accepted": ["ちょっと"], "domain": "romaji"}
+{"romaji": "fairu", "accepted": ["ファイル"], "domain": "loanwords"}
+{"romaji": "2026nen11gatu15nichi", "accepted": ["2026年11月15日"], "domain": "numbers"}
+{"romaji": "dai3kai", "accepted": ["第3回", "第三回"], "domain": "numbers"}
+{"romaji": "toukyouto", "accepted": ["東京都"], "domain": "proper-nouns"}
+{"romaji": "oosakafu", "accepted": ["大阪府"], "domain": "proper-nouns"}
+{"romaji": "kyoutofu", "accepted": ["京都府"], "domain": "proper-nouns"}
+{"romaji": "nihonn", "accepted": ["日本"], "domain": "proper-nouns"}
+{"romaji": "amerika", "accepted": ["アメリカ"], "domain": "proper-nouns"}
+{"romaji": "yokohama", "accepted": ["横浜"], "domain": "proper-nouns"}
+{"romaji": "watashihanihongowonyuuryokushimasu", "accepted": ["私は日本語を入力します"], "domain": "sentences"}
+{"romaji": "korehatesutodesu", "accepted": ["これはテストです"], "domain": "sentences"}
+{"romaji": "kan'jinihenkanshimasu", "accepted": ["漢字に変換します"], "domain": "sentences"}
+{"romaji": "bunshouwohozonshimasu", "accepted": ["文章を保存します"], "domain": "sentences"}
+{"romaji": "kyouhaiitenkidesu", "accepted": ["今日はいい天気です", "今日は良い天気です"], "domain": "sentences"}
+{"romaji": "ohayougozaimasu", "accepted": ["おはようございます"], "domain": "sentences"}
+{"romaji": "arigatou", "accepted": ["ありがとう", "有難う"], "domain": "general"}
+{"romaji": "kabusikigaisya", "accepted": ["株式会社"], "domain": "technical"}
+{"romaji": "nyuuryoku", "accepted": ["入力"], "domain": "input"}
+{"romaji": "hensuu", "accepted": ["変数"], "domain": "technical"}
+{"romaji": "hokkaidou", "accepted": ["北海道"], "domain": "proper-nouns"}
+{"romaji": "toukyou", "accepted": ["東京"], "domain": "proper-nouns"}
+{"romaji": "ashita", "accepted": ["明日"], "domain": "general"}
+{"romaji": "kinou", "accepted": ["昨日"], "domain": "general"}
+{"romaji": "asa", "accepted": ["朝"], "domain": "general"}
+{"romaji": "hiru", "accepted": ["昼"], "domain": "general"}
+{"romaji": "yoru", "accepted": ["夜"], "domain": "general"}
+{"romaji": "oyasumi", "accepted": ["おやすみ", "お休み"], "domain": "general"}
+{"romaji": "gohan", "accepted": ["ご飯", "御飯"], "domain": "general"}
+{"romaji": "tabemono", "accepted": ["食べ物"], "domain": "general"}
+{"romaji": "nomimono", "accepted": ["飲み物"], "domain": "general"}
+{"romaji": "kouen", "accepted": ["公園"], "domain": "general"}
+{"romaji": "koukou", "accepted": ["高校"], "domain": "general"}
+{"romaji": "daigaku", "accepted": ["大学"], "domain": "general"}
+{"romaji": "sensei", "accepted": ["先生"], "domain": "general"}
+{"romaji": "kyoushitsu", "accepted": ["教室"], "domain": "general"}
+{"romaji": "denwa", "accepted": ["電話"], "domain": "general"}
+{"romaji": "yakkyoku", "accepted": ["薬局"], "domain": "general"}
+{"romaji": "byouin", "accepted": ["病院"], "domain": "general"}
+{"romaji": "ginkou", "accepted": ["銀行"], "domain": "general"}
+{"romaji": "yuubinkyoku", "accepted": ["郵便局"], "domain": "general"}
+{"romaji": "koutsuu", "accepted": ["交通"], "domain": "general"}
+{"romaji": "nagoya", "accepted": ["名古屋"], "domain": "proper-nouns"}
+{"romaji": "sendai", "accepted": ["仙台"], "domain": "proper-nouns"}
+{"romaji": "sapporo", "accepted": ["札幌"], "domain": "proper-nouns"}
+{"romaji": "fukuoka", "accepted": ["福岡"], "domain": "proper-nouns"}
+{"romaji": "okinawa", "accepted": ["沖縄"], "domain": "proper-nouns"}
+{"romaji": "shizuoka", "accepted": ["静岡"], "domain": "proper-nouns"}
+{"romaji": "hiroshima", "accepted": ["広島"], "domain": "proper-nouns"}
+{"romaji": "nagasaki", "accepted": ["長崎"], "domain": "proper-nouns"}
+{"romaji": "kanagawa", "accepted": ["神奈川"], "domain": "proper-nouns"}
+{"romaji": "saitama", "accepted": ["埼玉"], "domain": "proper-nouns"}
+{"romaji": "pasuwa-do", "accepted": ["パスワード"], "domain": "loanwords"}
+{"romaji": "roguin", "accepted": ["ログイン"], "domain": "loanwords"}
+{"romaji": "roguauto", "accepted": ["ログアウト"], "domain": "loanwords"}
+{"romaji": "sa-ba", "accepted": ["サーバ", "サーバー"], "domain": "loanwords"}
+{"romaji": "kuraianto", "accepted": ["クライアント"], "domain": "loanwords"}
+{"romaji": "apurike-shon", "accepted": ["アプリケーション"], "domain": "loanwords"}
+{"romaji": "purojekuto", "accepted": ["プロジェクト"], "domain": "loanwords"}
+{"romaji": "daunro-do", "accepted": ["ダウンロード"], "domain": "loanwords"}
+{"romaji": "appuro-do", "accepted": ["アップロード"], "domain": "loanwords"}
+{"romaji": "akusesu", "accepted": ["アクセス"], "domain": "loanwords"}
+{"romaji": "kyasshu", "accepted": ["キャッシュ"], "domain": "loanwords"}
+{"romaji": "shorichuu", "accepted": ["処理中"], "domain": "technical"}
+{"romaji": "shin'kou", "accepted": ["進行"], "domain": "technical"}
+{"romaji": "shinchoku", "accepted": ["進捗"], "domain": "technical"}
+{"romaji": "chuushi", "accepted": ["中止"], "domain": "technical"}
+{"romaji": "saiyomikomi", "accepted": ["再読み込み"], "domain": "technical"}
+{"romaji": "saihakkou", "accepted": ["再発行"], "domain": "technical"}
+{"romaji": "soushin", "accepted": ["送信"], "domain": "technical"}
+{"romaji": "jushin", "accepted": ["受信"], "domain": "technical"}
+{"romaji": "tuushin", "accepted": ["通信"], "domain": "technical"}
+{"romaji": "setsuzoku", "accepted": ["接続"], "domain": "technical"}
+{"romaji": "setsudan", "accepted": ["切断"], "domain": "technical"}
+{"romaji": "ninshou", "accepted": ["認証"], "domain": "technical"}
+{"romaji": "anngou", "accepted": ["暗号"], "domain": "technical"}
+{"romaji": "shuuryou", "accepted": ["終了"], "domain": "technical"}
+{"romaji": "kaishi", "accepted": ["開始"], "domain": "technical"}
+{"romaji": "teishi", "accepted": ["停止"], "domain": "technical"}
+{"romaji": "tekiyou", "accepted": ["適用"], "domain": "technical"}
+{"romaji": "kensaku", "accepted": ["検索"], "domain": "technical"}
+{"romaji": "shutsuryoku", "accepted": ["出力"], "domain": "technical"}
+{"romaji": "jissou", "accepted": ["実装"], "domain": "technical"}
+{"romaji": "ken'shou", "accepted": ["検証"], "domain": "technical"}
+{"romaji": "ashitahakaigigaarimasu", "accepted": ["明日は会議があります"], "domain": "sentences"}
+{"romaji": "kyouhategamiwokakimasu", "accepted": ["今日は手紙を書きます"], "domain": "sentences"}
+{"romaji": "shorigaowarimashita", "accepted": ["処理が終わりました"], "domain": "sentences"}
+{"romaji": "setteiwohenkoushimasu", "accepted": ["設定を変更します"], "domain": "sentences"}
+{"romaji": "fairuwotojimasu", "accepted": ["ファイルを閉じます"], "domain": "sentences"}
+{"romaji": "atarashiifairuwotsukurimasu", "accepted": ["新しいファイルを作ります"], "domain": "sentences"}
+{"romaji": "gamenwokakuninnshimasu", "accepted": ["画面を確認します"], "domain": "sentences"}
+{"romaji": "sa-ba-nisetsuzokushimasu", "accepted": ["サーバーに接続します", "サーバに接続します"], "domain": "sentences"}
+{"romaji": "pasuwa-dowonyuuryokushimasu", "accepted": ["パスワードを入力します"], "domain": "sentences"}
+{"romaji": "hozonshitekaratojimashou", "accepted": ["保存してから閉じましょう"], "domain": "sentences"}
+{"romaji": "dousahateishishimashita", "accepted": ["動作は停止しました"], "domain": "sentences"}
+{"romaji": "korehahyoujinotesutodesu", "accepted": ["これは表示のテストです"], "domain": "sentences"}
+{"romaji": "nyuuryokushitamojiwokeshimasu", "accepted": ["入力した文字を消します"], "domain": "sentences"}
+{"romaji": "hiragananihenkan", "accepted": ["ひらがなに変換", "平仮名に変換"], "domain": "sentences"}
+{"romaji": "katakananihenkan", "accepted": ["カタカナに変換", "片仮名に変換"], "domain": "sentences"}
+{"romaji": "onajimojiwokurikaeshimasu", "accepted": ["同じ文字を繰り返します"], "domain": "sentences"}
+{"romaji": "nihongotomojiretsu", "accepted": ["日本語と文字列"], "domain": "sentences"}
+{"romaji": "setsumeiwoyondekudasai", "accepted": ["説明を読んでください"], "domain": "sentences"}
+{"romaji": "saishonokouhowoerabimasu", "accepted": ["最初の候補を選びます"], "domain": "sentences"}
+{"romaji": "tsuginokouhowohyoujishimasu", "accepted": ["次の候補を表示します"], "domain": "sentences"}
+{"romaji": "gakkouheikimasu", "accepted": ["学校へ行きます"], "domain": "romaji"}
+{"romaji": "shin'nyuusei", "accepted": ["新入生"], "domain": "romaji"}
+{"romaji": "kan'i", "accepted": ["簡易"], "domain": "romaji"}
+{"romaji": "man'in", "accepted": ["満員"], "domain": "romaji"}
+{"romaji": "zasshi", "accepted": ["雑誌"], "domain": "romaji"}
+{"romaji": "masshiro", "accepted": ["真っ白"], "domain": "romaji"}
+{"romaji": "kitte", "accepted": ["切手"], "domain": "romaji"}
+{"romaji": "zutto", "accepted": ["ずっと"], "domain": "romaji"}
+{"romaji": "issho", "accepted": ["一緒"], "domain": "romaji"}
+{"romaji": "shuppatsu", "accepted": ["出発"], "domain": "romaji"}

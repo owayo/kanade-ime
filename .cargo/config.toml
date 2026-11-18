@@ -1,0 +1,9 @@
+[alias]
+xtask = "run --locked --package xtask --"
+
+# The optional inference worker (`kanade-llm --features llama`) is CPU-only. Its
+# runtime build script forwards GGML_* variables to CMake; without this the
+# Metal backend is compiled in on Apple targets. The worker refuses to start
+# if any accelerator backend is present.
+[env]
+GGML_METAL = "OFF"

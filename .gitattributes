@@ -1,0 +1,3 @@
+# Unified patch context prefixes include intentional spaces on empty lines.
+*.patch whitespace=-blank-at-eol
+crates/**/src/generated/* linguist-generated=true

@@ -1,0 +1,73 @@
+name: Mozc compatibility probe
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * 1'
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  MISE_LOCKED: "1"
+  MISE_DISABLE_TOOLS: cargo:owayo/astro-sight
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.upstream == 'master' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        upstream: [latest, master]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust bazelisk
+      - name: Create isolated upstream checkout
+        shell: bash
+        env:
+          UPSTREAM: ${{ matrix.upstream }}
+        run: |
+          git -C third_party/mozc fetch origin master --tags
+          candidate=FETCH_HEAD
+          if [ "$UPSTREAM" = latest ]; then
+            candidate=$(git -C third_party/mozc tag --sort=-version:refname | head -n 1)
+          fi
+          git -C third_party/mozc worktree add --detach "$RUNNER_TEMP/mozc-probe" "$candidate"
+          git -C third_party/mozc rev-parse "$candidate" > "$RUNNER_TEMP/mozc-probe-commit"
+      - name: Compare protocol descriptors
+        shell: bash
+        run: mise exec -- cargo xtask proto-check "$RUNNER_TEMP/mozc-probe"
+      - name: Compile the unmodified upstream worker
+        if: always()
+        shell: bash
+        run: |
+          bazelisk_path="$(mise which bazelisk)"
+          bazel_version="$(mise exec -- printenv USE_BAZEL_VERSION)"
+          cd "$RUNNER_TEMP/mozc-probe/src"
+          USE_BAZEL_VERSION="$bazel_version" "$bazelisk_path" build @kanade_worker//:kanade-mozc-worker --inject_repository="kanade_worker=$GITHUB_WORKSPACE/mozc-worker" --check_visibility=false --compilation_mode=opt --jobs=6
+      - name: Regenerate and test the candidate adapter in isolation
+        shell: bash
+        run: |
+          probe="$RUNNER_TEMP/kanade-probe"
+          candidate=$(cat "$RUNNER_TEMP/mozc-probe-commit")
+          git worktree add --detach "$probe" HEAD
+          git clone --shared --no-checkout third_party/mozc "$probe/third_party/mozc"
+          git -C "$probe/third_party/mozc" checkout --detach "$candidate"
+          git -C "$probe" submodule update --init --recursive third_party/hasami
+          cd "$probe"
+          mise trust
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          export KANADE_MOZC_WORKER="$probe/artifacts/mozc/kanade-mozc-worker"
+          mise run prepare
+          mise exec -- cargo xtask lock
+          mise run generate
+          mise exec -- cargo check --locked --workspace --all-targets
+          mise run build-worker
+          mise run contract
+          mise run evaluate

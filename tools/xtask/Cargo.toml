@@ -1,0 +1,24 @@
+[package]
+name = "xtask"
+default-run = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+prost.workspace = true
+prost-build.workspace = true
+prost-types.workspace = true
+protoc-bin-vendored.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+hasami.workspace = true
+kanade-emoji = { path = "../../crates/kanade-emoji" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSDate", "NSRunLoop", "NSString", "NSURL"] }

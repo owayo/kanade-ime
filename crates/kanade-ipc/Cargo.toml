@@ -1,0 +1,15 @@
+[package]
+name = "kanade-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+prost.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

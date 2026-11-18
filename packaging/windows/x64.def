@@ -1,0 +1,5 @@
+EXPORTS
+    DllGetClassObject = kanade_tip_x64.DllGetClassObject
+    DllCanUnloadNow = kanade_tip_x64.DllCanUnloadNow
+    DllRegisterServer = kanade_tip_x64.DllRegisterServer
+    DllUnregisterServer = kanade_tip_x64.DllUnregisterServer

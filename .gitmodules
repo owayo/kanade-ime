@@ -1,0 +1,6 @@
+[submodule "third_party/mozc"]
+	path = third_party/mozc
+	url = https://github.com/google/mozc.git
+[submodule "third_party/hasami"]
+	path = third_party/hasami
+	url = https://github.com/owayo/hasami.git

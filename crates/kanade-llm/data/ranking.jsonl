@@ -1,0 +1,85 @@
+{"context": "明日は市民ホールで有名な作家の", "reading": "こうえんをきく", "prefix": "", "suffix": "を聞く", "candidates": ["公園", "講演", "公演", "後援"], "expected": "講演"}
+{"context": "子供たちは近くの", "reading": "こうえんであそんだ", "prefix": "", "suffix": "で遊んだ", "candidates": ["公園", "講演", "公演", "後援"], "expected": "公園"}
+{"context": "劇団の東京", "reading": "こうえん", "prefix": "", "suffix": "", "candidates": ["公園", "講演", "公演", "後援"], "expected": "公演"}
+{"context": "このイベントは市の", "reading": "こうえんをうけている", "prefix": "", "suffix": "を受けている", "candidates": ["公園", "講演", "公演", "後援"], "expected": "後援"}
+{"context": "今日は朝から", "reading": "あめがふっている", "prefix": "", "suffix": "が降っている", "candidates": ["雨", "飴", "天"], "expected": "雨"}
+{"context": "のどが痛いので", "reading": "あめをなめた", "prefix": "", "suffix": "をなめた", "candidates": ["雨", "飴", "天"], "expected": "飴"}
+{"context": "川に新しい", "reading": "はしがかけられた", "prefix": "", "suffix": "が架けられた", "candidates": ["橋", "箸", "端"], "expected": "橋"}
+{"context": "ご飯を食べるときは", "reading": "はしをつかう", "prefix": "", "suffix": "を使う", "candidates": ["橋", "箸", "端"], "expected": "箸"}
+{"context": "道の", "reading": "はしをあるく", "prefix": "", "suffix": "を歩く", "candidates": ["橋", "箸", "端"], "expected": "端"}
+{"context": "彼は毎朝", "reading": "きしゃでつうきんしている", "prefix": "", "suffix": "で通勤している", "candidates": ["記者", "汽車", "貴社", "帰社"], "expected": "汽車"}
+{"context": "新聞社の", "reading": "きしゃがしゅざいにきた", "prefix": "", "suffix": "が取材に来た", "candidates": ["記者", "汽車", "貴社", "帰社"], "expected": "記者"}
+{"context": "拝啓、", "reading": "きしゃのごはってんをおいのりします", "prefix": "", "suffix": "のご発展をお祈りします", "candidates": ["記者", "汽車", "貴社", "帰社"], "expected": "貴社"}
+{"context": "午後五時に", "reading": "きしゃするよていです", "prefix": "", "suffix": "する予定です", "candidates": ["記者", "汽車", "貴社", "帰社"], "expected": "帰社"}
+{"context": "アンケートの", "reading": "かいとうをしゅうけいする", "prefix": "", "suffix": "を集計する", "candidates": ["回答", "解答", "解凍", "怪盗"], "expected": "回答"}
+{"context": "試験問題の", "reading": "かいとうをかくにんする", "prefix": "", "suffix": "を確認する", "candidates": ["回答", "解答", "解凍", "怪盗"], "expected": "解答"}
+{"context": "冷凍した肉を", "reading": "かいとうする", "prefix": "", "suffix": "する", "candidates": ["回答", "解答", "解凍", "怪盗"], "expected": "解凍"}
+{"context": "病院で", "reading": "いしのしんさつをうけた", "prefix": "", "suffix": "の診察を受けた", "candidates": ["医師", "意思", "石", "遺志"], "expected": "医師"}
+{"context": "庭に大きな", "reading": "いしをおいた", "prefix": "", "suffix": "を置いた", "candidates": ["医師", "意思", "石", "遺志"], "expected": "石"}
+{"context": "本人の", "reading": "いしをかくにんする", "prefix": "", "suffix": "を確認する", "candidates": ["医師", "意思", "石", "遺志"], "expected": "意思"}
+{"context": "彼は最後まで強い", "reading": "いしをつらぬいた", "prefix": "", "suffix": "を貫いた", "candidates": ["医師", "意志", "石", "遺志"], "expected": "意志"}
+{"context": "来週の会議の", "reading": "しりょうをさくせいする", "prefix": "", "suffix": "を作成する", "candidates": ["資料", "飼料", "史料", "試料"], "expected": "資料"}
+{"context": "牧場で牛に", "reading": "しりょうをあたえる", "prefix": "", "suffix": "を与える", "candidates": ["資料", "飼料", "史料", "試料"], "expected": "飼料"}
+{"context": "パソコンの", "reading": "きどうにじかんがかかる", "prefix": "", "suffix": "に時間がかかる", "candidates": ["起動", "軌道", "機動"], "expected": "起動"}
+{"context": "人工衛星が", "reading": "きどうにのった", "prefix": "", "suffix": "に乗った", "candidates": ["起動", "軌道", "機動"], "expected": "軌道"}
+{"context": "その映画に深く", "reading": "かんしんした", "prefix": "", "suffix": "した", "candidates": ["感心", "関心", "歓心", "寒心"], "expected": "感心"}
+{"context": "政治に", "reading": "かんしんがある", "prefix": "", "suffix": "がある", "candidates": ["感心", "関心", "歓心", "寒心"], "expected": "関心"}
+{"context": "この薬はよく", "reading": "きく", "prefix": "", "suffix": "", "candidates": ["聞く", "効く", "利く", "菊"], "expected": "効く"}
+{"context": "先生の話をよく", "reading": "きく", "prefix": "", "suffix": "", "candidates": ["聞く", "効く", "利く", "菊"], "expected": "聞く"}
+{"context": "庭に", "reading": "きくのはながさいた", "prefix": "", "suffix": "の花が咲いた", "candidates": ["聞く", "効く", "利く", "菊"], "expected": "菊"}
+{"context": "荷物を", "reading": "おくる", "prefix": "", "suffix": "", "candidates": ["送る", "贈る"], "expected": "送る"}
+{"context": "卒業記念に花束を", "reading": "おくる", "prefix": "", "suffix": "", "candidates": ["送る", "贈る"], "expected": "贈る"}
+{"context": "写真を", "reading": "とる", "prefix": "", "suffix": "", "candidates": ["取る", "撮る", "採る", "捕る", "執る"], "expected": "撮る"}
+{"context": "山に", "reading": "のぼる", "prefix": "", "suffix": "", "candidates": ["登る", "上る", "昇る"], "expected": "登る"}
+{"context": "朝日が", "reading": "のぼる", "prefix": "", "suffix": "", "candidates": ["登る", "上る", "昇る"], "expected": "昇る"}
+{"context": "熱いお茶を", "reading": "さます", "prefix": "", "suffix": "", "candidates": ["冷ます", "覚ます", "醒ます"], "expected": "冷ます"}
+{"context": "朝早く目を", "reading": "さます", "prefix": "", "suffix": "", "candidates": ["冷ます", "覚ます", "醒ます"], "expected": "覚ます"}
+{"context": "彼は", "reading": "いがいなけっかにおどろいた", "prefix": "", "suffix": "な結果に驚いた", "candidates": ["以外", "意外", "遺骸"], "expected": "意外"}
+{"context": "日曜日", "reading": "いがいはえいぎょうしています", "prefix": "", "suffix": "は営業しています", "candidates": ["以外", "意外", "遺骸"], "expected": "以外"}
+{"context": "利益を", "reading": "ついきゅうする", "prefix": "", "suffix": "する", "candidates": ["追求", "追及", "追究"], "expected": "追求"}
+{"context": "責任を", "reading": "ついきゅうする", "prefix": "", "suffix": "する", "candidates": ["追求", "追及", "追究"], "expected": "追及"}
+{"context": "彼女はピアノを", "reading": "ひく", "prefix": "", "suffix": "", "candidates": ["引く", "弾く", "轢く", "挽く", "退く"], "expected": "弾く"}
+{"context": "風邪を", "reading": "ひく", "prefix": "", "suffix": "", "candidates": ["引く", "弾く", "轢く", "挽く", "退く"], "expected": "引く"}
+{"context": "コーヒー豆を", "reading": "ひく", "prefix": "", "suffix": "", "candidates": ["引く", "弾く", "轢く", "挽く", "退く"], "expected": "挽く"}
+{"context": "地震の", "reading": "よちはむずかしい", "prefix": "", "suffix": "は難しい", "candidates": ["余地", "予知"], "expected": "予知"}
+{"context": "改善の", "reading": "よちがある", "prefix": "", "suffix": "がある", "candidates": ["余地", "予知"], "expected": "余地"}
+{"context": "来月から新しい", "reading": "せいどがはじまる", "prefix": "", "suffix": "が始まる", "candidates": ["制度", "精度"], "expected": "制度"}
+{"context": "測定の", "reading": "せいどをあげる", "prefix": "", "suffix": "を上げる", "candidates": ["制度", "精度"], "expected": "精度"}
+{"context": "彼の", "reading": "しょうかいでにゅうかいした", "prefix": "", "suffix": "で入会した", "candidates": ["紹介", "照会", "商会"], "expected": "紹介"}
+{"context": "銀行に残高を", "reading": "しょうかいする", "prefix": "", "suffix": "する", "candidates": ["紹介", "照会", "商会"], "expected": "照会"}
+{"context": "データを", "reading": "こうしんする", "prefix": "", "suffix": "する", "candidates": ["更新", "交信", "行進", "後進"], "expected": "更新"}
+{"context": "宇宙船と", "reading": "こうしんする", "prefix": "", "suffix": "する", "candidates": ["更新", "交信", "行進", "後進"], "expected": "交信"}
+{"context": "選手たちが入場", "reading": "こうしんした", "prefix": "", "suffix": "した", "candidates": ["更新", "交信", "行進", "後進"], "expected": "行進"}
+{"context": "席を", "reading": "あける", "prefix": "", "suffix": "", "candidates": ["開ける", "空ける", "明ける"], "expected": "空ける"}
+{"context": "窓を", "reading": "あける", "prefix": "", "suffix": "", "candidates": ["開ける", "空ける", "明ける"], "expected": "開ける"}
+{"context": "夜が", "reading": "あける", "prefix": "", "suffix": "", "candidates": ["開ける", "空ける", "明ける"], "expected": "明ける"}
+{"context": "新しい家を", "reading": "たてる", "prefix": "", "suffix": "", "candidates": ["立てる", "建てる"], "expected": "建てる"}
+{"context": "来年の計画を", "reading": "たてる", "prefix": "", "suffix": "", "candidates": ["立てる", "建てる"], "expected": "立てる"}
+{"context": "包丁で野菜を", "reading": "きる", "prefix": "", "suffix": "", "candidates": ["切る", "着る", "斬る"], "expected": "切る"}
+{"context": "寒いのでコートを", "reading": "きる", "prefix": "", "suffix": "", "candidates": ["切る", "着る", "斬る"], "expected": "着る"}
+{"context": "この問題は", "reading": "やさしい", "prefix": "", "suffix": "", "candidates": ["優しい", "易しい"], "expected": "易しい"}
+{"context": "彼女はとても", "reading": "やさしいひとだ", "prefix": "", "suffix": "人だ", "candidates": ["優しい", "易しい"], "expected": "優しい"}
+{"context": "部屋が", "reading": "あつい", "prefix": "", "suffix": "", "candidates": ["暑い", "熱い", "厚い"], "expected": "暑い"}
+{"context": "このスープは", "reading": "あつい", "prefix": "", "suffix": "", "candidates": ["暑い", "熱い", "厚い"], "expected": "熱い"}
+{"context": "この辞書はとても", "reading": "あつい", "prefix": "", "suffix": "", "candidates": ["暑い", "熱い", "厚い"], "expected": "厚い"}
+{"context": "朝", "reading": "はやくおきる", "prefix": "", "suffix": "起きる", "candidates": ["早く", "速く"], "expected": "早く"}
+{"context": "もっと", "reading": "はやくはしれ", "prefix": "", "suffix": "走れ", "candidates": ["早く", "速く"], "expected": "速く"}
+{"context": "会議は三時に", "reading": "かいしする", "prefix": "", "suffix": "する", "candidates": ["開始", "怪死", "会誌"], "expected": "開始"}
+{"context": "社長が", "reading": "こうたいした", "prefix": "", "suffix": "した", "candidates": ["交代", "後退", "抗体"], "expected": "交代"}
+{"context": "ワクチンで", "reading": "こうたいができる", "prefix": "", "suffix": "ができる", "candidates": ["交代", "後退", "抗体"], "expected": "抗体"}
+{"context": "景気が", "reading": "こうたいしている", "prefix": "", "suffix": "している", "candidates": ["交代", "後退", "抗体"], "expected": "後退"}
+{"context": "彼は医学を", "reading": "せんこうしている", "prefix": "", "suffix": "している", "candidates": ["専攻", "先行", "選考", "線香"], "expected": "専攻"}
+{"context": "お墓に", "reading": "せんこうをそなえる", "prefix": "", "suffix": "を供える", "candidates": ["専攻", "先行", "選考", "線香"], "expected": "線香"}
+{"context": "書類", "reading": "せんこうをつうかした", "prefix": "", "suffix": "を通過した", "candidates": ["専攻", "先行", "選考", "線香"], "expected": "選考"}
+{"context": "他社に", "reading": "せんこうしてはつばいする", "prefix": "", "suffix": "して発売する", "candidates": ["専攻", "先行", "選考", "線香"], "expected": "先行"}
+{"context": "荷物の", "reading": "じゅうりょう", "prefix": "", "suffix": "", "candidates": ["重量", "十両"], "expected": "重量"}
+{"context": "川の", "reading": "かこうにみなとがある", "prefix": "", "suffix": "に港がある", "candidates": ["河口", "加工", "下降", "火口"], "expected": "河口"}
+{"context": "木材を", "reading": "かこうする", "prefix": "", "suffix": "する", "candidates": ["河口", "加工", "下降", "火口"], "expected": "加工"}
+{"context": "火山の", "reading": "かこうからけむりがでている", "prefix": "", "suffix": "から煙が出ている", "candidates": ["河口", "加工", "下降", "火口"], "expected": "火口"}
+{"context": "飛行機が", "reading": "かこうをはじめた", "prefix": "", "suffix": "を始めた", "candidates": ["河口", "加工", "下降", "火口"], "expected": "下降"}
+{"context": "正しい", "reading": "しせいですわる", "prefix": "", "suffix": "で座る", "candidates": ["姿勢", "市政", "施政", "私製"], "expected": "姿勢"}
+{"context": "この道は", "reading": "こうじちゅうです", "prefix": "", "suffix": "中です", "candidates": ["工事", "公示", "麹"], "expected": "工事"}
+{"context": "選挙が", "reading": "こうじされた", "prefix": "", "suffix": "された", "candidates": ["工事", "公示", "麹"], "expected": "公示"}
+{"context": "彼は", "reading": "じしんをもってこたえた", "prefix": "", "suffix": "を持って答えた", "candidates": ["自信", "地震", "自身"], "expected": "自信"}
+{"context": "昨夜大きな", "reading": "じしんがあった", "prefix": "", "suffix": "があった", "candidates": ["自信", "地震", "自身"], "expected": "地震"}
+{"context": "それは彼", "reading": "じしんのもんだいだ", "prefix": "", "suffix": "の問題だ", "candidates": ["自信", "地震", "自身"], "expected": "自身"}

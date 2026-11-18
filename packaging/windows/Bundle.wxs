@@ -1,0 +1,16 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="Kanade IME" Manufacturer="Kanade" Version="$(var.Version)"
+          UpgradeCode="E33FC3F5-85CE-4B46-92A7-0F3CB5D8FA33" Compressed="yes">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"
+          LicenseUrl="https://github.com/owayo/kanade-ime/blob/main/LICENSE"
+          LocalizationFile="packaging/windows/Installer.ja-jp.wxl"
+          LaunchTarget="https://github.com/owayo/kanade-ime/blob/main/docs/distribution.md#windows"
+          SuppressOptionsUI="yes" ShowVersion="yes" />
+    </BootstrapperApplication>
+    <Chain>
+      <MsiPackage Id="KanadeMsi" SourceFile="artifacts/windows/Kanade.msi"
+                  Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

@@ -1,0 +1,10 @@
+{"romaji":"nihongo","accepted":["日本語"],"domain":"general"}
+{"romaji":"kyouhaiitenkidesu","accepted":["今日はいい天気です","今日は良い天気です"],"domain":"general"}
+{"romaji":"ohayougozaimasu","accepted":["おはようございます"],"domain":"general"}
+{"romaji":"arigatou","accepted":["ありがとう","有難う"],"domain":"general"}
+{"romaji":"toukyou","accepted":["東京"],"domain":"proper-nouns"}
+{"romaji":"hokkaidou","accepted":["北海道"],"domain":"proper-nouns"}
+{"romaji":"kabusikigaisya","accepted":["株式会社"],"domain":"work"}
+{"romaji":"hensuu","accepted":["変数"],"domain":"technical"}
+{"romaji":"kansuu","accepted":["関数"],"domain":"technical"}
+{"romaji":"nyuuryoku","accepted":["入力"],"domain":"technical"}

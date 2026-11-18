@@ -1,0 +1,18 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+cc_binary(
+    name = "kanade-mozc-worker",
+    srcs = ["worker_main.cc"],
+    deps = [
+        "@mozc//:macro",
+        "@mozc//base:system_util",
+        "@mozc//base:file_stream",
+        "@mozc//data_manager/oss:oss_data_manager",
+        "@mozc//dictionary:dictionary_interface",
+        "@mozc//engine:engine",
+        "@mozc//engine:modules",
+        "@mozc//protocol:commands_cc_proto",
+        "@mozc//protocol:user_dictionary_storage_cc_proto",
+        "@mozc//session:session_handler",
+    ],
+)

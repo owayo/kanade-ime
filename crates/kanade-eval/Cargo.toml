@@ -1,0 +1,18 @@
+[package]
+name = "kanade-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+kanade-ipc.workspace = true
+kanade-mozc.workspace = true
+kanade-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

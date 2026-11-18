@@ -1,0 +1,25 @@
+[package]
+name = "kanade-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+kanade-ipc.workspace = true
+kanade-mozc.workspace = true
+kanade-learn.workspace = true
+kanade-emoji = { path = "../kanade-emoji" }
+kanade-indexer = { path = "../kanade-indexer" }
+kanade-llm = { path = "../kanade-llm" }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

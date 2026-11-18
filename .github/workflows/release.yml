@@ -1,0 +1,276 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Compute the next version without building or publishing
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
+  MISE_LOCKED: "1"
+  BINARY_NAME: kanade-ime
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      MISE_DISABLE_TOOLS: cargo:owayo/astro-sight,bazelisk
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - name: Check publication prerequisites
+        if: ${{ !inputs.dry_run }}
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          HAS_MAC_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+          HAS_MAC_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD != '' }}
+          HAS_MAC_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY != '' }}
+          HAS_NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 != '' }}
+          HAS_NOTARY_ID: ${{ vars.NOTARY_KEY_ID != '' }}
+          HAS_NOTARY_ISSUER: ${{ vars.NOTARY_ISSUER != '' }}
+          HAS_WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+          HAS_WIN_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          for name in HAS_MAC_CERT HAS_MAC_PASSWORD HAS_MAC_IDENTITY HAS_NOTARY_KEY HAS_NOTARY_ID HAS_NOTARY_ISSUER HAS_WIN_CERT HAS_WIN_PASSWORD; do
+            if [ "${!name}" != true ]; then
+              echo "::error::Missing publication prerequisite: $name"
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: rust python
+      - name: Require CI for this commit
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --status success --json conclusion --jq 'length > 0' | python3 -c 'import sys; assert sys.stdin.read().strip() == "true", "CI must pass for this commit"'
+      - name: Compute the next version
+        id: bump
+        run: |
+          set -euo pipefail
+          cargo test --locked -p xtask version::tests
+          VERSION=$(cargo xtask bump-version --dry-run)
+          python3 -c 'import sys; a,b,c = map(int,sys.argv[1].split(".")); assert a <= 255 and b <= 255 and c <= 65535' "$VERSION"
+          TAG="v$VERSION"
+          EXISTING=$(git ls-remote --tags origin "refs/tags/$TAG")
+          test -z "$EXISTING"
+          git diff --exit-code -- Cargo.toml Cargo.lock packaging/macos/Info.plist packaging/macos/Settings.plist
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Next version: $VERSION (JST yy.m.counter)"
+      - name: Update version metadata and push atomically
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test "$(cargo xtask bump-version)" = "$VERSION"
+          cargo xtask version
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml Cargo.lock packaging/macos/Info.plist packaging/macos/Settings.plist
+          git commit -m "chore(release): ${TAG}へ更新"
+          git tag -a "$TAG" -m "リリース $TAG"
+          git push --atomic origin "HEAD:refs/heads/$DEFAULT_BRANCH" "refs/tags/$TAG"
+  build:
+    needs: prepare-release
+    if: ${{ !inputs.dry_run }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    outputs:
+      assets: ${{ strategy.job-total }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: kanade-ime-aarch64-apple-darwin.dmg
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: kanade-ime-x86_64-pc-windows-msvc.exe
+    steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build the native release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kanade-engine -p kanade-imk -p kanade-ui -p kanade-tip -p kanade-llm -p kanade-indexer --features kanade-ui/native,kanade-llm/llama
+      - name: Import macOS signing credentials
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, os, pathlib
+          folder = pathlib.Path(os.environ['RUNNER_TEMP'])
+          (folder / 'signing.p12').write_bytes(base64.b64decode(os.environ['CERTIFICATE'], validate=True))
+          (folder / 'notary.p8').write_text(os.environ['NOTARY_KEY'])
+          (folder / 'signing.p12').chmod(0o600)
+          (folder / 'notary.p8').chmod(0o600)
+          PY
+          password=$(openssl rand -hex 24)
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+      - name: Package and notarize macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CODESIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+          KANADE_NOTARIZE: "1"
+          NOTARY_KEY_FILE: ${{ runner.temp }}/notary.p8
+          NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ vars.NOTARY_ISSUER }}
+        run: bash .github/scripts/package-macos.sh
+      - name: Import Windows signing credentials
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERTIFICATE: ${{ secrets.WINDOWS_CERT_PFX }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:RUNNER_TEMP signing.pfx
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:CERTIFICATE))
+          $password = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+      - name: Package and sign Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/package-windows.ps1
+      - name: Verify Windows installation and rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/test-windows-installer.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          path: artifacts/release/${{ matrix.asset_name }}
+          archive: false
+          if-no-files-found: error
+      - name: Remove macOS signing credentials
+        if: ${{ always() && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/notary.p8"
+      - name: Remove Windows signing credentials
+        if: ${{ always() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERT_THUMBPRINT" -DeleteKey -Force
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP signing.pfx) -Force -ErrorAction SilentlyContinue
+  release:
+    needs: [prepare-release, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      MISE_DISABLE_TOOLS: rust,bazelisk,cargo:owayo/astro-sight
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: kanade-ime-*
+          path: release
+          merge-multiple: true
+          skip-decompress: true
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: python
+      - name: Validate installers and write SHA256SUMS
+        env:
+          EXPECTED: ${{ needs.build.outputs.assets }}
+        run: python3 .github/scripts/release-assets.py checksums release --expected "$EXPECTED"
+      - name: Check the checksum manifest with the system hasher
+        run: cd release && sha256sum --check SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
+          name: ${{ needs.prepare-release.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          overwrite_files: false
+          files: |
+            release/kanade-ime-aarch64-apple-darwin.dmg
+            release/kanade-ime-x86_64-pc-windows-msvc.exe
+            release/SHA256SUMS
+          body: |
+            Windows x64とApple Silicon Mac向けの日本語入力IMEです。
+            SHA256SUMSで照合してから、インストーラーを開いてください。
+            macOSはDMG内の「Kanade インストーラー.app」、WindowsはEXEを起動します。
+            導入手順とネイティブ検証の状況も確認してください。
+      - name: Verify published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: python3 .github/scripts/release-assets.py verify release --tag "$TAG" --repo "$GITHUB_REPOSITORY"
+  release-summary:
+    if: ${{ !cancelled() }}
+    needs: [prepare-release, build, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize results
+        env:
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          PREPARE: ${{ needs.prepare-release.result }}
+          BUILD: ${{ needs.build.result }}
+          RELEASE: ${{ needs.release.result }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "## Release $TAG"
+            echo "Dry run: $DRY_RUN"
+            echo "Prepare: $PREPARE"
+            echo "Build: $BUILD"
+            echo "Release: $RELEASE"
+            echo 'Platforms: Windows x64; macOS Apple Silicon'
+            echo 'Distribution: GitHub Releases only'
+          } >> "$GITHUB_STEP_SUMMARY"

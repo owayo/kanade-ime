@@ -1,0 +1,45 @@
+# Identities registered in crates/kanade-llm/src/profile.rs. A test keeps this
+# file, the source constants and Cargo.lock in step: every registered model and
+# profile has one table here, and no table exists without a registration.
+# Nothing here is downloaded by a build or at run time: a model is obtained and
+# imported by the user.
+
+[runtime]
+crate = "llama-cpp-sys-2"
+version = "0.1.160"
+checksum = "912d8a0522acec022ae07d099366234067c8af6a18570a603f0749b7bb927e9a"
+# Vendored unmodified by the crate. Four source files were compared with this
+# commit; the 0.1.161 release vendors the identical tree.
+llama_cpp = "https://github.com/ggml-org/llama.cpp"
+llama_cpp_commit = "d81235049384534c167caea52b85a694f6103d14"
+license = "MIT"
+backend = "cpu"
+build_env = "GGML_METAL=OFF"
+
+[model."tsumugi-s-f16"]
+profile = "tsumugi-s"
+source = "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md"
+revision = "43367b2a92d179cca0c5d92dabd53b3cdfe191b321316247361efe74ea7325ff"
+file = "kanade-tsumugi-v0.1.0-s-F16.gguf"
+size = 56386208
+sha256 = "dd7ed97afd42b5c64b2e6713b66395fbe57d3fbc560f7218a4bfc89fc0efb10b"
+license = "LicenseRef-Kanade-Model-1.0"
+attribution = "Kanade"
+terms_sha256 = "d5b8a07c822d4ddf2d582dec6a53f7335757827bb52adcf0826de6cd35558b75"
+
+[profile."tsumugi-s"]
+version = 1
+sha256 = "114322367c2dcef701c684b0e15a63290545229b09aa26f3de41c0c5f8fb6782"
+vocab_sha256 = "9026a21e3c4c916f5cfe37d0c081e32b08eafad1cdb08d616f81cfacd0f8c7f0"
+vocab_size = 7680
+tokenizer_sha256 = "9723afa83379b156c3fc38b56e443e57fd08e9c257fa531879667b52de09765f"
+tokenizer_overrides = ""
+unknown_token = "none"
+prompt_version = 1
+prompt_sha256 = "516d09f2a2fceb95240fb851cdf3f8731a329bfad1272d0ce160142b558475fb"
+start_token = "none"
+end_token = 259
+tokenizer_parity_sha256 = "44bcc1cb0c0b606b159be7d3cc234050346c635cd58f4e9782ebf87139b51555"
+ranking_sha256 = "939bf0be275f3dffe27f910f5f64d3348ce2695bde5d321c303628e874c0ad53"
+min_ranking_per_mille = 900
+max_p95_ms = 300

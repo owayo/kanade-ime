@@ -1,0 +1,7 @@
+# Selected concept export
+
+Built-in image generation edit of `variant-01.png`, with `transparent_background: true`. The output is `../../input-template.png`.
+
+```text
+Use case: precise-object-edit / background-extraction. The attached image is the FINAL SELECTED Kanade IME logo. Preserve its exact rounded-square outline, exact Mincho 奏 letter contours, proportions and position. This is a technical production export, not a redesign. Output one monochrome BLACK template icon with TRUE transparent background: the entire rounded square's white region in the reference becomes a single solid pure BLACK shape, and both the dark exterior and the dark kanji 奏 inside it become fully transparent negative space. Preserve the letter-shaped cutout faithfully. This is a black silhouette/stencil/alpha mask for macOS template rendering, not a black letter on a white badge. macOS will recolor the mask white on dark backgrounds. Every opaque pixel inside the mark is black; all empty regions have real zero alpha. Make all edges crisp and smooth with clean antialiasing only at contours, no grunge, speckles, hairline outlines, interior gray haze, shadow, gradient, texture or background. Equal optical margins, fitted centered mark with modest 6% exterior transparent safe area, perfectly square canvas. Do not add text, alternate copies or decorative details. The reference glyph and the rounded square must remain immediately identical to the selected original.
+```

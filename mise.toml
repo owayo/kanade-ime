@@ -1,0 +1,74 @@
+[tools]
+rust = { version = "1.99.1", profile = "minimal", components = ["rustfmt", "clippy"] }
+bazelisk = "1.30.0"
+python = "3.14.5"
+# The project dictionary APIs are newer than the tagged binary release.
+"cargo:owayo/astro-sight" = { version = "rev:429f894188842b0ba183db766793d4aafca19e12", crate = "astro-sight", bin = "astro-sight", locked = true }
+
+[env]
+USE_BAZEL_VERSION = "9.0.2"
+
+[tasks.check]
+run = "cargo xtask check"
+
+[tasks.version]
+run = "cargo xtask version"
+
+[tasks.bump-version]
+run = "cargo xtask bump-version"
+
+[tasks.prepare]
+run = "cargo xtask prepare"
+
+[tasks.fetch-dictionary]
+run = "cargo xtask fetch-dictionary"
+
+[tasks.build-worker]
+run = "cargo xtask build-worker"
+
+[tasks.llm-worker]
+run = "make llm-worker"
+
+[tasks.llm-contract]
+run = "make llm-contract"
+
+[tasks.generate]
+run = "cargo xtask generate"
+
+[tasks.emoji-data]
+run = "make emoji-data"
+
+[tasks.contract]
+env = { RUST_TEST_THREADS = "1" }
+run = ["cargo run -p kanade-eval -- contract", "cargo test -p kanade-eval -- --ignored", "cargo test -p kanade-mozc --test learning --test symbols -- --ignored", "cargo test -p kanade-mozc --lib -- --ignored", "cargo test -p kanade-engine --test contracts --test selection_learning -- --ignored --skip dictionary_", "cargo test -p kanade-engine --test socket -- --ignored", "cargo test -p kanade-engine --test dictionary -- --ignored --skip project_approval_and_rebuild"]
+
+[tasks.learning-contract]
+run = "cargo test -p kanade-engine --test contracts dictionary_ -- --ignored"
+
+[tasks.evaluate]
+run = "cargo run -p kanade-eval -- evaluate"
+
+[tasks.input-regression]
+run = "cargo run -p kanade-eval -- evaluate eval/input-regression.jsonl"
+
+[tasks.project-contract]
+run = "make project-contract"
+
+[tasks.bench]
+run = "cargo run -p kanade-eval -- bench"
+
+[tasks.engine]
+run = "cargo run -p kanade-engine"
+
+[tasks.ui]
+run = "cargo run -p kanade-ui --features native"
+
+[tasks.bundle-macos]
+run = "cargo xtask bundle-macos"
+
+[tasks.install-macos]
+run = "cargo xtask install-macos"
+
+[tasks.depup]
+tools."github:owayo/depup" = "26.10.121"
+run = "depup --rust --mise --exclude hasami --exclude noslop --exclude gpui --exclude gpui_platform --exclude windows --exclude windows-core --exclude llama-cpp-sys-2 --install"

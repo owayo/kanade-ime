@@ -1,0 +1,32 @@
+[package]
+name = "kanade-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Builds the pinned llama.cpp runtime with CMake. Never enabled by default.
+llama = ["dep:llama-cpp-sys-2"]
+# Adds test-only profiles to the registry. For contract tests only: a worker
+# built with it reports another runtime and is refused by an ordinary build.
+fixture-profiles = []
+
+[dependencies]
+kanade-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+libc.workspace = true
+llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "kanade-llm-worker"
+path = "src/bin/worker.rs"
+required-features = ["llama"]
+
+[lints]
+workspace = true

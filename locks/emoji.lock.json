@@ -1,0 +1,63 @@
+{
+  "emojibase": "18.0.0",
+  "emojilib": "4.0.3",
+  "emoji_ja": "37ddb3b708270fdde25a1b0f62c59f525c279cdb",
+  "unicode": "18.0",
+  "files": {
+    "emojibase-ja.json": {
+      "url": "https://cdn.jsdelivr.net/npm/emojibase-data@18.0.0/ja/data.json",
+      "sha256": "8b3cdfd795e07f0175a7f9a16eeefdf5d91a20de8450104ad2e1162dc7515424",
+      "bytes": 785075
+    },
+    "emojibase-en.json": {
+      "url": "https://cdn.jsdelivr.net/npm/emojibase-data@18.0.0/en/data.json",
+      "sha256": "f8c561877ac08c3a33c96d1c02fd064b1dfbe24ddce8b6fd243ecb346ce96913",
+      "bytes": 785573
+    },
+    "emoji-ja.json": {
+      "url": "https://raw.githubusercontent.com/yagays/emoji-ja/37ddb3b708270fdde25a1b0f62c59f525c279cdb/data/emoji_ja.json",
+      "sha256": "9ecc4a9cfbe947e6d1a1799742615a2fc0d77668a5a19258d464bad7467f4656",
+      "bytes": 604240
+    },
+    "emojilib.json": {
+      "url": "https://cdn.jsdelivr.net/npm/emojilib@4.0.3/dist/emoji-en-US.json",
+      "sha256": "7974e9162e1505aa1b02d07a04e4eefa5c51864d6c32e477121c635201e2eca2",
+      "bytes": 264699
+    },
+    "shortcodes-github.json": {
+      "url": "https://cdn.jsdelivr.net/npm/emojibase-data@18.0.0/en/shortcodes/github.json",
+      "sha256": "d6bb7101e7bab1e52b30f4b3562da2319b484a6266352a1119f0d1ba52db23db",
+      "bytes": 45309
+    },
+    "shortcodes-ja.json": {
+      "url": "https://cdn.jsdelivr.net/npm/emojibase-data@18.0.0/ja/shortcodes/cldr-native.json",
+      "sha256": "09d6f4ca5d1645ade81e91ebe0acb4888b99bf6ed109f4f838d8acf17cf3e1b9",
+      "bytes": 168333
+    },
+    "emojibase-LICENSE.txt": {
+      "url": "https://cdn.jsdelivr.net/npm/emojibase-data@18.0.0/LICENSE",
+      "sha256": "5c4e1582dcae9429a5d00ec0a64185c3a711f9757b2308fdf275d90b120f6149",
+      "bytes": 1075
+    },
+    "emojilib-LICENSE.txt": {
+      "url": "https://cdn.jsdelivr.net/npm/emojilib@4.0.3/LICENSE",
+      "sha256": "da00c2955742e85d06f80a34f5142f96a6167df2d8762b2dc5a998c9f919a715",
+      "bytes": 1078
+    },
+    "emoji-ja-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/yagays/emoji-ja/37ddb3b708270fdde25a1b0f62c59f525c279cdb/LICENSE.md",
+      "sha256": "ac502d4ee0e12a84e95e80056d2561c486644a7227a1bb21cad813283e850d4e",
+      "bytes": 1047
+    },
+    "unicode-LICENSE.txt": {
+      "url": "https://www.unicode.org/license.txt",
+      "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
+      "bytes": 1995
+    },
+    "emoji-test.txt": {
+      "url": "https://www.unicode.org/Public/18.0.0/emoji/emoji-test.txt",
+      "sha256": "8f3735cda1f92a779d78af67cf86066bb1f07143dc22f2ac29394d9bc57ab21a",
+      "bytes": 671655
+    }
+  }
+}

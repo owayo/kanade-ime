@@ -1,0 +1,69 @@
+<!-- Copyright (c) .NET Foundation and contributors. All rights reserved. Licensed under the Microsoft Reciprocal License.
+     Japanese adaptation of WiX v4.0.6 HyperlinkTheme.wxl. See WIX-LICENSE.txt.
+     https://github.com/wixtoolset/wix4/blob/v4.0.6/src/ext/Bal/wixstdba/Resources/HyperlinkTheme.wxl -->
+<WixLocalization Culture="ja-jp" Language="1041" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="Caption" Value="[WixBundleName] インストーラー" />
+  <String Id="Title" Value="[WixBundleName]" />
+  <String Id="CheckingForUpdatesLabel" Value="更新を確認中" />
+  <String Id="UpdateButton" Value="[WixStdBAUpdateAvailable]へ更新(&amp;U)" />
+  <String Id="InstallHeader" Value="Kanadeをインストール" />
+  <String Id="InstallMessage" Value="日本語入力IMEのKanadeをインストールします。入力中の文章を確定してから進めてください。導入後はWindowsからサインアウトし、再度サインインしてください。" />
+  <String Id="InstallMessageOptions" Value="日本語入力IMEのKanadeをインストールします。導入後はサインアウトしてから再度サインインしてください。" />
+  <String Id="InstallVersion" Value="バージョン [WixBundleVersion]" />
+  <String Id="ConfirmCancelMessage" Value="インストールを中止しますか？" />
+  <String Id="ExecuteUpgradeRelatedBundleMessage" Value="以前のバージョン" />
+  <String Id="HelpHeader" Value="インストーラーのヘルプ" />
+  <String Id="HelpText" Value="/install: インストール /repair: 修復 /uninstall: 削除 /layout: 展開&#xA;/passive: 簡易表示 /quiet: 画面を表示しない&#xA;/norestart: 自動再起動を抑止 /log ファイル: ログの保存先" />
+  <String Id="HelpCloseButton" Value="閉じる(&amp;C)" />
+  <String Id="InstallLicenseLinkText" Value="[WixBundleName]の&lt;a href=&quot;#&quot;&gt;ライセンス&lt;/a&gt;" />
+  <String Id="InstallAcceptCheckbox" Value="ライセンスに同意する(&amp;A)" />
+  <String Id="InstallOptionsButton" Value="オプション(&amp;O)" />
+  <String Id="InstallInstallButton" Value="インストール(&amp;I)" />
+  <String Id="InstallCancelButton" Value="キャンセル(&amp;C)" />
+  <String Id="OptionsHeader" Value="インストールのオプション" />
+  <String Id="OptionsLocationLabel" Value="インストール先:" />
+  <String Id="OptionsBrowseButton" Value="参照(&amp;B)" />
+  <String Id="OptionsOkButton" Value="決定(&amp;O)" />
+  <String Id="OptionsCancelButton" Value="キャンセル(&amp;C)" />
+  <String Id="ProgressHeader" Value="処理中" />
+  <String Id="ProgressLabel" Value="処理内容:" />
+  <String Id="OverallProgressPackageText" Value="準備中…" />
+  <String Id="ProgressCancelButton" Value="キャンセル(&amp;C)" />
+  <String Id="ModifyHeader" Value="インストールの変更" />
+  <String Id="ModifyRepairButton" Value="修復(&amp;R)" />
+  <String Id="ModifyUninstallButton" Value="アンインストール(&amp;U)" />
+  <String Id="ModifyCancelButton" Value="キャンセル(&amp;C)" />
+  <String Id="SuccessHeader" Value="処理が完了しました" />
+  <String Id="SuccessCacheHeader" Value="準備が完了しました" />
+  <String Id="SuccessInstallHeader" Value="インストールが完了しました" />
+  <String Id="SuccessLayoutHeader" Value="展開が完了しました" />
+  <String Id="SuccessModifyHeader" Value="変更が完了しました" />
+  <String Id="SuccessRepairHeader" Value="修復が完了しました" />
+  <String Id="SuccessUninstallHeader" Value="アンインストールが完了しました" />
+  <String Id="SuccessUnsafeUninstallHeader" Value="アンインストールが完了しました" />
+  <String Id="SuccessLaunchButton" Value="設定方法を開く(&amp;L)" />
+  <String Id="SuccessRestartText" Value="使用を開始する前に、コンピューターを再起動してください。" />
+  <String Id="SuccessUninstallRestartText" Value="削除を完了するため、コンピューターを再起動してください。" />
+  <String Id="SuccessRestartButton" Value="再起動(&amp;R)" />
+  <String Id="SuccessCloseButton" Value="閉じる(&amp;C)" />
+  <String Id="FailureHeader" Value="処理を完了できませんでした" />
+  <String Id="FailureCacheHeader" Value="準備に失敗しました" />
+  <String Id="FailureInstallHeader" Value="インストールに失敗しました" />
+  <String Id="FailureLayoutHeader" Value="展開に失敗しました" />
+  <String Id="FailureModifyHeader" Value="変更に失敗しました" />
+  <String Id="FailureRepairHeader" Value="修復に失敗しました" />
+  <String Id="FailureUninstallHeader" Value="アンインストールに失敗しました" />
+  <String Id="FailureUnsafeUninstallHeader" Value="アンインストールに失敗しました" />
+  <String Id="FailureHyperlinkLogText" Value="問題を解消してからやり直してください。詳しくは&lt;a href=&quot;#&quot;&gt;ログ&lt;/a&gt;を確認してください。" />
+  <String Id="FailureRestartText" Value="元の状態への復元を完了するため、コンピューターを再起動してください。" />
+  <String Id="FailureRestartButton" Value="再起動(&amp;R)" />
+  <String Id="FailureCloseButton" Value="閉じる(&amp;C)" />
+  <String Id="FilesInUseTitle" Value="使用中のファイル" />
+  <String Id="FilesInUseLabel" Value="更新するファイルを次のアプリが使用しています。" />
+  <String Id="FilesInUseNetfxCloseRadioButton" Value="アプリを終了する(&amp;A)" />
+  <String Id="FilesInUseCloseRadioButton" Value="アプリを終了し、処理後に起動し直す(&amp;A)" />
+  <String Id="FilesInUseDontCloseRadioButton" Value="アプリを終了しない（再起動が必要）(&amp;D)" />
+  <String Id="FilesInUseRetryButton" Value="再試行(&amp;R)" />
+  <String Id="FilesInUseIgnoreButton" Value="無視(&amp;I)" />
+  <String Id="FilesInUseExitButton" Value="終了(&amp;X)" />
+</WixLocalization>

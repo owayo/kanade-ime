@@ -1,0 +1,36 @@
+[package]
+name = "kanade-ui"
+version.workspace = true
+edition.workspace = true
+license = "MIT AND Apache-2.0"
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+kanade-ipc.workspace = true
+serde.workspace = true
+toml.workspace = true
+kanade-engine.workspace = true
+kanade-mozc.workspace = true
+kanade-indexer = { path = "../kanade-indexer" }
+serde_json.workspace = true
+noslop.workspace = true
+
+[features]
+default = []
+native = ["dep:gpui", "dep:gpui_platform", "dep:image", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:raw-window-handle", "dep:unicode-segmentation"]
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.12", optional = true }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["runtime_shaders", "font-kit"], optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
+unicode-segmentation = { version = "=1.13.3", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.5", optional = true }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSWindow"], optional = true }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSBundle", "NSDictionary", "NSGeometry", "NSString", "NSValue"], optional = true }
+raw-window-handle = { version = "0.6.2", optional = true }
+
+[lints]
+workspace = true

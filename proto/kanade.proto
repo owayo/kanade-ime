@@ -1,0 +1,39 @@
+syntax = "proto3";
+package kanade;
+
+message Revision { uint64 connection = 1; uint64 context = 2; uint64 composition = 3; }
+message Hello { uint32 min_version = 1; uint32 max_version = 2; }
+// The legacy allowlist stays empty on new engines so older frontends fail closed.
+message Welcome { uint32 version = 1; uint64 connection = 2; repeated string learning_apps = 3; LearningPolicy learning_policy = 4; }
+message LearningPolicy { bool enabled = 1; repeated string excluded_apps = 2; }
+enum Privacy { UNKNOWN = 0; NORMAL = 1; PRIVATE = 2; PASSWORD = 3; }
+enum SpecialKey { NONE = 0; SPACE = 1; ENTER = 2; BACKSPACE = 3; ESCAPE = 4; LEFT = 5; RIGHT = 6; UP = 7; DOWN = 8; TAB = 9; DELETE = 10; HOME = 11; END = 12; }
+message Key { string text = 1; SpecialKey special = 2; uint32 modifiers = 3; }
+message Context { Privacy privacy = 1; string preceding_text = 2; string app = 3; bool surrounding_available = 4; }
+message KeyRequest { Revision revision = 1; uint64 event_seq = 2; Key key = 3; Context context = 4; bool passed_through = 5; }
+message CandidateHandle { uint64 session_epoch = 1; uint64 candidate_revision = 2; uint32 slot = 3; }
+message SelectRequest { Revision revision = 1; uint64 event_seq = 2; CandidateHandle handle = 3; bool submit = 4; }
+message Ack { Revision revision = 1; uint64 event_seq = 2; bool applied = 3; }
+message Reset { uint64 context = 1; }
+// Rebuilds a kana composition in a fresh session after its previous session was lost. The reading is the last one the document acknowledged.
+message RestoreRequest { Revision revision = 1; uint64 event_seq = 2; string reading = 3; Context context = 4; }
+message Manage { enum Action { GET_SETTINGS = 0; SET_SETTINGS = 1; LIST_LEARNING = 2; DELETE_LEARNING = 3; CLEAR_LEARNING = 4; BLOCK_READING = 5; RELOAD_PROJECTS = 6; CLEAR_MOZC_CONVERSION = 7; CLEAR_MOZC_PREDICTION = 8; LIST_MOZC_DICTIONARY = 9; EDIT_MOZC_DICTIONARY = 10; DICTIONARY_JOB_STATUS = 11; CANCEL_DICTIONARY_JOB = 12; PROMOTE_LEARNING = 13; LIST_PROJECTS = 14; EDIT_PROJECT = 15; LLM_STATUS = 16; LLM_IMPORT = 17; LLM_QUALIFY = 18; LLM_REMOVE = 19; PREPARE_PROJECT = 20; START_PROJECT_JOB = 21; PROJECT_JOB_STATUS = 22; CANCEL_PROJECT_JOB = 23; LIST_PROJECT_READINGS = 24; PROJECT_MONITOR_STATUS = 25; SET_LEARNING_APPS = 26 [deprecated = true]; SET_LEARNING_EXCLUSIONS = 27; } Action action = 1; string json = 2; uint64 record_id = 3; uint32 offset = 4; uint64 job_id = 5; }
+// Asks whether a background reordering of the displayed candidates is ready. No event sequence, no acknowledgement.
+message CandidatePoll { Revision revision = 1; uint64 candidate_revision = 2; }
+message Request {
+  oneof body { Hello hello = 1; KeyRequest key = 2; SelectRequest select = 3; Ack ack = 4; Reset reset = 5; bool close = 6; Manage manage = 7; CandidatePoll poll = 8; RestoreRequest restore = 9; }
+}
+message Segment { string reading = 1; string value = 2; bool focused = 3; uint32 value_utf16 = 4; }
+message Preedit { repeated Segment segments = 1; uint32 cursor_utf16 = 2; }
+message Word { string reading = 1; string value = 2; }
+message Commit { string reading = 1; string value = 2; repeated Word words = 3; bool synthetic = 4; bool transient = 5; }
+enum CandidateSource { MOZC = 0; LEARNED = 1; PROJECT = 2; LLM = 3; DATE = 4; EMOJI = 5; }
+message CandidateItem { CandidateHandle handle = 1; string value = 2; string reading = 3; string annotation = 4; CandidateSource source = 5; uint32 number = 6; }
+message CandidatePage { uint64 candidate_revision = 1; uint32 total = 2; uint32 start = 3; uint32 selected = 4; repeated CandidateItem items = 5; string footer = 6; float font_size = 7; bool refinement_pending = 8; }
+message KeyPolicySummary { bool composing = 1; bool enabled = 2; bool can_undo_learning = 3; }
+message KeyReply { Revision revision = 1; uint64 event_seq = 2; uint64 state_revision = 3; bool consumed = 4; Preedit preedit = 5; Commit commit = 6; CandidatePage candidates = 7; KeyPolicySummary key_policy = 8; }
+message Failure { enum Code { INVALID = 0; STALE = 1; SEQUENCE = 2; UNAVAILABLE = 3; PRIVACY = 4; } Code code = 1; }
+message Management { string json = 1; }
+// Replaces the displayed page only. Never carries a commit or a preedit change; the selected surface is unchanged.
+message CandidateUpdate { Revision revision = 1; CandidatePage candidates = 2; bool pending = 3; }
+message Response { oneof body { Welcome welcome = 1; KeyReply key = 2; bool ack = 3; Failure failure = 4; Management management = 5; CandidateUpdate candidates = 6; } }

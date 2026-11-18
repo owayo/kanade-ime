@@ -1,0 +1,97 @@
+{
+  "worker": "Mozc 3.35.6354",
+  "profile": "temporary/private",
+  "cases": 152,
+  "top1_correct": 144,
+  "top9_correct": 150,
+  "domains": {
+    "general": {
+      "cases": 27,
+      "correct": 24,
+      "top1": 0.8888888888888888,
+      "top9_correct": 27,
+      "top9": 1.0,
+      "missed_cases": [
+        2,
+        62,
+        65
+      ],
+      "not_in_top9_cases": []
+    },
+    "input": {
+      "cases": 12,
+      "correct": 12,
+      "top1": 1.0,
+      "top9_correct": 12,
+      "top9": 1.0,
+      "missed_cases": [],
+      "not_in_top9_cases": []
+    },
+    "loanwords": {
+      "cases": 19,
+      "correct": 19,
+      "top1": 1.0,
+      "top9_correct": 19,
+      "top9": 1.0,
+      "missed_cases": [],
+      "not_in_top9_cases": []
+    },
+    "numbers": {
+      "cases": 2,
+      "correct": 0,
+      "top1": 0.0,
+      "top9_correct": 0,
+      "top9": 0.0,
+      "missed_cases": [
+        41,
+        42
+      ],
+      "not_in_top9_cases": [
+        41,
+        42
+      ]
+    },
+    "proper-nouns": {
+      "cases": 18,
+      "correct": 17,
+      "top1": 0.9444444444444444,
+      "top9_correct": 18,
+      "top9": 1.0,
+      "missed_cases": [
+        90
+      ],
+      "not_in_top9_cases": []
+    },
+    "romaji": {
+      "cases": 19,
+      "correct": 18,
+      "top1": 0.9473684210526315,
+      "top9_correct": 19,
+      "top9": 1.0,
+      "missed_cases": [
+        149
+      ],
+      "not_in_top9_cases": []
+    },
+    "sentences": {
+      "cases": 26,
+      "correct": 25,
+      "top1": 0.9615384615384616,
+      "top9_correct": 26,
+      "top9": 1.0,
+      "missed_cases": [
+        51
+      ],
+      "not_in_top9_cases": []
+    },
+    "technical": {
+      "cases": 29,
+      "correct": 29,
+      "top1": 1.0,
+      "top9_correct": 29,
+      "top9": 1.0,
+      "missed_cases": [],
+      "not_in_top9_cases": []
+    }
+  }
+}
