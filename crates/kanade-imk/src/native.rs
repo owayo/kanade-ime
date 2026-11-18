@@ -176,7 +176,6 @@ define_class!(
             guarded(|| {
                 let (Some(event), Some(sender)) = (event, sender) else { return false; };
                 if event.r#type() != NSEventType::KeyDown { return false; }
-                self.stop_refinement();
                 if unsafe { IsSecureEventInputEnabled() } { self.clear_context(); return false; }
                 // JIS Kana is a mode key; its characters can contain a space.
                 if event.keyCode() == 0x68 { return true; }
@@ -192,6 +191,7 @@ define_class!(
                 let context = self.context(sender, &client);
                 let privacy = Privacy::try_from(context.privacy).unwrap_or(Privacy::Unknown);
                 let passed = !client.would_consume(&key, privacy);
+                self.stop_refinement();
                 let consumed = client.key(key, context, passed, &mut NativeDocument { controller:self, sender });
                 // Candidates of a lost session cannot be chosen any more.
                 if client.is_held() { self.hide(); }

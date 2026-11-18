@@ -264,9 +264,9 @@ impl Shared {
                             s.choose(handle);
                         }
                     },
-                    move || {
+                    move |expired| {
                         if let Some(s) = polling.upgrade() {
-                            s.poll_refinement();
+                            s.poll_refinement(expired);
                         }
                     },
                 )
@@ -289,7 +289,7 @@ impl Shared {
             window.stop_refinement();
         }
     }
-    fn poll_refinement(self: &Rc<Self>) {
+    fn poll_refinement(self: &Rc<Self>, expired: bool) {
         let context = self.context.try_borrow().ok().and_then(|c| c.clone());
         let focused = self
             .manager
@@ -312,16 +312,20 @@ impl Shared {
             .try_borrow()
             .is_ok_and(|c| c.privacy == Privacy::Normal as i32)
         {
-            self.stop_refinement();
+            self.hide();
             return;
         }
         let page = self.page.try_borrow().ok().map(|p| p.clone());
-        let Some(page) = page.filter(|p| p.refinement_pending) else {
+        let Some(mut page) = page.filter(|p| p.refinement_pending) else {
             self.stop_refinement();
             return;
         };
         let client = self.client.try_borrow_mut().ok().and_then(|mut c| c.take());
         let Some(mut client) = client else {
+            if expired {
+                page.mark_refinement_timeout();
+                self.show(&page);
+            }
             return;
         };
         let update = client.poll_candidates(&page);
@@ -330,6 +334,10 @@ impl Shared {
         }
         match update {
             Ok(Some(page)) => self.show(&page),
+            Ok(None) if expired => {
+                page.mark_refinement_timeout();
+                self.show(&page);
+            }
             Ok(None) => {}
             Err(_) => self.hide(),
         }
@@ -577,7 +585,6 @@ impl Tip_Impl {
         l: LPARAM,
         passed: bool,
     ) -> Result<bool> {
-        self.shared.stop_refinement();
         let _ = refresh_scope(&self.shared, context);
         if self.shared.password.get() {
             self.shared.suspend_secure();
@@ -605,6 +612,7 @@ impl Tip_Impl {
             .try_borrow()
             .map(|c| c.clone())
             .unwrap_or_default();
+        self.shared.stop_refinement();
         let consumed = client.key(
             key,
             observed,

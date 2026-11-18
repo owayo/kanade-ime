@@ -52,6 +52,33 @@ pub const MOD_CONTROL: u32 = 2;
 pub const MOD_ALT: u32 = 4;
 pub const MOD_META: u32 = 8;
 
+impl CandidatePage {
+    /// Visible feedback for this list. The footer field on the wire holds the reading.
+    pub fn status_line(&self) -> String {
+        let status = if self.refinement_pending {
+            "AI 評価中…"
+        } else {
+            match self.refinement_outcome() {
+                RefinementOutcome::Evaluated => "AI 評価済み",
+                RefinementOutcome::Unavailable => "AI 評価できず・通常候補",
+                RefinementOutcome::TimedOut => "AI 時間切れ・通常候補",
+                RefinementOutcome::Unspecified => "通常候補",
+            }
+        };
+        format!(
+            "{} / {}　{}",
+            self.selected.saturating_add(1),
+            self.total,
+            status
+        )
+    }
+
+    pub fn mark_refinement_timeout(&mut self) {
+        self.refinement_pending = false;
+        self.refinement_outcome = RefinementOutcome::TimedOut as i32;
+    }
+}
+
 /// Known applications learn by default, unless explicitly excluded. An absent
 /// or malformed identity never upgrades an unknown input context to normal.
 pub fn learning_app_allowed(app: &str, excluded: &[String]) -> bool {

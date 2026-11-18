@@ -86,6 +86,7 @@ fn update(page: Option<CandidatePage>, pending: bool, revision: Revision) -> Res
             revision: Some(revision),
             candidates: page,
             pending,
+            ..Default::default()
         })),
     }
 }
@@ -201,6 +202,31 @@ fn pending_and_finished_responses_control_polling_without_replacing_handles() {
     assert_eq!(finished.candidate_revision, 1);
     assert!(client.poll_candidates(&finished).unwrap().is_none());
     assert_eq!(calls.borrow().exchanges.len(), 4);
+}
+
+#[test]
+fn status_updates_preserve_candidates_and_report_the_actual_outcome() {
+    let current = page(1);
+    assert_eq!(current.status_line(), "1 / 3　AI 評価中…");
+    for (outcome, label) in [
+        (RefinementOutcome::Evaluated, "AI 評価済み"),
+        (RefinementOutcome::Unavailable, "AI 評価できず・通常候補"),
+        (RefinementOutcome::TimedOut, "AI 時間切れ・通常候補"),
+        (RefinementOutcome::Unspecified, "通常候補"),
+    ] {
+        let response = Response {
+            body: Some(response::Body::Candidates(CandidateUpdate {
+                revision: Some(revision()),
+                refinement_outcome: outcome as i32,
+                ..Default::default()
+            })),
+        };
+        let (mut client, doc, _) = prepared(vec![Ok(response)]);
+        let finished = client.poll_candidates(&current).unwrap().unwrap();
+        assert_eq!(finished.items, current.items);
+        assert_eq!(finished.status_line(), format!("1 / 3　{label}"));
+        assert_eq!(doc.edits, 1);
+    }
 }
 
 #[test]

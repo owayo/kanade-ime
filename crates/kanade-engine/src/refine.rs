@@ -33,6 +33,7 @@ pub(super) struct Frozen {
     reading: String,
     values: Vec<String>,
     hint: Option<String>,
+    pub(super) evaluated: bool,
 }
 impl Frozen {
     pub(super) fn capture(snapshot: &Snapshot, choices: &[candidates::Choice]) -> Option<Self> {
@@ -46,6 +47,7 @@ impl Frozen {
                 .clone(),
             values: choices.iter().map(|c| c.value.clone()).collect(),
             hint: None,
+            evaluated: false,
         })
     }
     /// Restores the applied order, or reports that the list is a different one.
@@ -91,9 +93,6 @@ impl<C: ConversionEngine> Engine<C> {
         privacy: Privacy,
         preceding: &str,
     ) {
-        let Some(llm) = self.llm.as_deref() else {
-            return;
-        };
         let Some(page) = reply.candidates.as_mut() else {
             return;
         };
@@ -141,7 +140,8 @@ impl<C: ConversionEngine> Engine<C> {
         if !job.valid() {
             return;
         }
-        let Some(job) = llm.submit(job) else {
+        let Some(job) = self.llm.as_deref().and_then(|llm| llm.submit(job)) else {
+            page.refinement_outcome = RefinementOutcome::Unavailable as i32;
             return;
         };
         session.refinement = Some(Refinement {
@@ -163,78 +163,117 @@ impl<C: ConversionEngine> Engine<C> {
         poll: &CandidatePoll,
     ) -> Result<Option<Response>, Code> {
         let revision = poll.revision.ok_or(Code::Invalid)?;
-        let answer = |candidates: Option<CandidatePage>, pending: bool| {
-            Ok(Some(Response {
-                body: Some(response::Body::Candidates(CandidateUpdate {
-                    revision: Some(revision),
-                    candidates,
-                    pending,
-                })),
-            }))
-        };
+        let answer =
+            |candidates: Option<CandidatePage>, pending: bool, outcome: RefinementOutcome| {
+                Ok(Some(Response {
+                    body: Some(response::Body::Candidates(CandidateUpdate {
+                        revision: Some(revision),
+                        candidates,
+                        pending,
+                        refinement_outcome: outcome as i32,
+                    })),
+                }))
+            };
         if revision != session.revision {
-            return answer(None, false);
+            return answer(None, false, RefinementOutcome::Unspecified);
         }
         if let Some(applied) = &session.applied
             && applied.revision == revision
             && applied.previous == poll.candidate_revision
             && applied.page.candidate_revision == session.candidate_revision
         {
-            return answer(Some(applied.page.clone()), false);
+            return answer(
+                Some(applied.page.clone()),
+                false,
+                RefinementOutcome::Evaluated,
+            );
+        }
+        if poll.candidate_revision != session.candidate_revision {
+            return answer(None, false, RefinementOutcome::Unspecified);
         }
         let Some(refinement) = session.refinement.as_ref() else {
-            return answer(None, false);
+            let outcome = session
+                .last_reply
+                .as_ref()
+                .filter(|reply| reply.revision == Some(revision))
+                .and_then(|reply| reply.candidates.as_ref())
+                .filter(|page| {
+                    page.candidate_revision == poll.candidate_revision && !page.refinement_pending
+                })
+                .map(CandidatePage::refinement_outcome)
+                .unwrap_or_default();
+            return answer(None, false, outcome);
         };
-        if poll.candidate_revision != session.candidate_revision {
-            return answer(None, false);
-        }
         let llm = self.llm.as_deref();
-        let usable = self.settings.llm
+        let current = self.settings.llm
             && !session.manual
             && session.snapshot.converting
             && refinement.revision == session.revision
-            && refinement.candidate_revision == session.candidate_revision
-            && refinement.submitted.elapsed() <= Duration::from_millis(limits::RESULT_TTL_MS);
-        let Some(llm) = llm.filter(|_| usable) else {
+            && refinement.candidate_revision == session.candidate_revision;
+        let expired = refinement.submitted.elapsed() > Duration::from_millis(limits::RESULT_TTL_MS);
+        let (page, outcome) = if !current || expired {
             cancel(llm, session);
-            return answer(None, false);
+            (
+                None,
+                if current {
+                    RefinementOutcome::TimedOut
+                } else {
+                    RefinementOutcome::Unspecified
+                },
+            )
+        } else if session.pending.is_some() {
+            // The frontend has not acknowledged the event that built this list.
+            return answer(None, true, RefinementOutcome::Unspecified);
+        } else {
+            match llm.map_or(Poll::Gone, |llm| llm.take(refinement.job)) {
+                Poll::Pending => return answer(None, true, RefinementOutcome::Unspecified),
+                Poll::Gone => {
+                    session.refinement = None;
+                    (None, RefinementOutcome::Unavailable)
+                }
+                Poll::Ready(scores) => {
+                    let refinement = session.refinement.take().ok_or(Code::Invalid)?;
+                    match self.reorder(session, &refinement, &scores) {
+                        Ok(page) => (page, RefinementOutcome::Evaluated),
+                        Err(()) => (None, RefinementOutcome::Unavailable),
+                    }
+                }
+            }
         };
-        // The frontend has not acknowledged the event that built this list.
-        if session.pending.is_some() {
-            return answer(None, true);
-        }
-        match llm.take(refinement.job) {
-            Poll::Pending => answer(None, true),
-            Poll::Gone => {
-                session.refinement = None;
-                answer(None, false)
-            }
-            Poll::Ready(scores) => {
-                let refinement = session.refinement.take();
-                let page = refinement.and_then(|r| self.reorder(session, &r, &scores));
-                answer(page, false)
+        if let Some(last) = session.last_reply.as_mut()
+            && last.revision == Some(revision)
+            && let Some(displayed) = last.candidates.as_mut()
+            && displayed.candidate_revision == poll.candidate_revision
+        {
+            if let Some(updated) = &page {
+                *displayed = updated.clone();
+            } else {
+                displayed.refinement_pending = false;
+                displayed.refinement_outcome = outcome as i32;
             }
         }
+        answer(page, false, outcome)
     }
 
     /// Applies scores to the current list. Returns the new page, or `None`
-    /// when the result is unusable or leaves the order as it is.
+    /// for valid scores that leave the order as it is.
     fn reorder(
         &self,
         session: &mut Session,
         refinement: &Refinement,
         scores: &[Option<f32>],
-    ) -> Option<CandidatePage> {
-        if scores.len() != refinement.slots.len()
+    ) -> Result<Option<CandidatePage>, ()> {
+        if scores.iter().all(Option::is_none)
+            || scores.len() != refinement.slots.len()
             || scores.iter().flatten().any(|score| !score.is_finite())
         {
-            return None;
+            return Err(());
         }
         // Every scored choice must still be the same Mozc choice in the same slot.
         for (slot, value) in refinement.slots.iter().zip(&refinement.values) {
-            let choice = session.choices.get(*slot)?;
+            let choice = session.choices.get(*slot).ok_or(())?;
             if choice.source != CandidateSource::Mozc || choice.value != *value {
-                return None;
+                return Err(());
             }
         }
         let selected = session.selected_choice;
@@ -251,8 +290,24 @@ impl<C: ConversionEngine> Engine<C> {
         let mut ranked = movable.clone();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         if movable.len() < 2 || ranked.iter().map(|r| r.0).eq(movable.iter().map(|m| m.0)) {
-            return None;
+            if session.frozen.is_none() {
+                session.frozen = Frozen::capture(&session.snapshot, &session.choices);
+            }
+            if let Some(order) = &mut session.frozen {
+                order.evaluated = true;
+            }
+            return Ok(None);
         }
+        let next_revision = session.candidate_revision.checked_add(1).ok_or(())?;
+        let segment = session.snapshot.focused_segment;
+        let reading = session
+            .snapshot
+            .preedit
+            .segments
+            .get(segment)
+            .ok_or(())?
+            .reading
+            .clone();
         let previous = session.choices.clone();
         for ((target, _), (source, _)) in movable.iter().zip(&ranked) {
             session.choices[*target] = previous[*source].clone();
@@ -264,32 +319,20 @@ impl<C: ConversionEngine> Engine<C> {
             hint = Some(best.value.clone());
         }
         // Old handles name other slots now; a new revision retires them.
-        session.candidate_revision = session.candidate_revision.checked_add(1)?;
-        let segment = session.snapshot.focused_segment;
+        session.candidate_revision = next_revision;
         session.frozen = Some(Frozen {
             segment,
-            reading: session
-                .snapshot
-                .preedit
-                .segments
-                .get(segment)?
-                .reading
-                .clone(),
+            reading,
+            evaluated: true,
             values: session.choices.iter().map(|c| c.value.clone()).collect(),
             hint,
         });
-        let page = self.page(session, &session.snapshot)?;
-        // A retried key event must describe the list that is displayed now.
-        if let Some(last) = session.last_reply.as_mut()
-            && last.revision == Some(session.revision)
-        {
-            last.candidates = Some(page.clone());
-        }
+        let page = self.page(session, &session.snapshot).ok_or(())?;
         session.applied = Some(Applied {
             revision: session.revision,
             previous: refinement.candidate_revision,
             page: page.clone(),
         });
-        Some(page)
+        Ok(Some(page))
     }
 }

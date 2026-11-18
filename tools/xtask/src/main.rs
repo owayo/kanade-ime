@@ -52,10 +52,12 @@ fn output(command: &mut Command) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_owned())
 }
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
+    // Cargo provides an absolute path. Keep its ordinary Windows spelling for protoc.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
         .expect("workspace")
+        .to_owned()
 }
 fn hash(path: &Path) -> Result<String> {
     use std::io::Read;
@@ -101,6 +103,14 @@ fn generate(root: &Path) -> Result<()> {
         .protoc_executable(compiler)
         .out_dir(target)
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .field_attribute(
+            "kanade.CandidatePage.refinement_outcome",
+            "#[serde(default)]",
+        )
+        .field_attribute(
+            "kanade.CandidateUpdate.refinement_outcome",
+            "#[serde(default)]",
+        )
         .compile_protos(&[root.join("proto/kanade.proto")], &[root.join("proto")])?;
     Ok(())
 }

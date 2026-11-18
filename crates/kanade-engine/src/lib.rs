@@ -887,6 +887,14 @@ impl<C> Engine<C> {
             footer: reading(&snapshot.preedit),
             font_size: self.settings.font_size,
             refinement_pending: false,
+            refinement_outcome: if self.settings.llm
+                && session.privacy == Privacy::Normal
+                && session.frozen.as_ref().is_some_and(|order| order.evaluated)
+            {
+                RefinementOutcome::Evaluated as i32
+            } else {
+                RefinementOutcome::Unspecified as i32
+            },
         })
     }
 }

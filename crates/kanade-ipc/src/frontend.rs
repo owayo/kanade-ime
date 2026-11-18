@@ -299,6 +299,7 @@ impl<T: Transport> Client<T> {
                     None => {
                         let mut finished = current.clone();
                         finished.refinement_pending = false;
+                        finished.refinement_outcome = update.refinement_outcome;
                         Ok(Some(finished))
                     }
                 }

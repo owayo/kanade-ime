@@ -414,6 +414,12 @@ fn nothing_is_queued_when_disabled_or_outside_a_normal_safe_context() {
         let reply = f.convert("こうえん");
         assert_eq!(f.llm.jobs(), 0, "{name}");
         assert!(!page(&reply).refinement_pending, "{name}");
+        let expected = if name == "refused by the service" {
+            RefinementOutcome::Unavailable
+        } else {
+            RefinementOutcome::Unspecified
+        };
+        assert_eq!(page(&reply).refinement_outcome(), expected, "{name}");
         // A poll in such a state is answered cheaply with "nothing".
         let update = f.poll(page(&reply));
         assert!(update.candidates.is_none() && !update.pending, "{name}");
@@ -492,6 +498,7 @@ fn an_update_reorders_unselected_mozc_choices_and_keeps_the_displayed_surface() 
     assert_eq!(values(&after), ["公園", "後援", "公演", "講演"]);
     assert_eq!((after.selected, after.start, after.total), (0, 0, 4));
     assert!(!after.refinement_pending);
+    assert_eq!(after.refinement_outcome(), RefinementOutcome::Evaluated);
     assert!(after.candidate_revision > before.candidate_revision);
     assert!(after.items.iter().all(|item| {
         item.source == CandidateSource::Mozc as i32
@@ -618,10 +625,26 @@ fn unusable_scores_leave_the_list_alone() {
         f.llm.answer(&scores);
         let update = f.poll(page(&reply));
         assert!(update.candidates.is_none() && !update.pending, "{scores:?}");
+        let expected = if scores.len() == 4
+            && scores.iter().flatten().all(|s| s.is_finite())
+            && scores.iter().any(Option::is_some)
+        {
+            RefinementOutcome::Evaluated
+        } else {
+            RefinementOutcome::Unavailable
+        };
+        assert_eq!(update.refinement_outcome(), expected, "{scores:?}");
+        assert_eq!(f.poll(page(&reply)), update);
         // The old handles stay valid because nothing moved.
         let enter = f.special(SpecialKey::Enter);
         assert_eq!(enter.commit.unwrap().value, "公園");
     }
+    let mut f = fixture(settings(true));
+    let reply = f.convert("こうえん");
+    f.llm.0.lock().unwrap().answer = Some(Poll::Gone);
+    let failed = f.poll(page(&reply));
+    assert_eq!(failed.refinement_outcome(), RefinementOutcome::Unavailable);
+    assert_eq!(f.special(SpecialKey::Enter).commit.unwrap().value, "公園");
     // Unscored choices keep their slots while the scored ones are ordered.
     let mut f = fixture(settings(true));
     let reply = f.convert("こうえん");
@@ -707,6 +730,8 @@ fn a_result_older_than_the_display_deadline_is_dropped() {
     ));
     let update = f.poll(page(&reply));
     assert!(update.candidates.is_none() && !update.pending);
+    assert_eq!(update.refinement_outcome(), RefinementOutcome::TimedOut);
+    assert_eq!(f.poll(page(&reply)), update);
     assert_eq!(f.llm.cancelled(), [1]);
     let enter = f.special(SpecialKey::Enter);
     assert_eq!(enter.commit.unwrap().value, "公園");
@@ -740,6 +765,10 @@ fn navigation_after_an_update_keeps_the_order_and_selects_real_candidates() {
     assert_eq!(values(page(&next)), ["公園", "後援", "公演", "講演"]);
     assert_eq!(page(&next).selected, 1);
     assert_eq!(page(&next).items[1].annotation, "文脈");
+    assert_eq!(
+        page(&next).refinement_outcome(),
+        RefinementOutcome::Evaluated
+    );
     assert_eq!(f.calls.lock().unwrap().selects, ["後援"]);
     assert!(!page(&next).refinement_pending);
     assert_eq!(f.llm.jobs(), 1);

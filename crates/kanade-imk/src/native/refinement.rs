@@ -86,11 +86,11 @@ impl Controller {
             return;
         }
         let attempts = self.ivars().refinement.attempts.get();
-        if attempts >= 10 {
-            self.stop_refinement();
-            return;
-        }
-        self.ivars().refinement.attempts.set(attempts + 1);
+        let expired = attempts >= 12;
+        self.ivars()
+            .refinement
+            .attempts
+            .set(attempts.saturating_add(1));
         let page = self.ivars().page.try_borrow().ok().and_then(|p| p.clone());
         let sender = self
             .ivars()
@@ -98,7 +98,7 @@ impl Controller {
             .try_borrow()
             .ok()
             .and_then(|s| s.clone());
-        let (Some(page), Some(sender)) = (page, sender) else {
+        let (Some(mut page), Some(sender)) = (page, sender) else {
             self.stop_refinement();
             return;
         };
@@ -121,6 +121,10 @@ impl Controller {
             .ok()
             .and_then(|mut c| c.take());
         let Some(mut client) = client else {
+            if expired {
+                page.mark_refinement_timeout();
+                self.show(&page, &sender);
+            }
             return;
         };
         let result = client.poll_candidates(&page);
@@ -129,6 +133,10 @@ impl Controller {
         }
         match result {
             Ok(Some(update)) => self.show(&update, &sender),
+            Ok(None) if expired => {
+                page.mark_refinement_timeout();
+                self.show(&page, &sender);
+            }
             Ok(None) => {}
             Err(_) => self.hide(),
         }

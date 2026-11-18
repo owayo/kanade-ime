@@ -36,7 +36,10 @@ pub(super) fn content(
     let row_height = font_size + 12.0;
     let footer_height = 25.0;
     let height = page.items.len() as f64 * row_height + footer_height + 8.0;
-    let mut width = 200.0_f64;
+    let footer = NSTextField::labelWithString(&NSString::from_str(&page.status_line()), mtm);
+    footer.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    footer.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    let mut width = 200.0_f64.max(footer.fittingSize().width + 24.0);
     let mut buttons = Vec::new();
     for (row, item) in page.items.iter().enumerate() {
         let selected = page.start + row as u32 == page.selected;
@@ -106,12 +109,6 @@ pub(super) fn content(
         ));
         view.addSubview(&button);
     }
-    let footer = NSTextField::labelWithString(
-        &NSString::from_str(&format!("{} / {}", page.selected + 1, page.total)),
-        mtm,
-    );
-    footer.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    footer.setFont(Some(&NSFont::systemFontOfSize(11.0)));
     footer.setFrame(NSRect::new(
         NSPoint::new(12.0, 5.0),
         NSSize::new(width - 24.0, footer_height - 5.0),

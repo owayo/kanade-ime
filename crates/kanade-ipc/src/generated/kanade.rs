@@ -376,6 +376,9 @@ pub struct CandidatePage {
     pub font_size: f32,
     #[prost(bool, tag = "8")]
     pub refinement_pending: bool,
+    #[prost(enumeration = "RefinementOutcome", tag = "9")]
+    #[serde(default)]
+    pub refinement_outcome: i32,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -478,6 +481,9 @@ pub struct CandidateUpdate {
     pub candidates: ::core::option::Option<CandidatePage>,
     #[prost(bool, tag = "3")]
     pub pending: bool,
+    #[prost(enumeration = "RefinementOutcome", tag = "4")]
+    #[serde(default)]
+    pub refinement_outcome: i32,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -632,6 +638,39 @@ impl CandidateSource {
             "LLM" => Some(Self::Llm),
             "DATE" => Some(Self::Date),
             "EMOJI" => Some(Self::Emoji),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RefinementOutcome {
+    Unspecified = 0,
+    Evaluated = 1,
+    Unavailable = 2,
+    TimedOut = 3,
+}
+impl RefinementOutcome {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REFINEMENT_OUTCOME_UNSPECIFIED",
+            Self::Evaluated => "REFINEMENT_OUTCOME_EVALUATED",
+            Self::Unavailable => "REFINEMENT_OUTCOME_UNAVAILABLE",
+            Self::TimedOut => "REFINEMENT_OUTCOME_TIMED_OUT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REFINEMENT_OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+            "REFINEMENT_OUTCOME_EVALUATED" => Some(Self::Evaluated),
+            "REFINEMENT_OUTCOME_UNAVAILABLE" => Some(Self::Unavailable),
+            "REFINEMENT_OUTCOME_TIMED_OUT" => Some(Self::TimedOut),
             _ => None,
         }
     }

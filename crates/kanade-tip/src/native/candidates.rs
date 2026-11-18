@@ -27,7 +27,7 @@ struct Paint {
     fonts: IDWriteFactory,
     target: RefCell<Option<ID2D1HwndRenderTarget>>,
     select: Box<dyn Fn(ipc::CandidateHandle)>,
-    poll: Box<dyn Fn()>,
+    poll: Box<dyn Fn(bool)>,
     polls: Cell<u8>,
 }
 fn text_format(fonts: &IDWriteFactory, size: f32) -> Result<IDWriteTextFormat> {
@@ -57,7 +57,7 @@ impl CandidateWindow {
     pub fn new(
         owner: HWND,
         select: impl Fn(ipc::CandidateHandle) + 'static,
-        poll: impl Fn() + 'static,
+        poll: impl Fn(bool) + 'static,
     ) -> Result<Self> {
         let module = HINSTANCE(MODULE.load(Ordering::Acquire) as *mut c_void);
         let mut users = CLASS_USERS.lock().map_err(|_| failure())?;
@@ -219,14 +219,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 Rc::increment_strong_count(state);
             }
             let state = unsafe { Rc::from_raw(state) };
-            if state.polls.get() >= 10 {
+            let expired = state.polls.get() >= 12;
+            if expired {
                 unsafe {
                     let _ = KillTimer(Some(hwnd), 1);
                 }
             } else {
                 state.polls.set(state.polls.get() + 1);
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (state.poll)()));
             }
+            let _ =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (state.poll)(expired)));
             return LRESULT(0);
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
@@ -367,9 +369,7 @@ impl Paint {
                 );
             }
         }
-        let footer: Vec<u16> = format!("{}/{}", page.selected + 1, page.total)
-            .encode_utf16()
-            .collect();
+        let footer: Vec<u16> = page.status_line().encode_utf16().collect();
         let top = page.items.len() as f32 * row_height;
         unsafe {
             rt.DrawText(

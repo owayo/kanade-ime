@@ -15,7 +15,11 @@ impl Element {
 }
 impl ITfUIElement_Impl for Element_Impl {
     fn GetDescription(&self) -> Result<BSTR> {
-        Ok("Kanade candidates".into())
+        let shared = self.shared.upgrade().ok_or_else(failure)?;
+        let page = shared.page.try_borrow().map_err(|_| failure())?;
+        Ok(format!("Kanade 候補　{}", page.status_line())
+            .as_str()
+            .into())
     }
     fn GetGUID(&self) -> Result<GUID> {
         Ok(GUID::from_u128(0x0e4ba76b_d2c4_4080_aa0c_7acd3d67a356))
