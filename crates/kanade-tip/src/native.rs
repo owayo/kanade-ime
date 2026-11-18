@@ -24,6 +24,7 @@ use windows_core::IUnknownImpl;
 mod attributes;
 mod candidates;
 mod input_mode;
+mod mode_hint;
 mod registration;
 mod uiless;
 use candidates::CandidateWindow;
@@ -81,6 +82,7 @@ struct Shared {
     password: Cell<bool>,
     preedit: RefCell<Preedit>,
     window: RefCell<Option<CandidateWindow>>,
+    mode_hint: RefCell<Option<mode_hint::Hint>>,
     caret: Cell<RECT>,
     owner: Cell<HWND>,
 }
@@ -104,6 +106,7 @@ impl Shared {
             password: Cell::new(true),
             preedit: RefCell::new(Preedit::default()),
             window: RefCell::new(None),
+            mode_hint: RefCell::new(None),
             caret: Cell::new(RECT::default()),
             owner: Cell::new(HWND::default()),
         })
@@ -154,6 +157,9 @@ impl Shared {
         }
     }
     fn reset(self: &Rc<Self>) {
+        if let Ok(mut hint) = self.mode_hint.try_borrow_mut() {
+            hint.take();
+        }
         if let Ok(mut keys) = self.eaten_keys.try_borrow_mut() {
             keys.clear();
         }
@@ -382,6 +388,7 @@ struct Tip {
     sink_cookie: Cell<Option<u32>>,
     mode: RefCell<Option<input_mode::Mode>>,
     japanese: Cell<bool>,
+    show_mode_hint: Cell<bool>,
     _guard: ModuleGuard,
 }
 impl Tip {
@@ -391,6 +398,7 @@ impl Tip {
             sink_cookie: Cell::new(None),
             mode: RefCell::new(None),
             japanese: Cell::new(false),
+            show_mode_hint: Cell::new(true),
             _guard: ModuleGuard::new(),
         }
     }
@@ -426,8 +434,10 @@ impl ITfTextInputProcessor_Impl for Tip_Impl {
     }
 }
 impl ITfTextInputProcessorEx_Impl for Tip_Impl {
-    fn ActivateEx(&self, manager: Ref<ITfThreadMgr>, tid: u32, _flags: u32) -> Result<()> {
+    fn ActivateEx(&self, manager: Ref<ITfThreadMgr>, tid: u32, flags: u32) -> Result<()> {
         let manager = manager.ok()?;
+        self.show_mode_hint
+            .set(flags & (TF_TMAE_UIELEMENTENABLEDONLY | TF_TMAE_SECUREMODE) == 0);
         if let Ok(mut ui) = self.shared.ui_manager.try_borrow_mut() {
             *ui = manager.cast::<ITfUIElementMgr>().ok();
         }
@@ -525,7 +535,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
     fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
         if let Some(command) = input_mode::physical(w.0) {
             if l.0 & (1 << 30) == 0 {
-                self.set_input_mode(command)?;
+                self.set_input_mode(command, context.as_ref())?;
             }
             self.shared.eaten_keys.borrow_mut().insert(w.0);
             return Ok(true.into());
@@ -563,20 +573,34 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             .is_ok_and(|mut keys| keys.remove(&w.0))
             .into())
     }
-    fn OnPreservedKey(&self, _: Ref<ITfContext>, guid: *const GUID) -> Result<BOOL> {
+    fn OnPreservedKey(&self, context: Ref<ITfContext>, guid: *const GUID) -> Result<BOOL> {
         if let Some(command) = unsafe { guid.as_ref() }.and_then(input_mode::preserved) {
-            self.set_input_mode(command)?;
+            self.set_input_mode(command, context.as_ref())?;
             return Ok(true.into());
         }
         Ok(false.into())
     }
 }
 impl Tip_Impl {
-    fn set_input_mode(&self, command: input_mode::Command) -> Result<()> {
+    fn set_input_mode(
+        &self,
+        command: input_mode::Command,
+        context: Option<&ITfContext>,
+    ) -> Result<()> {
         if let Some(mode) = self.mode.borrow().as_ref() {
             mode.apply(self.shared.tid.get(), command)?;
         }
-        self.OnChange(std::ptr::null())
+        self.OnChange(std::ptr::null())?;
+        if self.show_mode_hint.get()
+            && let Some(context) = context
+        {
+            let hint =
+                mode_hint::Hint::at_selection(context, self.shared.tid.get(), self.japanese.get());
+            if let Ok(mut previous) = self.shared.mode_hint.try_borrow_mut() {
+                *previous = hint.ok();
+            }
+        }
+        Ok(())
     }
     fn process_key(
         &self,

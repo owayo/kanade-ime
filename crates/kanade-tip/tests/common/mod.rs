@@ -103,8 +103,22 @@ pub fn with_rich_edit(
             exercise(window, &keys, &context, &open)
         }));
         windows::Win32::UI::Input::KeyboardAndMouse::SetKeyboardState(&keyboard)?;
-        open.SetValue(tid, &old_open)?;
-        conversion.SetValue(tid, &old_conversion)?;
+        // TSF rejects SetValue(VT_EMPTY). A new thread can have empty compartments
+        // before its first switch; restore that state with ClearCompartment.
+        for (guid, slot, saved) in [
+            (&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &open, &old_open),
+            (
+                &GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
+                &conversion,
+                &old_conversion,
+            ),
+        ] {
+            if saved.Anonymous.Anonymous.vt == windows::Win32::System::Variant::VT_EMPTY {
+                slots.ClearCompartment(tid, guid)?;
+            } else {
+                slot.SetValue(tid, saved)?;
+            }
+        }
         DestroyWindow(window)?;
         manager.Deactivate()?;
         match check {

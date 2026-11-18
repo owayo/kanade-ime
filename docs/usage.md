@@ -278,4 +278,4 @@ cargo run -p kanade-ui -- assist-json < draft.txt
 
 ## ライセンス
 
-Kanade 独自のコードは [MIT](../LICENSE) です。依存コードと辞書には、それぞれのライセンスが適用されます。[第三者のライセンス表示](third-party.md)を参照してください。Windows インストーラには Tsumugi S を同梱します。
+Kanade 独自のコードは [MIT](../LICENSE) です。依存コードと辞書には、それぞれのライセンスが適用されます。[第三者のライセンス表示](third-party.md)を参照してください。Windows の EXE と macOS の DMG は Tsumugi S を同梱しています。
