@@ -132,19 +132,25 @@ jobs:
           rustup target add i686-pc-windows-msvc
           cargo build --release --locked --target i686-pc-windows-msvc -p kanade-tip
       - name: Build the Windows installer
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && (hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') != '' || vars.KANADE_TSUMUGI_MODEL_URL != '')
         shell: pwsh
+        env:
+          KANADE_TSUMUGI_MODEL_URL: ${{ vars.KANADE_TSUMUGI_MODEL_URL }}
         run: ./.github/scripts/package-windows.ps1 -Unsigned
       - name: Test Windows installation and rollback
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && (hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') != '' || vars.KANADE_TSUMUGI_MODEL_URL != '')
         shell: pwsh
         run: ./.github/scripts/test-windows-installer.ps1
       - uses: actions/upload-artifact@v7
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && (hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') != '' || vars.KANADE_TSUMUGI_MODEL_URL != '')
         with:
           path: artifacts/release/kanade-ime-x86_64-pc-windows-msvc.exe
           archive: false
           if-no-files-found: error
+      - name: Report local installer build requirement
+        if: runner.os == 'Windows' && hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') == '' && vars.KANADE_TSUMUGI_MODEL_URL == ''
+        shell: pwsh
+        run: Write-Output 'Building a distributable EXE requires the pinned Tsumugi model. Native code, registration and installer authoring are tested independently.'
       - uses: actions/upload-artifact@v7
         if: ${{ failure() && runner.os == 'Windows' }}
         with:

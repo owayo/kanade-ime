@@ -101,6 +101,20 @@ impl Settings {
             cx.notify();
             return;
         }
+        #[cfg(windows)]
+        {
+            let path = std::env::current_exe().ok().and_then(|exe| {
+                Some(
+                    exe.parent()?
+                        .join("models")
+                        .join("kanade-tsumugi-v0.1.0-s-F16.gguf"),
+                )
+            });
+            if let Some(path) = path.filter(|p| p.is_file()) {
+                self.model_operation(move || crate::models::import(&path, &model, true, true), cx);
+                return;
+            }
+        }
         let chooser = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -192,7 +206,7 @@ impl Settings {
                             .inactive(busy)
                             .child(format!("{} カーソル直前の最大40文字・読み・候補を端末内のモデルで処理することに同意します。", if self.model_selection.local_processing { "☑" } else { "☐" }))
                             .on_click(cx.listener(|this, _, _, cx| { if !this.model_busy { this.model_selection.local_processing = !this.model_selection.local_processing; cx.notify(); } })))
-                        .child(button("import-model", "GGUFファイルを選んで取り込む…", "取得したGGUFモデルを取り込む")
+                        .child(button("import-model", "Tsumugi を取り込む", "Tsumugi モデルを検証して取り込む")
                             .when(busy || !self.model_selection.accepted(model), |v| v.opacity(0.5))
                             .inactive(busy || !self.model_selection.accepted(model))
                             .on_click(cx.listener(|this, _, _, cx| this.choose_model(cx))))

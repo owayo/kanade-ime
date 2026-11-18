@@ -1,4 +1,4 @@
-param([switch]$Unsigned)
+param([switch]$Unsigned, [string]$ModelPath = $env:KANADE_TSUMUGI_GGUF)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 function Run-Native([scriptblock]$Command) {
@@ -12,6 +12,15 @@ function Run-Wix([scriptblock]$Command) {
         $env:DOTNET_ROLL_FORWARD = 'Major'
         Run-Native $Command
     } finally { $env:DOTNET_ROLL_FORWARD = $previousRollForward }
+}
+
+if (-not $ModelPath -and $env:KANADE_TSUMUGI_MODEL_URL -and
+    -not (Test-Path -LiteralPath 'models/kanade-tsumugi-v0.1.0-s-F16.gguf')) {
+    $uri = [uri]$env:KANADE_TSUMUGI_MODEL_URL
+    if ($uri.Scheme -ne 'https') { throw 'The model source must use HTTPS.' }
+    $directory = New-Item -ItemType Directory -Force artifacts/models
+    $ModelPath = Join-Path $directory.FullName 'kanade-tsumugi-v0.1.0-s-F16.gguf'
+    Invoke-WebRequest -Uri $uri -OutFile $ModelPath
 }
 
 Run-Native { rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc }
@@ -30,6 +39,9 @@ function Sign-File([string]$Path) {
     if ($result.Status -ne 'Valid') { throw 'Authenticode signing failed' }
 }
 Get-ChildItem $payload -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' } | ForEach-Object { Sign-File $_.FullName }
+$modelArgs = @()
+if ($ModelPath) { $modelArgs = @('--model', $ModelPath) }
+Run-Native { python .github/scripts/stage-windows-model.py @modelArgs }
 Run-Native { python .github/scripts/windows-payload.py }
 Run-Native { dotnet tool install wix --version 4.0.6 --tool-path artifacts/wix }
 Run-Wix { ./artifacts/wix/wix.exe extension add --global WixToolset.Bal.wixext/4.0.6 }

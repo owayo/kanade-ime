@@ -7,8 +7,8 @@
   <String Id="CheckingForUpdatesLabel" Value="更新を確認中" />
   <String Id="UpdateButton" Value="[WixStdBAUpdateAvailable]へ更新(&amp;U)" />
   <String Id="InstallHeader" Value="Kanadeをインストール" />
-  <String Id="InstallMessage" Value="日本語入力IMEのKanadeをインストールします。入力中の文章を確定してから進めてください。導入後はWindowsからサインアウトし、再度サインインしてください。" />
-  <String Id="InstallMessageOptions" Value="日本語入力IMEのKanadeをインストールします。導入後はサインアウトしてから再度サインインしてください。" />
+  <String Id="InstallMessage" Value="日本語入力IMEのKanadeと文脈モデルTsumugi Sをインストールします。入力中の文章を確定してから進めてください。導入後はWindowsからサインアウトし、再度サインインしてください。" />
+  <String Id="InstallMessageOptions" Value="日本語入力IMEのKanadeと文脈モデルTsumugi Sをインストールします。導入後はサインアウトしてから再度サインインしてください。" />
   <String Id="InstallVersion" Value="バージョン [WixBundleVersion]" />
   <String Id="ConfirmCancelMessage" Value="インストールを中止しますか？" />
   <String Id="ExecuteUpgradeRelatedBundleMessage" Value="以前のバージョン" />
@@ -41,7 +41,7 @@
   <String Id="SuccessRepairHeader" Value="修復が完了しました" />
   <String Id="SuccessUninstallHeader" Value="アンインストールが完了しました" />
   <String Id="SuccessUnsafeUninstallHeader" Value="アンインストールが完了しました" />
-  <String Id="SuccessLaunchButton" Value="設定方法を開く(&amp;L)" />
+  <String Id="SuccessLaunchButton" Value="Kanade の設定を開く(&amp;L)" />
   <String Id="SuccessRestartText" Value="使用を開始する前に、コンピューターを再起動してください。" />
   <String Id="SuccessUninstallRestartText" Value="削除を完了するため、コンピューターを再起動してください。" />
   <String Id="SuccessRestartButton" Value="再起動(&amp;R)" />

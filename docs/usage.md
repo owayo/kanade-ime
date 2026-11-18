@@ -81,9 +81,11 @@ JIS 英数キーを押すと、未確定文字の文書への反映を確認し�
 
 入力メニューと入力位置の切り替え表示にも、トレイと同じ画像を指定しています。更新後も古い「K」が残る場合は、入力ソースを選び直してください。入力位置の表示には別のキャッシュがあるため、残る場合はログアウト・ログイン後に確認してください。
 
+Windows では「半角／全角」でかな入力と半角英数の直接入力を切り替えます。英語配列では Alt とバッククォートの同時押しも使えます。IME オン・オフ専用キーに対応します。直接入力中の英字・数字・記号・スペースは、そのままアプリに入ります。
+
 未確定文字があるときは、F6〜F10で順に、ひらがな・全角カタカナ・半角カタカナ・全角英数・半角英数へ変換できます。Ctrl+U / I / O / P / Tも同じ操作です。確定後や修飾付きFキーはアプリへ渡します。Macのキーボード設定によってはfnキーとの同時押しが必要です。
 
-`make bundle` は `artifacts/macos.noindex/Kanade.app` までを生成します。`cargo xtask bundle-macos --debug` で開発用ビルドも作れます。設定アプリは `Contents/Helpers/Settings.app`、エンジンは `Contents/MacOS/kanade-engine` に入ります。これはローカル導入用の手順です。配布用の公証済みインストーラと、Windows のインストーラは残作業です。
+`make bundle` は `artifacts/macos.noindex/Kanade.app` までを生成します。`cargo xtask bundle-macos --debug` で開発用ビルドも作れます。設定アプリは `Contents/Helpers/Settings.app`、エンジンは `Contents/MacOS/kanade-engine` に入ります。これはローカル導入用の手順です。Windows への導入は [配布とインストール](distribution.md) を参照してください。
 
 バンドル外で開発する場合は、エンジンと設定画面の両方に `KANADE_ALLOW_UNSIGNED=1` を明示して起動できます。この例外は debug ビルドだけで有効です。
 
@@ -162,7 +164,7 @@ KANADE_UI="$HOME/Library/Input Methods/Kanade.app/Contents/Helpers/Settings.app/
 
 Kanade の候補採点には Tsumugi S を使います。「ローカルAI」の設定で利用条件を確認して、対応する GGUF を取り込みます。
 
-Windows でこのリポジトリの `install.bat` を使う場合は、セットアップ EXE を `artifacts/release/` に、モデル `kanade-tsumugi-v0.1.0-s-F16.gguf` を `artifacts/models/` に置きます。どちらもバッチと同じディレクトリから読み込めます。インストール後にモデルと端末内処理に同意すると、検証と有効化が進みます。`Win + Space` で入力方式を Kanade に切り替えます。
+Windows 版のセットアップ EXE には Tsumugi S が入っています。完了画面で「Kanade の設定を開く」を選び、「ローカルAI」で利用条件と端末内処理に同意して「Tsumugi を取り込む」を押してください。検証が通ったら「並べ替えを有効にする」を押します。`install.bat` でも同じセットアップを実行できます。
 
 取り込み時にサイズとSHA-256を照合し、モデルごとの文字処理、候補の評価結果、応答時間を検証します。検証を通過してから「並べ替えを有効にする」を押します。推論プログラムやモデルの設定が更新された場合は、モデルを再検証してください。ビルド方法と検証基準は[ローカルAIの仕様](llm.md)を参照してください。
 
@@ -276,4 +278,4 @@ cargo run -p kanade-ui -- assist-json < draft.txt
 
 ## ライセンス
 
-Kanade 独自のコードは [MIT](../LICENSE) です。依存コードと辞書には、それぞれのライセンスが適用されます。[第三者のライセンス表示](third-party.md)を参照してください。モデルは同梱していません。
+Kanade 独自のコードは [MIT](../LICENSE) です。依存コードと辞書には、それぞれのライセンスが適用されます。[第三者のライセンス表示](third-party.md)を参照してください。Windows インストーラには Tsumugi S を同梱します。

@@ -8,13 +8,12 @@ if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw 'The Kanade in
 $modelPath = (Resolve-Path -LiteralPath $Model).Path
 
 function Get-State {
+    $ErrorActionPreference = 'Continue'
     $json = & $ui models status 2>$null
     if ($LASTEXITCODE -eq 0) { return ($json | Out-String | ConvertFrom-Json) }
 }
 
-if (-not (Get-Process -Name kanade-engine -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $engine })) {
-    Start-Process -FilePath $engine -WindowStyle Hidden
-}
+& (Join-Path $PSScriptRoot 'start-engine.ps1')
 $deadline = [DateTime]::UtcNow.AddSeconds(40)
 do {
     $state = Get-State

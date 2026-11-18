@@ -23,6 +23,7 @@ use windows::{
 use windows_core::IUnknownImpl;
 mod attributes;
 mod candidates;
+mod input_mode;
 mod registration;
 mod uiless;
 use candidates::CandidateWindow;
@@ -114,9 +115,16 @@ impl Shared {
             if c.as_mut().is_some_and(|c| !c.needs_transport()) {
                 return;
             }
-            let pipe = module_path()
-                .ok()
-                .and_then(|p| Pipe::connect(&p.with_file_name("kanade-engine.exe")).ok());
+            let pipe = module_path().ok().and_then(|p| {
+                let folder = p.parent()?;
+                // The 32-bit TIP ships in x86/ under the engine's directory.
+                let root = if folder.file_name().is_some_and(|name| name == "x86") {
+                    folder.parent()?
+                } else {
+                    folder
+                };
+                Pipe::connect(&root.join("kanade-engine.exe")).ok()
+            });
             match (c.as_mut(), pipe) {
                 (Some(client), Some(pipe)) => {
                     let _ = client.reattach(pipe);
@@ -356,6 +364,7 @@ impl Shared {
 #[implement(
     ITfTextInputProcessorEx,
     ITfKeyEventSink,
+    ITfCompartmentEventSink,
     ITfThreadMgrEventSink,
     ITfCompositionSink,
     ITfDisplayAttributeProvider
@@ -363,6 +372,8 @@ impl Shared {
 struct Tip {
     shared: Rc<Shared>,
     sink_cookie: Cell<Option<u32>>,
+    mode: RefCell<Option<input_mode::Mode>>,
+    japanese: Cell<bool>,
     _guard: ModuleGuard,
 }
 impl Tip {
@@ -370,6 +381,8 @@ impl Tip {
         Self {
             shared: Shared::new(),
             sink_cookie: Cell::new(None),
+            mode: RefCell::new(None),
+            japanese: Cell::new(false),
             _guard: ModuleGuard::new(),
         }
     }
@@ -379,6 +392,8 @@ impl ITfTextInputProcessor_Impl for Tip_Impl {
         self.ActivateEx(manager, tid, 0)
     }
     fn Deactivate(&self) -> Result<()> {
+        let mode = self.mode.borrow_mut().take();
+        drop(mode);
         self.shared.reset();
         if let Some(manager) = self
             .shared
@@ -418,6 +433,7 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
         if let Ok(mut slot) = self.shared.manager.try_borrow_mut() {
             *slot = Some(manager.clone());
         }
+        let mode = input_mode::Mode::attach(manager, tid, &self.to_interface())?;
         let keys = manager.cast::<ITfKeystrokeMgr>()?;
         let sink: ITfKeyEventSink = self.to_interface();
         unsafe {
@@ -425,9 +441,27 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
         }
         let source = manager.cast::<ITfSource>()?;
         let sink: ITfThreadMgrEventSink = self.to_interface();
-        let cookie = unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &sink)? };
+        let cookie =
+            unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &sink) }.inspect_err(|_| {
+                let _ = unsafe { keys.UnadviseKeyEventSink(tid) };
+            })?;
         self.sink_cookie.set(Some(cookie));
-        self.shared.connect();
+        self.japanese.set(mode.japanese());
+        *self.mode.borrow_mut() = Some(mode);
+        if self.japanese.get() {
+            self.shared.connect();
+        }
+        Ok(())
+    }
+}
+impl ITfCompartmentEventSink_Impl for Tip_Impl {
+    fn OnChange(&self, _: *const GUID) -> Result<()> {
+        if let Some(mode) = self.mode.borrow().as_ref() {
+            let japanese = mode.japanese();
+            if self.japanese.replace(japanese) && !japanese {
+                self.shared.reset();
+            }
+        }
         Ok(())
     }
 }
@@ -439,6 +473,12 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         Ok(())
     }
     fn OnTestKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        if input_mode::physical(w.0).is_some() {
+            return Ok(true.into());
+        }
+        if !self.japanese.get() {
+            return Ok(false.into());
+        }
         let context = context.ok()?;
         let _ = refresh_scope(&self.shared, context);
         if self.shared.password.get() {
@@ -475,6 +515,16 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             .into())
     }
     fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        if let Some(command) = input_mode::physical(w.0) {
+            if l.0 & (1 << 30) == 0 {
+                self.set_input_mode(command)?;
+            }
+            self.shared.eaten_keys.borrow_mut().insert(w.0);
+            return Ok(true.into());
+        }
+        if !self.japanese.get() {
+            return Ok(false.into());
+        }
         let context = context.ok()?;
         let signature = (
             unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageTime() },
@@ -505,11 +555,21 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             .is_ok_and(|mut keys| keys.remove(&w.0))
             .into())
     }
-    fn OnPreservedKey(&self, _: Ref<ITfContext>, _: *const GUID) -> Result<BOOL> {
+    fn OnPreservedKey(&self, _: Ref<ITfContext>, guid: *const GUID) -> Result<BOOL> {
+        if let Some(command) = unsafe { guid.as_ref() }.and_then(input_mode::preserved) {
+            self.set_input_mode(command)?;
+            return Ok(true.into());
+        }
         Ok(false.into())
     }
 }
 impl Tip_Impl {
+    fn set_input_mode(&self, command: input_mode::Command) -> Result<()> {
+        if let Some(mode) = self.mode.borrow().as_ref() {
+            mode.apply(self.shared.tid.get(), command)?;
+        }
+        self.OnChange(std::ptr::null())
+    }
     fn process_key(
         &self,
         context: &ITfContext,

@@ -11,17 +11,19 @@ start "" /wait "%setup%" /install /passive /norestart
 set "status=%errorlevel%"
 if "%status%"=="3010" echo Kanade is installed. Restart Windows to finish.
 if not "%status%"=="0" exit /b %status%
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0packaging\windows\enable-profile.ps1"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%ProgramW6432%\Kanade\enable-profile.ps1"
 if errorlevel 1 exit /b 1
 echo Kanade IME is installed. Select Kanade in the Japanese input methods.
-set "model=%~dp0artifacts\models\kanade-tsumugi-v0.1.0-s-F16.gguf"
-if not exist "%model%" set "model=%~dp0kanade-tsumugi-v0.1.0-s-F16.gguf"
-if not exist "%model%" exit /b 0
+set "model=%ProgramW6432%\Kanade\models\kanade-tsumugi-v0.1.0-s-F16.gguf"
+if not exist "%model%" (
+    echo Bundled Tsumugi model is missing. Repair the installation.
+    exit /b 2
+)
 if /i "%~1"=="--accept-tsumugi-terms" goto configure
 echo Tsumugi uses LicenseRef-Kanade-Model-1.0. It processes the reading, candidates
 echo and up to 40 preceding characters on this computer.
 choice /m "Accept the model terms and local processing and enable Tsumugi"
 if not "%errorlevel%"=="1" exit /b 0
 :configure
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0packaging\windows\enable-tsumugi.ps1" -Model "%model%"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%ProgramW6432%\Kanade\enable-tsumugi.ps1" -Model "%model%"
 exit /b %errorlevel%

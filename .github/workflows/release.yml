@@ -177,6 +177,8 @@ jobs:
       - name: Package and sign Windows
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          KANADE_TSUMUGI_MODEL_URL: ${{ vars.KANADE_TSUMUGI_MODEL_URL }}
         run: ./.github/scripts/package-windows.ps1
       - name: Verify Windows installation and rollback
         if: runner.os == 'Windows'

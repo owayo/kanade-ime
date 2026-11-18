@@ -62,6 +62,10 @@ try {
     $engine = $null
     try {
         $application = Join-Path $env:ProgramFiles Kanade
+        $model = Join-Path $application 'models/kanade-tsumugi-v0.1.0-s-F16.gguf'
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $model).Hash
+        $locked = Get-Content locks/llm.lock.toml -Raw
+        if (-not ($locked -match ('(?m)^sha256 = "' + $hash + '"$'))) { throw 'Installed model digest does not match lock' }
         $engine = Start-Process (Join-Path $application kanade-engine.exe) -PassThru -NoNewWindow -RedirectStandardOutput artifacts/windows/engine-out.log -RedirectStandardError artifacts/windows/engine-error.log
         $ready = $false
         for ($attempt = 0; $attempt -lt 5; $attempt++) {

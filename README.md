@@ -73,7 +73,7 @@ make install
 `make install` は `INSTALL_DIR` にアプリを入れます (既定の場所は `Makefile` にあります)。場所を変えるときは `INSTALL_DIR` を指定します。
 <!-- standard:install:end -->
 
-Windowsでは、ビルド済みのセットアップがあるチェックアウトで `install.bat` を実行できます。配布EXEをバッチの隣に置いても実行できます。
+Windows のセットアップ EXE は Tsumugi S を同梱しています。「半角／全角」でかな入力と半角英数を切り替えられます。ビルド済みのセットアップがあるチェックアウトで `install.bat` を実行できます。配布EXEをバッチの隣に置いても実行できます。
 
 配布物が公開されるまではソースから開発用のインストールをしてください。`make install`はmacOS向けで、既存のコード署名用証明書が必要です。MacではDMG内のGUIインストーラー、WindowsではEXEセットアップを使います。公開後の導入手順と署名の確認は[配布とインストール](docs/distribution.md)にあります。
 

@@ -13,7 +13,7 @@
 | Apple Silicon Mac | `kanade-ime-aarch64-apple-darwin.dmg` | 日本語のGUIインストーラーとKanade本体 |
 | Windows x64 | `kanade-ime-x86_64-pc-windows-msvc.exe` | 日本語のセットアップ画面とMSI |
 
-Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。Tsumugiを取り込む手順は[利用方法](usage.md)にあります。
+Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。EXE に同梱した Tsumugi S はインストール先の `models/` に配置されます。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。
 
 ## macOS
 

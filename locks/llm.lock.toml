@@ -25,7 +25,7 @@ size = 56386208
 sha256 = "dd7ed97afd42b5c64b2e6713b66395fbe57d3fbc560f7218a4bfc89fc0efb10b"
 license = "LicenseRef-Kanade-Model-1.0"
 attribution = "Kanade"
-terms_sha256 = "d5b8a07c822d4ddf2d582dec6a53f7335757827bb52adcf0826de6cd35558b75"
+terms_sha256 = "4eecf3e4ad8501b92d81077baa4c1d308992c67634304b34b7899a9779fa8de9"
 
 [profile."tsumugi-s"]
 version = 1

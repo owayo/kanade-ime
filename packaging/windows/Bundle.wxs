@@ -5,7 +5,8 @@
       <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"
           LicenseUrl="https://github.com/owayo/kanade-ime/blob/main/LICENSE"
           LocalizationFile="packaging/windows/Installer.ja-jp.wxl"
-          LaunchTarget="https://github.com/owayo/kanade-ime/blob/main/docs/distribution.md#windows"
+          LaunchTarget="[SystemFolder]WindowsPowerShell\v1.0\powershell.exe"
+          LaunchArguments="-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy RemoteSigned -File &quot;[ProgramFiles64Folder]Kanade\setup-user.ps1&quot;"
           SuppressOptionsUI="yes" ShowVersion="yes" />
     </BootstrapperApplication>
     <Chain>

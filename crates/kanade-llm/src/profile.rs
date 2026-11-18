@@ -253,7 +253,7 @@ pub fn terms(model: &Model) -> String {
              モデル: {} (SHA-256 {})\n\
              ライセンス: {} {}\n\
              作者: {} / 入手元: {}\n\
-             モデルファイルは利用者が自分で入手して取り込みます。同梱も自動ダウンロードもしません。\n\
+             Windows版にはモデルファイルが付属します。利用者の同意後にモデルを取り込みます。\n\
              ファイルの利用と再配布には上記のライセンスが適用されます。\n\
              有効にすると、カーソル直前の文字列 (最大 {} 文字)、読み、表示中の候補を、\
              この端末内の別プロセスで処理します。\n\
@@ -730,12 +730,12 @@ mod tests {
         ] {
             assert!(terms.contains(part));
         }
-        assert!(terms.contains("同梱も自動ダウンロードもしません"));
+        assert!(terms.contains("利用者の同意後にモデルを取り込みます"));
         assert!(terms.contains("この端末内の別プロセスで処理します"));
         assert!(terms.contains("最大 40 文字"));
         assert_eq!(
             terms_sha256(model),
-            "d5b8a07c822d4ddf2d582dec6a53f7335757827bb52adcf0826de6cd35558b75"
+            "4eecf3e4ad8501b92d81077baa4c1d308992c67634304b34b7899a9779fa8de9"
         );
         // Terms name the model, so no consent carries over to another one.
         assert_ne!(terms_sha256(fixture::alt()), terms_sha256(model));

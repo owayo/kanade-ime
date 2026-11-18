@@ -26,3 +26,7 @@ Signed MSI generation and installer custom-action validation remain release gate
 ## EXE setup
 
 The released EXE uses WiX Burn to embed the MSI. `Bundle.wxs` selects the Japanese standard bootstrapper. `package-windows.ps1` signs the MSI, detaches and signs the Burn engine, reattaches it and signs the whole EXE. CI tests the MSI rollback path, installs through the EXE, runs the installed engine with a temporary profile and uninstalls through the EXE. The bootstrapper license is included in the MSI payload.
+
+The Windows MSI includes the locked Tsumugi F16 GGUF. The packaging script accepts `-ModelPath` or `KANADE_TSUMUGI_GGUF` for a local build. It checks the staged bytes against `locks/llm.lock.toml` before creating the embedded cabinet. The settings window imports the bundled copy with the user’s consent.
+
+For GitHub Actions, provide the locked file in `models/` or set the repository variable `KANADE_TSUMUGI_MODEL_URL` to its HTTPS distribution URL. CI builds the distributable EXE when those bytes are available. Release packaging requires them.
