@@ -18,7 +18,7 @@ The build copies Mozc's license/credits, hasami's code/data notices and collecte
 
 The optional IPAdic `.hsd` dictionary is acquired separately from hasami release v26.11.103. Its artifact pin in `locks/dictionary.lock.toml` is independent of the library commit; both use dictionary format v6. Preserve its IPAdic copyright and license notices with the dictionary.
 
-The Windows installer includes Tsumugi S for local use under LicenseRef-Kanade-Model-1.0. The import dialog displays the file identity, model license identifier and local-processing terms. [Tsumugi model](llm.md#tsumugi-model)
+The Windows and macOS installers include Tsumugi S for local use under LicenseRef-Kanade-Model-1.0. The import dialog displays the file identity, model license identifier and local-processing terms. [Tsumugi model](llm.md#tsumugi-model)
 
 ## Windows installer
 

@@ -1,6 +1,6 @@
 # Local reranking model
 
-An optional local language model reorders the Mozc candidates of the focused segment, using the text before the cursor. It is off by default. The Windows installer includes the pinned Tsumugi GGUF. Each user can import it from settings after accepting the model and local-processing terms. The engine qualifies it before reranking can be enabled.
+An optional local language model reorders the Mozc candidates of the focused segment, using the text before the cursor. It is off by default. The Windows and macOS installers include the pinned Tsumugi GGUF. Each user can import it from settings after accepting the model and local-processing terms. The engine qualifies it before reranking can be enabled.
 
 Each importable file is registered together with a profile that fixes how it is loaded, prompted, scored and qualified. Registrations are compiled into Kanade. One model is installed at a time.
 
@@ -32,7 +32,7 @@ The key loop copies a few short strings into a queue of two jobs and later looks
 
 ## Tsumugi model
 
-Kanade accepts one local reranker, **Tsumugi S**. Its F16 GGUF contains 28,058,112 parameters and occupies 56,386,208 bytes. The engine, worker and settings use the same pinned identity. On Windows the installer places the GGUF in the application’s `models` directory. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml)
+Kanade accepts one local reranker, **Tsumugi S**. Its F16 GGUF contains 28,058,112 parameters and occupies 56,386,208 bytes. The engine, worker and settings use the same pinned identity. The Windows EXE installs the GGUF in the application’s `models` directory. The macOS DMG includes it under `Settings.app/Contents/Resources/models` inside Kanade.app. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml)
 
 A Windows x64 installation matched all 373 tokenizer references and ranked the expected candidate first in 78 of 85 context tests (91.76%). Every case received a score. Repeated runs agreed. CPU scoring took 21 ms at the median and 33 ms at the 95th percentile on the installation PC. The 85 examples exercise selected homophones.
 

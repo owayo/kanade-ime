@@ -121,36 +121,37 @@ jobs:
       - name: Test Windows
         if: runner.os == 'Windows'
         run: cargo test --locked --workspace --no-fail-fast
-      - name: Build the native frontends
+      - name: Build the Windows native frontends
+        if: runner.os == 'Windows'
         run: cargo build --release --locked --target ${{ matrix.target }} -p kanade-engine -p kanade-ui -p kanade-tip -p kanade-llm -p kanade-indexer --features kanade-ui/native,kanade-llm/llama
-      - name: Build the macOS installer launcher
+      - name: Build and verify the macOS installer with a temporary CI identity
         if: runner.os == 'macOS'
-        run: swift build --package-path packaging/macos/installer --scratch-path artifacts/swift-installer --configuration release --product KanadeInstaller -Xswiftc -warnings-as-errors -Xswiftc -gnone
+        run: bash .github/scripts/test-macos-package.sh
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS'
+        with:
+          name: macos-development-installer
+          path: artifacts/release/kanade-ime-aarch64-apple-darwin.dmg
+          if-no-files-found: error
       - name: Build the 32-bit Windows frontend
         if: runner.os == 'Windows'
         run: |
           rustup target add i686-pc-windows-msvc
           cargo build --release --locked --target i686-pc-windows-msvc -p kanade-tip
       - name: Build the Windows installer
-        if: runner.os == 'Windows' && (hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') != '' || vars.KANADE_TSUMUGI_MODEL_URL != '')
+        if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          KANADE_TSUMUGI_MODEL_URL: ${{ vars.KANADE_TSUMUGI_MODEL_URL }}
         run: ./.github/scripts/package-windows.ps1 -Unsigned
       - name: Test Windows installation and rollback
-        if: runner.os == 'Windows' && (hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') != '' || vars.KANADE_TSUMUGI_MODEL_URL != '')
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./.github/scripts/test-windows-installer.ps1
       - uses: actions/upload-artifact@v7
-        if: runner.os == 'Windows' && (hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') != '' || vars.KANADE_TSUMUGI_MODEL_URL != '')
+        if: runner.os == 'Windows'
         with:
           path: artifacts/release/kanade-ime-x86_64-pc-windows-msvc.exe
           archive: false
           if-no-files-found: error
-      - name: Report local installer build requirement
-        if: runner.os == 'Windows' && hashFiles('models/kanade-tsumugi-v0.1.0-s-F16.gguf') == '' && vars.KANADE_TSUMUGI_MODEL_URL == ''
-        shell: pwsh
-        run: Write-Output 'Building a distributable EXE requires the pinned Tsumugi model. Native code, registration and installer authoring are tested independently.'
       - uses: actions/upload-artifact@v7
         if: ${{ failure() && runner.os == 'Windows' }}
         with:
@@ -160,6 +161,7 @@ jobs:
             artifacts/windows/*.msi
             artifacts/windows/*.exe
             artifacts/windows/payload/
+            !artifacts/windows/payload/**/*.gguf
             artifacts/mozc/
           if-no-files-found: ignore
   project-indexer:

@@ -101,7 +101,12 @@ pub fn macos(root: &Path, debug: bool) -> Result<()> {
         b"{\"registration_cli\":1}\n",
     )?;
     icons(root, &output, &resources)?;
-    fs::create_dir_all(settings.join("Contents/Resources"))?;
+    let settings_resources = settings.join("Contents/Resources");
+    fs::create_dir_all(&settings_resources)?;
+    run(Command::new("python3")
+        .current_dir(root)
+        .arg(root.join(".github/scripts/bundled_model.py"))
+        .arg(settings_resources.join("models")))?;
     fs::copy(
         resources.join("Kanade.icns"),
         settings.join("Contents/Resources/Kanade.icns"),

@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from bundled_model import locked_model, verify_model
+
 
 def verify_dmg(image: Path, version: str) -> None:
     """Check the signed, self-contained installer in a mounted disk image.
@@ -53,6 +55,8 @@ def verify_dmg(image: Path, version: str) -> None:
                     for key in ["CFBundleShortVersionString", "CFBundleVersion"]
                 ):
                     raise ValueError("installer and app versions differ")
+            model = locked_model()
+            verify_model(settings / "Contents/Resources/models" / model["file"], model)
             for manifest, binary in [
                 ("manifest.json", "kanade-mozc-worker"),
                 ("project-analyzer.json", "kanade-project-analyzer"),

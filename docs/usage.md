@@ -164,7 +164,7 @@ KANADE_UI="$HOME/Library/Input Methods/Kanade.app/Contents/Helpers/Settings.app/
 
 Kanade の候補採点には Tsumugi S を使います。「ローカルAI」の設定で利用条件を確認して、対応する GGUF を取り込みます。
 
-Windows 版のセットアップ EXE には Tsumugi S が入っています。完了画面で「Kanade の設定を開く」を選び、「ローカルAI」で利用条件と端末内処理に同意して「Tsumugi を取り込む」を押してください。検証が通ったら「並べ替えを有効にする」を押します。`install.bat` でも同じセットアップを実行できます。
+Windows の EXE と macOS の DMG は Tsumugi S を同梱しています。インストール後、Kanade の設定を開き、「ローカルAI」で利用条件と端末内処理に同意して「Tsumugi を取り込む」を押してください。検証が通ったら「並べ替えを有効にする」を押します。`install.bat` でも同じセットアップを実行できます。
 
 取り込み時にサイズとSHA-256を照合し、モデルごとの文字処理、候補の評価結果、応答時間を検証します。検証を通過してから「並べ替えを有効にする」を押します。推論プログラムやモデルの設定が更新された場合は、モデルを再検証してください。ビルド方法と検証基準は[ローカルAIの仕様](llm.md)を参照してください。
 
@@ -176,7 +176,7 @@ CLIからも導入できます。`models status` で配布元・ライセンス�
 
 ```bash
 "$KANADE_UI" models status
-"$KANADE_UI" models import "$HOME/Downloads/kanade-tsumugi-v0.1.0-s-F16.gguf" --accept-license --accept-local-processing
+"$KANADE_UI" models import "${KANADE_UI%/MacOS/*}/Resources/models/kanade-tsumugi-v0.1.0-s-F16.gguf" --accept-license --accept-local-processing
 "$KANADE_UI" models status
 "$KANADE_UI" models qualify
 "$KANADE_UI" models remove

@@ -101,19 +101,16 @@ impl Settings {
             cx.notify();
             return;
         }
-        #[cfg(windows)]
-        {
-            let path = std::env::current_exe().ok().and_then(|exe| {
-                Some(
-                    exe.parent()?
-                        .join("models")
-                        .join("kanade-tsumugi-v0.1.0-s-F16.gguf"),
-                )
-            });
-            if let Some(path) = path.filter(|p| p.is_file()) {
-                self.model_operation(move || crate::models::import(&path, &model, true, true), cx);
-                return;
-            }
+        let bundled = std::env::current_exe().ok().and_then(|exe| {
+            #[cfg(windows)]
+            let resources = exe.parent()?.to_owned();
+            #[cfg(target_os = "macos")]
+            let resources = exe.parent()?.parent()?.join("Resources");
+            Some(resources.join("models/kanade-tsumugi-v0.1.0-s-F16.gguf"))
+        });
+        if let Some(path) = bundled.filter(|p| p.is_file()) {
+            self.model_operation(move || crate::models::import(&path, &model, true, true), cx);
+            return;
         }
         let chooser = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,

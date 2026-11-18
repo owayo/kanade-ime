@@ -14,15 +14,6 @@ function Run-Wix([scriptblock]$Command) {
     } finally { $env:DOTNET_ROLL_FORWARD = $previousRollForward }
 }
 
-if (-not $ModelPath -and $env:KANADE_TSUMUGI_MODEL_URL -and
-    -not (Test-Path -LiteralPath 'models/kanade-tsumugi-v0.1.0-s-F16.gguf')) {
-    $uri = [uri]$env:KANADE_TSUMUGI_MODEL_URL
-    if ($uri.Scheme -ne 'https') { throw 'The model source must use HTTPS.' }
-    $directory = New-Item -ItemType Directory -Force artifacts/models
-    $ModelPath = Join-Path $directory.FullName 'kanade-tsumugi-v0.1.0-s-F16.gguf'
-    Invoke-WebRequest -Uri $uri -OutFile $ModelPath
-}
-
 Run-Native { rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc }
 Run-Native { cargo build --release --locked --target x86_64-pc-windows-msvc -p kanade-engine -p kanade-ui -p kanade-llm -p kanade-indexer -p kanade-tip --features kanade-ui/native,kanade-llm/llama }
 Run-Native { cargo build --release --locked --target i686-pc-windows-msvc -p kanade-tip }
@@ -41,7 +32,10 @@ function Sign-File([string]$Path) {
 Get-ChildItem $payload -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' } | ForEach-Object { Sign-File $_.FullName }
 $modelArgs = @()
 if ($ModelPath) { $modelArgs = @('--model', $ModelPath) }
-Run-Native { python .github/scripts/stage-windows-model.py @modelArgs }
+Run-Native { python .github/scripts/bundled_model.py (Join-Path $payload models) @modelArgs }
+foreach ($script in 'start-engine.ps1', 'setup-user.ps1', 'enable-profile.ps1', 'enable-tsumugi.ps1') {
+    Copy-Item (Join-Path packaging/windows $script) $payload
+}
 Run-Native { python .github/scripts/windows-payload.py }
 Run-Native { dotnet tool install wix --version 4.0.6 --tool-path artifacts/wix }
 Run-Wix { ./artifacts/wix/wix.exe extension add --global WixToolset.Bal.wixext/4.0.6 }

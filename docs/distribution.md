@@ -10,10 +10,10 @@
 
 | 対象 | ファイル | 内容 |
 |---|---|---|
-| Apple Silicon Mac | `kanade-ime-aarch64-apple-darwin.dmg` | 日本語のGUIインストーラーとKanade本体 |
-| Windows x64 | `kanade-ime-x86_64-pc-windows-msvc.exe` | 日本語のセットアップ画面とMSI |
+| Apple Silicon Mac | `kanade-ime-aarch64-apple-darwin.dmg` | 日本語のGUIインストーラー、Kanade本体、Tsumugi S |
+| Windows x64 | `kanade-ime-x86_64-pc-windows-msvc.exe` | 日本語のセットアップ画面、Tsumugi S を含むMSI |
 
-Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。EXE に同梱した Tsumugi S はインストール先の `models/` に配置されます。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。
+Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。Windows では Tsumugi S をインストール先の `models/` に、macOS では Kanade 内の設定アプリに配置します。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。
 
 ## macOS
 
@@ -41,7 +41,7 @@ Microsoft Visual C++ Redistributableのx64版とx86版が必要です。[Microso
 3. 完了後にサインアウトし、再びサインインします。通常権限のユーザーセッションでエンジンが起動します。
 4. Windowsの言語設定でKanadeを有効にし、入力方式を選びます。完了画面の「設定方法を開く」から、この手順を開けます。
 
-EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエンジンと設定アプリを隣接して配置し、64bit・32bitそれぞれの入力DLLを登録します。失敗時には登録を取り消します。更新はWindows Installerのトランザクション内で旧版を置き換えます。使用中のファイルがある場合は、インストーラーの再起動案内に従ってください。
+EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエンジンと設定アプリを隣接して配置し、64bit・32bitそれぞれの入力DLLを登録します。失敗時には登録を取り消します。更新はWindows Installerのトランザクション内で旧版を置き換えます。更新前から開いていたアプリは、読み込み済みの入力 DLL を使い続ける場合があります。入力中の文章を保存し、常駐アプリは通知領域からも終了して開き直してください。
 
 削除はWindowsの「インストールされているアプリ」、またはEXEの「アンインストール」から行います。入力DLLの登録と自動起動設定を解除し、個人設定と学習データは保持します。
 
