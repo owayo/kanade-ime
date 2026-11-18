@@ -68,7 +68,9 @@ fn repeated_event_is_not_sent_to_mozc_twice() {
 }
 #[test]
 #[ignore = "requires the locked Mozc artifact; mise run contract"]
-fn shifted_tilde_is_consumed_and_committed_once_as_a_wave_dash() {
+fn shifted_tilde_is_consumed_and_committed_once() {
+    // The locked Mozc worker normalizes U+301C to U+FF5E on Windows.
+    let tilde = if cfg!(windows) { "～" } else { "〜" };
     let (_temp, mut e, id, rev) = engine();
     let mut typed_request = input(rev, 1, "~");
     let Some(request::Body::Key(key)) = typed_request.body.as_mut() else {
@@ -77,7 +79,7 @@ fn shifted_tilde_is_consumed_and_committed_once_as_a_wave_dash() {
     key.key.as_mut().unwrap().modifiers = MOD_SHIFT;
     let typed = reply(e.handle(id, typed_request.clone()).unwrap());
     assert!(typed.consumed);
-    assert_eq!(surface(typed.preedit.as_ref().unwrap()), "〜");
+    assert_eq!(surface(typed.preedit.as_ref().unwrap()), tilde);
     assert_eq!(reply(e.handle(id, typed_request).unwrap()), typed);
     e.handle(id, ack(&typed, true)).unwrap();
     let mut submit = input(typed.revision.unwrap(), 2, "");
@@ -86,7 +88,7 @@ fn shifted_tilde_is_consumed_and_committed_once_as_a_wave_dash() {
     };
     key.key.as_mut().unwrap().special = SpecialKey::Enter as i32;
     let committed = reply(e.handle(id, submit.clone()).unwrap());
-    assert_eq!(committed.commit.as_ref().unwrap().value, "〜");
+    assert_eq!(committed.commit.as_ref().unwrap().value, tilde);
     assert_eq!(reply(e.handle(id, submit).unwrap()), committed);
     e.handle(id, ack(&committed, true)).unwrap();
     let next = reply(

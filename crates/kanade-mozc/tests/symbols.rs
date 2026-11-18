@@ -15,6 +15,12 @@ fn shifted_tilde_remains_fullwidth_in_hiragana() {
             ("~~", "〜〜"),
             ("nihongo~", "にほんご〜"),
         ] {
+            // Mozc's Windows normalizer maps the wave dash to fullwidth tilde.
+            let expected = if cfg!(windows) {
+                expected.replace('〜', "～")
+            } else {
+                expected.to_owned()
+            };
             let id = mozc.create_session().unwrap();
             let mut visible = String::new();
             for character in input.chars() {
