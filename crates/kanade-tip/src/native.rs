@@ -782,20 +782,7 @@ impl ITfEditSession_Impl for ApplyEdit_Impl {
                     )?;
                     caret.Collapse(cookie, TF_ANCHOR_START)?;
                 }
-                let mut selection = TF_SELECTION {
-                    range: std::mem::ManuallyDrop::new(Some(caret)),
-                    style: TF_SELECTIONSTYLE {
-                        ase: TF_AE_END,
-                        fInterimChar: false.into(),
-                    },
-                };
-                unsafe {
-                    let result = self
-                        .context
-                        .SetSelection(cookie, std::slice::from_ref(&selection));
-                    std::mem::ManuallyDrop::drop(&mut selection.range);
-                    result?;
-                }
+                set_caret(&self.context, cookie, caret)?;
                 if let Ok(view) = unsafe { self.context.GetActiveView() } {
                     let mut rect = RECT::default();
                     let mut clipped = BOOL::default();
@@ -825,6 +812,20 @@ impl ITfEditSession_Impl for ApplyEdit_Impl {
             *current = preedit;
         }
         Ok(())
+    }
+}
+fn set_caret(context: &ITfContext, cookie: u32, caret: ITfRange) -> Result<()> {
+    let mut selection = TF_SELECTION {
+        range: std::mem::ManuallyDrop::new(Some(caret)),
+        style: TF_SELECTIONSTYLE {
+            ase: TF_AE_NONE,
+            fInterimChar: false.into(),
+        },
+    };
+    unsafe {
+        let result = context.SetSelection(cookie, std::slice::from_ref(&selection));
+        std::mem::ManuallyDrop::drop(&mut selection.range);
+        result
     }
 }
 fn write_composition(
@@ -865,12 +866,17 @@ fn write_composition(
         let _ = unsafe { property.SetValue(cookie, &range, &value) };
     }
     if commit {
+        // SetText can pull the host's selection back to the start of the
+        // replaced text. Keep the endpoint across EndComposition.
+        let caret = unsafe { range.Clone()? };
+        unsafe {
+            caret.Collapse(cookie, TF_ANCHOR_END)?;
+            composition.EndComposition(cookie)?;
+        }
         if let Ok(mut slot) = shared.composition.try_borrow_mut() {
             slot.take();
         }
-        unsafe {
-            composition.EndComposition(cookie)?;
-        }
+        set_caret(context, cookie, caret)?;
     }
     Ok(())
 }

@@ -13,7 +13,9 @@ if "%status%"=="3010" echo Kanade is installed. Restart Windows to finish.
 if not "%status%"=="0" exit /b %status%
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%ProgramW6432%\Kanade\enable-profile.ps1"
 if errorlevel 1 exit /b 1
-echo Kanade IME is installed. Select Kanade in the Japanese input methods.
+echo Kanade IME is installed. Restart apps that were open during the update.
+echo For apps in the system tray, choose Quit before reopening them.
+echo Select Kanade in the Japanese input methods.
 set "model=%ProgramW6432%\Kanade\models\kanade-tsumugi-v0.1.0-s-F16.gguf"
 if not exist "%model%" (
     echo Bundled Tsumugi model is missing. Repair the installation.

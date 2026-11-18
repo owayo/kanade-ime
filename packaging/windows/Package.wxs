@@ -3,6 +3,8 @@
            UpgradeCode="C8E8A998-6DC8-47CE-9203-9635946B8A16" Language="1041" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer Kanade version is already installed." Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" />
+    <!-- The TIP is loaded into editors. Let users save and restart them themselves. -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
     <Launch Condition="Installed OR (VersionNT64 AND NOT Arm64)" Message="Kanade requires x64 Windows." />
     <Property Id="VC_X64_INSTALLED">
       <RegistrySearch Id="FindVc64" Root="HKLM" Key="Software\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" Name="Installed" Type="raw" Bitness="always64" />

@@ -35,7 +35,7 @@
   <String Id="ModifyCancelButton" Value="キャンセル(&amp;C)" />
   <String Id="SuccessHeader" Value="処理が完了しました" />
   <String Id="SuccessCacheHeader" Value="準備が完了しました" />
-  <String Id="SuccessInstallHeader" Value="インストールが完了しました" />
+  <String Id="SuccessInstallHeader" Value="インストールが完了しました。使用中のアプリを終了し、開き直してください。" />
   <String Id="SuccessLayoutHeader" Value="展開が完了しました" />
   <String Id="SuccessModifyHeader" Value="変更が完了しました" />
   <String Id="SuccessRepairHeader" Value="修復が完了しました" />
