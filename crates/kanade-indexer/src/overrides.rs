@@ -79,7 +79,7 @@ pub(crate) fn apply(data: &Path, edit: Edit) -> Result<(Project, u64)> {
     ensure!(snapshot.enabled, "project disabled");
     if let Some(binding) = &snapshot.directory_binding {
         ensure!(
-            &crate::directory_binding(&snapshot.root)? == binding,
+            crate::directory_matches(&snapshot.root, binding),
             "approved directory changed"
         );
     }

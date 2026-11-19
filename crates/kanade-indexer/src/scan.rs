@@ -135,7 +135,7 @@ fn index_inner(
         project
             .directory_binding
             .as_ref()
-            .is_none_or(|binding| identity.binding().as_ref().ok() == Some(binding)),
+            .is_none_or(|binding| identity.matches_saved(binding)),
         "approved directory changed"
     );
     ensure!(

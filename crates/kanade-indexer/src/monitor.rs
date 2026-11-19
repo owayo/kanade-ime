@@ -193,9 +193,10 @@ fn bound(data: &Path, project: &Project) -> bool {
         .root
         .canonicalize()
         .is_ok_and(|p| p == project.root && !p.starts_with(data) && !data.starts_with(&p))
-        && project.directory_binding.as_ref().is_some_and(|expected| {
-            crate::directory_binding(&project.root).as_ref().ok() == Some(expected)
-        })
+        && project
+            .directory_binding
+            .as_ref()
+            .is_some_and(|expected| crate::directory_matches(&project.root, expected))
 }
 fn next_project(tracks: &BTreeMap<String, Track>, now: Instant) -> Option<String> {
     tracks

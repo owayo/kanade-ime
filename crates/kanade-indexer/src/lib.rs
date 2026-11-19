@@ -220,50 +220,85 @@ pub fn remove_project(data: &Path, id: &str) -> Result<()> {
     management::cleanup(data, id, &removed_roots)?;
     Ok(())
 }
-struct RootIdentity(std::fs::Metadata);
+struct RootIdentity {
+    binding: String,
+    #[cfg(windows)]
+    previous_binding: String,
+}
 impl RootIdentity {
     fn capture(root: &Path) -> Result<Self> {
         ensure!(root.canonicalize()? == root, "approved root changed");
-        let metadata = std::fs::symlink_metadata(root)?;
-        ensure!(metadata.is_dir(), "approved root is not a directory");
-        Ok(Self(metadata))
+        #[cfg(windows)]
+        {
+            use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+            use windows_sys::Win32::Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+                GetFileInformationByHandle,
+            };
+            let handle = std::fs::File::options()
+                .access_mode(0)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(root)?;
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: the directory handle remains open and info is a writable output record.
+            if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut info) } == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            ensure!(
+                info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                    == FILE_ATTRIBUTE_DIRECTORY,
+                "approved root is not a directory"
+            );
+            let created = handle
+                .metadata()?
+                .created()?
+                .duration_since(std::time::UNIX_EPOCH)?;
+            let previous_binding =
+                format!("created:{}:{}", created.as_secs(), created.subsec_nanos());
+            let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+            ensure!(index != 0, "directory file ID unavailable");
+            Ok(Self {
+                binding: format!(
+                    "windows:{}:{index}:{previous_binding}",
+                    info.dwVolumeSerialNumber
+                ),
+                previous_binding,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let metadata = std::fs::symlink_metadata(root)?;
+            ensure!(metadata.is_dir(), "approved root is not a directory");
+            #[cfg(unix)]
+            let binding = {
+                use std::os::unix::fs::MetadataExt;
+                format!("unix:{}:{}", metadata.dev(), metadata.ino())
+            };
+            #[cfg(not(unix))]
+            let binding = {
+                let created = metadata.created()?.duration_since(std::time::UNIX_EPOCH)?;
+                format!("created:{}:{}", created.as_secs(), created.subsec_nanos())
+            };
+            Ok(Self { binding })
+        }
     }
     fn matches(&self, root: &Path) -> bool {
-        let Ok(current) = Self::capture(root) else {
-            return false;
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            self.0.dev() == current.0.dev() && self.0.ino() == current.0.ino()
-        }
-        #[cfg(not(unix))]
-        {
-            self.0
-                .created()
-                .ok()
-                .is_some_and(|created| current.0.created().ok() == Some(created))
-        }
+        Self::capture(root).is_ok_and(|current| self.binding == current.binding)
     }
-    fn binding(&self) -> Result<String> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Ok(format!("unix:{}:{}", self.0.dev(), self.0.ino()))
+    fn matches_saved(&self, expected: &str) -> bool {
+        #[cfg(windows)]
+        if self.previous_binding == expected {
+            return true;
         }
-        #[cfg(not(unix))]
-        {
-            let created = self.0.created()?.duration_since(std::time::UNIX_EPOCH)?;
-            Ok(format!(
-                "created:{}:{}",
-                created.as_secs(),
-                created.subsec_nanos()
-            ))
-        }
+        self.binding == expected
     }
 }
+fn directory_matches(root: &Path, expected: &str) -> bool {
+    RootIdentity::capture(root).is_ok_and(|identity| identity.matches_saved(expected))
+}
 pub fn directory_binding(root: &Path) -> Result<String> {
-    RootIdentity::capture(root)?.binding()
+    Ok(RootIdentity::capture(root)?.binding)
 }
 impl Catalog {
     pub fn load(data: &Path) -> Result<Self> {
@@ -274,9 +309,11 @@ impl Catalog {
         let mut catalog = Self::default();
         let mut retry = false;
         for project in registry.projects.iter().filter(|p| p.enabled) {
-            if project.directory_binding.as_ref().is_some_and(|expected| {
-                directory_binding(&project.root).as_ref().ok() != Some(expected)
-            }) {
+            if project
+                .directory_binding
+                .as_ref()
+                .is_some_and(|expected| !directory_matches(&project.root, expected))
+            {
                 continue;
             }
             match project_terms(data, project) {
@@ -352,6 +389,19 @@ pub fn valid_term(term: &Term) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn new_windows_approvals_bind_the_file_id_and_old_approvals_remain_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let identity = RootIdentity::capture(&root).unwrap();
+        assert!(identity.binding.starts_with("windows:"));
+        assert!(identity.previous_binding.starts_with("created:"));
+        assert!(directory_matches(&root, &identity.previous_binding));
+        assert!(directory_matches(&root, &identity.binding));
+        assert!(!directory_matches(&root, "created:0:0"));
+    }
+
     #[test]
     fn interrupted_temporary_write_does_not_block_future_generations() {
         let temp = tempfile::tempdir().unwrap();
