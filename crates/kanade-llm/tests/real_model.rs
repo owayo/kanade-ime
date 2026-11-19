@@ -84,6 +84,46 @@ fn qualification_measures_the_real_runtime_and_model() {
     );
 }
 
+/// Reference costs from the exported 5-gram table, in natural-log units.
+#[test]
+#[ignore = "needs the bundled Tsumugi and its worker"]
+fn character_prior_matches_export_and_leaves_ambiguous_spellings_to_the_neural_model() {
+    let mut worker = Worker::spawn(Path::new(WORKER)).unwrap();
+    worker
+        .load(&model_path(), model(), limits::THREADS)
+        .unwrap();
+    for (context, reading, candidates, offsets) in [
+        (
+            "一定の",
+            "きかん",
+            vec!["期間", "器官", "気管"],
+            vec![0.0, -6.5, -9.125],
+        ),
+        (
+            "市内の",
+            "こうえん",
+            vec!["公園", "講演", "公演"],
+            vec![0.0; 3],
+        ),
+    ] {
+        let job = Job {
+            context: context.into(),
+            reading: katakana(reading),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: candidates.into_iter().map(String::from).collect(),
+        };
+        let timeout = Duration::from_secs(5);
+        let raw = worker.score(&job, limits::BUDGET_MS, timeout).unwrap();
+        let combined = worker
+            .score_conversion(&job, limits::BUDGET_MS, timeout, true)
+            .unwrap();
+        for ((a, b), offset) in raw.into_iter().zip(combined).zip(offsets) {
+            assert!((b.unwrap() - a.unwrap() - offset).abs() < 0.02);
+        }
+    }
+}
+
 /// Compare the F16 worker with reference scores from the training implementation.
 #[test]
 #[ignore = "needs KANADE_LLM_MODEL and the worker built with --features llama"]
@@ -312,11 +352,13 @@ fn the_worker_emits_frames_only_and_never_echoes_input() {
             texts: vec![CANARY.into()],
         },
         Request::Score {
+            sentence: false,
             id: 2,
             budget_ms: limits::BUDGET_MS,
             job: marked,
         },
         Request::Score {
+            sentence: false,
             id: 3,
             budget_ms: limits::BUDGET_MS,
             job,

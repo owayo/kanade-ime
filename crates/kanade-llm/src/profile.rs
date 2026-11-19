@@ -219,10 +219,10 @@ pub static TSUMUGI: Profile = Profile {
 /// The fixed model used by the engine and isolated worker.
 pub static CATALOG: &[Model] = &[Model {
     id: "tsumugi-s-f16",
-    name: "Tsumugi 26.11.100",
+    name: "Tsumugi 26.11.101",
     file_name: "tsumugi.gguf",
-    size: 56386208,
-    sha256: "103f125bfc2eae3705195a020fdcafc96e2694f52ef642add7aeb27ea7df06fd",
+    size: 66507360,
+    sha256: "94374d9e330ce278a3a948c0cec1f9c0132367e75b04c1dcee098a45a6948992",
     license: "LicenseRef-Kanade-Model-1.0",
     license_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md#tsumugi-model",
     source_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md",
@@ -541,10 +541,10 @@ mod tests {
         assert_eq!(CATALOG.len(), 1);
         let model = &CATALOG[0];
         assert_eq!(model.id, "tsumugi-s-f16");
-        assert_eq!(model.size, 56386208);
+        assert_eq!(model.size, 66507360);
         assert_eq!(
             model.sha256,
-            "103f125bfc2eae3705195a020fdcafc96e2694f52ef642add7aeb27ea7df06fd"
+            "94374d9e330ce278a3a948c0cec1f9c0132367e75b04c1dcee098a45a6948992"
         );
         assert_eq!(model.license, "LicenseRef-Kanade-Model-1.0");
         let profile = model.profile;
@@ -749,7 +749,7 @@ mod tests {
         assert!(terms.contains("最大 40 文字"));
         assert_eq!(
             terms_sha256(model),
-            "1e744a06548df80785e97a3cdf3e06f16c3dda7de3a04610dab66f18bc0ed30b"
+            "91f4af9d579618491c7c445c1afe644849566662539500738fedc138e0107d6e"
         );
         // Terms name the model, so no consent carries over to another one.
         assert_ne!(terms_sha256(fixture::alt()), terms_sha256(model));

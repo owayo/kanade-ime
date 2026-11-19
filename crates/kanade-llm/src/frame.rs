@@ -69,6 +69,7 @@ pub enum Request {
         model: String,
     },
     Score {
+        sentence: bool,
         id: u64,
         budget_ms: u32,
         job: Job,
@@ -221,8 +222,13 @@ impl Request {
                 out.u8(*threads);
                 out.text(model);
             }
-            Self::Score { id, budget_ms, job } => {
-                out.u8(2);
+            Self::Score {
+                id,
+                budget_ms,
+                job,
+                sentence,
+            } => {
+                out.u8(if *sentence { 5 } else { 2 });
                 out.u64(*id);
                 out.u32(*budget_ms);
                 out.text(&job.context);
@@ -263,7 +269,7 @@ impl Request {
                     model,
                 }
             }
-            2 => {
+            op @ (2 | 5) => {
                 let id = input.u64()?;
                 let budget_ms = input.u32()?;
                 let bytes = limits::TEXT_BYTES;
@@ -289,7 +295,12 @@ impl Request {
                 if !job.valid() {
                     return None;
                 }
-                Self::Score { id, budget_ms, job }
+                Self::Score {
+                    id,
+                    budget_ms,
+                    job,
+                    sentence: op == 5,
+                }
             }
             3 => {
                 let id = input.u64()?;
@@ -492,9 +503,16 @@ mod tests {
                 model: "model-1.0-q5".into(),
             },
             Request::Score {
+                sentence: false,
                 id: 7,
                 budget_ms: 500,
                 job: job(),
+            },
+            Request::Score {
+                id: 11,
+                budget_ms: 500,
+                job: job(),
+                sentence: true,
             },
             Request::Tokenize {
                 id: 8,
@@ -560,6 +578,7 @@ mod tests {
     #[test]
     fn malformed_oversized_and_nonfinite_frames_are_refused() {
         let good = Request::Score {
+            sentence: false,
             id: 1,
             budget_ms: 1,
             job: job(),
@@ -574,6 +593,7 @@ mod tests {
         assert!(
             Request::decode(
                 &Request::Score {
+                    sentence: false,
                     id: 1,
                     budget_ms: 1,
                     job: too_many

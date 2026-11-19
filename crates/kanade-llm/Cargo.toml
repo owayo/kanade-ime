@@ -7,12 +7,14 @@ rust-version.workspace = true
 
 [features]
 # Builds the pinned llama.cpp runtime with CMake. Never enabled by default.
-llama = ["dep:llama-cpp-sys-2"]
+llama = ["dep:llama-cpp-sys-2", "dep:base64", "dep:flate2"]
 # Adds test-only profiles to the registry. For contract tests only: a worker
 # built with it reports another runtime and is refused by an ordinary build.
 fixture-profiles = []
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
+flate2 = { version = "1", optional = true }
 kanade-ipc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -173,6 +173,16 @@ impl Worker {
         budget_ms: u32,
         timeout: Duration,
     ) -> Result<Vec<Option<f32>>, Failure> {
+        self.score_conversion(job, budget_ms, timeout, false)
+    }
+    /// Sentence comparisons can include the character probabilities in the registered GGUF.
+    pub fn score_conversion(
+        &mut self,
+        job: &Job,
+        budget_ms: u32,
+        timeout: Duration,
+        sentence: bool,
+    ) -> Result<Vec<Option<f32>>, Failure> {
         if !job.valid() {
             return Err(Failure::Refused(Fault::Malformed));
         }
@@ -182,7 +192,7 @@ impl Worker {
         {
             return Err(Failure::Refused(Fault::Reserved));
         }
-        self.score_unchecked(job, budget_ms, timeout)
+        self.score_unchecked(job, budget_ms, timeout, sentence)
     }
     /// Sends the job without the profile check, so that qualification can
     /// observe the worker's own refusal.
@@ -191,12 +201,14 @@ impl Worker {
         job: &Job,
         budget_ms: u32,
         timeout: Duration,
+        sentence: bool,
     ) -> Result<Vec<Option<f32>>, Failure> {
         if !job.valid() {
             return Err(Failure::Refused(Fault::Malformed));
         }
         let id = self.id();
         self.send(&Request::Score {
+            sentence,
             id,
             budget_ms,
             job: job.clone(),

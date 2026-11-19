@@ -220,7 +220,7 @@ pub fn run(
     // process itself, not only by the checks in front of it.
     let mut marked = sample.clone();
     marked.candidates[0] = profile.prompt.input.into();
-    match worker.score_unchecked(&marked, limits::BUDGET_MS, timeout) {
+    match worker.score_unchecked(&marked, limits::BUDGET_MS, timeout, false) {
         Err(Failure::Refused(Fault::Reserved)) => {}
         Err(failure) if !failure.recoverable() => return Err(Refusal::Worker(failure)),
         _ => bound_failures += 1,

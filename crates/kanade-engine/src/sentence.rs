@@ -393,7 +393,12 @@ impl<C: ConversionEngine> Engine<C> {
             else {
                 return status(false, RefinementOutcome::Unspecified);
             };
-            let Some(ticket) = llm.submit(proposal.job.clone()) else {
+            let ticket = if pending.context.is_empty() {
+                llm.submit(proposal.job.clone())
+            } else {
+                llm.submit_sentence(proposal.job.clone())
+            };
+            let Some(ticket) = ticket else {
                 return status(false, RefinementOutcome::Unavailable);
             };
             pending.work = Some((ticket, proposal));

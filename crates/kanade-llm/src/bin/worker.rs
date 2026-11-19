@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Isolated inference worker. It speaks only the private frame protocol on its
 //! standard streams, writes no diagnostics and stores nothing.
+#[path = "worker/char_prior.rs"]
+mod char_prior;
 use kanade_llm::{
     Job,
     frame::{self, Fault, Loaded, Reply, Request},
@@ -71,7 +73,12 @@ fn main() {
                     }
                 }
             }
-            Request::Score { id, budget_ms, job } => match runtime.as_mut() {
+            Request::Score {
+                id,
+                budget_ms,
+                job,
+                sentence,
+            } => match runtime.as_mut() {
                 None => Reply::Error {
                     id,
                     fault: Fault::NotLoaded,
@@ -79,7 +86,12 @@ fn main() {
                 Some((runtime, profile)) => {
                     let budget = Duration::from_millis(budget_ms.min(limits::BUDGET_MS) as u64);
                     match score(runtime, profile, &job, budget) {
-                        Ok((scores, tokens)) => Reply::Scores { id, scores, tokens },
+                        Ok((mut scores, tokens)) => {
+                            if sentence && let Some(prior) = &runtime.prior {
+                                prior.combine(&job, &mut scores);
+                            }
+                            Reply::Scores { id, scores, tokens }
+                        }
                         Err(fault) => Reply::Error { id, fault },
                     }
                 }
@@ -327,6 +339,7 @@ mod llama {
     }
 
     pub struct Runtime {
+        pub(super) prior: Option<char_prior::Prior>,
         model: *mut sys::llama_model,
         context: *mut sys::llama_context,
         vocab: *const sys::llama_vocab,
@@ -409,7 +422,8 @@ mod llama {
                 }
                 let vocab = sys::llama_model_get_vocab(model);
                 let batch = sys::llama_batch_init(limits::CONTEXT_TOKENS as i32, 0, 1);
-                let runtime = Self {
+                let mut runtime = Self {
+                    prior: None,
                     model,
                     context,
                     vocab,
@@ -426,6 +440,25 @@ mod llama {
                     || sys::llama_n_ctx(context) < limits::CONTEXT_TOKENS
                 {
                     return Err(Fault::ModelRejected);
+                }
+                let key = c"tsumugi.char_prior.v1".as_ptr();
+                // SAFETY: the model is live and the first call only queries the length.
+                let size = sys::llama_model_meta_val_str(model, key, ptr::null_mut(), 0);
+                if size >= 0 {
+                    if size as usize > char_prior::MAX_BYTES {
+                        return Err(Fault::ModelRejected);
+                    }
+                    let mut encoded = vec![0u8; size as usize + 1];
+                    let written = sys::llama_model_meta_val_str(
+                        model,
+                        key,
+                        encoded.as_mut_ptr().cast(),
+                        encoded.len(),
+                    );
+                    if written != size {
+                        return Err(Fault::ModelRejected);
+                    }
+                    runtime.prior = Some(char_prior::Prior::decode(&encoded[..size as usize])?);
                 }
                 Ok(runtime)
             }

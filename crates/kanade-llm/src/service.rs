@@ -34,13 +34,16 @@ pub enum Poll {
 pub trait Rerank: Send {
     /// Queues a job. `None` when the service is inactive or the job is refused.
     fn submit(&self, job: Job) -> Option<u64>;
+    fn submit_sentence(&self, job: Job) -> Option<u64> {
+        self.submit(job)
+    }
     fn take(&self, id: u64) -> Poll;
     /// Drops a queued job or discards the result of a running one.
     fn cancel(&self, id: u64);
 }
 
 pub trait Backend: Send {
-    fn score(&mut self, job: &Job) -> Result<Vec<Option<f32>>, Failure>;
+    fn score(&mut self, job: &Job, sentence: bool) -> Result<Vec<Option<f32>>, Failure>;
 }
 pub enum StartError {
     /// The process could not be started or loaded; worth another attempt.
@@ -55,12 +58,13 @@ pub trait Spawner: Send + 'static {
 }
 
 impl Backend for Worker {
-    fn score(&mut self, job: &Job) -> Result<Vec<Option<f32>>, Failure> {
-        Worker::score(
+    fn score(&mut self, job: &Job, sentence: bool) -> Result<Vec<Option<f32>>, Failure> {
+        Worker::score_conversion(
             self,
             job,
             limits::BUDGET_MS,
             Duration::from_millis(limits::HARD_TIMEOUT_MS),
+            sentence,
         )
     }
 }
@@ -121,6 +125,7 @@ const MAX_FAILURES: u32 = 3;
 const MAX_RESULTS: usize = 8;
 
 struct Queued {
+    sentence: bool,
     id: u64,
     job: Job,
     submitted: Instant,
@@ -237,8 +242,8 @@ fn reset(state: &mut State) {
     state.results.clear();
     state.discard_active = true;
 }
-impl Rerank for Service {
-    fn submit(&self, job: Job) -> Option<u64> {
+impl Service {
+    fn enqueue(&self, job: Job, sentence: bool) -> Option<u64> {
         if !job.valid() {
             return None;
         }
@@ -269,6 +274,7 @@ impl Rerank for Service {
             state.queue.pop_front();
         }
         state.queue.push_back(Queued {
+            sentence,
             id,
             job,
             submitted: Instant::now(),
@@ -276,6 +282,14 @@ impl Rerank for Service {
         drop(state);
         self.0.wake.notify_all();
         Some(id)
+    }
+}
+impl Rerank for Service {
+    fn submit(&self, job: Job) -> Option<u64> {
+        self.enqueue(job, false)
+    }
+    fn submit_sentence(&self, job: Job) -> Option<u64> {
+        self.enqueue(job, true)
     }
     fn take(&self, id: u64) -> Poll {
         let mut state = self.0.lock();
@@ -424,12 +438,12 @@ fn run(shared: Arc<Shared>, spawner: Box<dyn Spawner>) {
                 let mut outcome = None;
                 // A request older than the display deadline is not worth scoring.
                 if queued.submitted.elapsed() <= tuning.result_ttl {
-                    let key = digest(&identity, &queued.job);
+                    let key = digest(&identity, &queued.job, queued.sentence);
                     if let Some((_, scores)) = cache.iter().find(|(cached, _)| *cached == key) {
                         outcome = Some(scores.clone());
                     } else if let Some(worker) = backend.as_mut() {
                         shared.lock().scored += 1;
-                        match worker.score(&queued.job) {
+                        match worker.score(&queued.job, queued.sentence) {
                             Ok(scores) if scores.len() == queued.job.candidates.len() => {
                                 failures = 0;
                                 cache.push_back((key, scores.clone()));
@@ -495,9 +509,10 @@ fn served(model: &Model) -> [u8; 32] {
 }
 /// Cache key. A digest, so the cache never holds input text. It includes the
 /// served identity: a score is never reused for another model or profile.
-fn digest(identity: &[u8; 32], job: &Job) -> [u8; 32] {
+fn digest(identity: &[u8; 32], job: &Job, sentence: bool) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(identity);
+    digest.update([u8::from(sentence)]);
     for field in [&job.context, &job.reading, &job.prefix, &job.suffix]
         .into_iter()
         .chain(&job.candidates)
@@ -585,7 +600,7 @@ mod tests {
         }
     }
     impl Backend for Fake {
-        fn score(&mut self, job: &Job) -> Result<Vec<Option<f32>>, Failure> {
+        fn score(&mut self, job: &Job, _sentence: bool) -> Result<Vec<Option<f32>>, Failure> {
             if let Some(gate) = &self.0.gate {
                 gate.enter()?;
             }
@@ -887,8 +902,12 @@ mod tests {
         service.deactivate();
         assert_eq!(service.serving(), None);
         // Keys of one request differ between models and between profiles.
-        let keys =
-            [tsumugi(), alt, fixture::other()].map(|model| digest(&served(model), &job("a")));
+        let keys = [tsumugi(), alt, fixture::other()]
+            .map(|model| digest(&served(model), &job("a"), false));
+        assert_ne!(
+            digest(&served(tsumugi()), &job("a"), false),
+            digest(&served(tsumugi()), &job("a"), true)
+        );
         assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
     }
     #[test]

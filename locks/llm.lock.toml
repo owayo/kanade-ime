@@ -16,17 +16,17 @@ backend = "cpu"
 build_env = "GGML_METAL=OFF"
 
 [model."tsumugi-s-f16"]
-version = "26.11.100"
+version = "26.11.101"
 profile = "tsumugi-s"
 source = "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md"
 revision = "a7196909485ef2978ad7c9f0275d8f0be3f4782692428a27fe58e480c56e32cd"
 file = "tsumugi.gguf"
-download_url = "https://github.com/owayo/kanade-ime/releases/download/tsumugi-26.11.100/tsumugi.gguf"
-size = 56386208
-sha256 = "103f125bfc2eae3705195a020fdcafc96e2694f52ef642add7aeb27ea7df06fd"
+download_url = "https://github.com/owayo/kanade-ime/releases/download/tsumugi-26.11.101/tsumugi.gguf"
+size = 66507360
+sha256 = "94374d9e330ce278a3a948c0cec1f9c0132367e75b04c1dcee098a45a6948992"
 license = "LicenseRef-Kanade-Model-1.0"
 attribution = "Kanade"
-terms_sha256 = "1e744a06548df80785e97a3cdf3e06f16c3dda7de3a04610dab66f18bc0ed30b"
+terms_sha256 = "91f4af9d579618491c7c445c1afe644849566662539500738fedc138e0107d6e"
 
 [profile."tsumugi-s"]
 version = 1
