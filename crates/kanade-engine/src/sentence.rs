@@ -61,10 +61,7 @@ impl Pending {
         };
         if year.is_none() {
             if context.is_empty() {
-                if punctuation
-                    || !(2..=4).contains(&parts.len())
-                    || ending(&parts.last()?.value).is_none()
-                {
+                if (punctuation && !is_default) || Ending::parse(parts).is_none() {
                     return None;
                 }
             } else {
@@ -112,30 +109,73 @@ fn key(special: SpecialKey) -> Key {
     }
 }
 
-fn ending_proposal(parts: &[Segment], last: &[FocusCandidate], mut job: Job) -> Option<Proposal> {
-    let displayed = &parts.last()?.value;
-    let suffix = ending(displayed)?;
-    job.prefix = parts[..parts.len() - 1]
-        .iter()
-        .map(|s| s.value.as_str())
-        .collect();
-    job.candidates.push(displayed.clone());
-    for c in last.iter().take(limits::CANDIDATES) {
-        if !c.transliteration
-            && ending(&c.value) == Some(suffix)
-            && !job.candidates.contains(&c.value)
-            && job.candidates.len() < limits::CANDIDATES
+struct Ending<'a> {
+    prefix: &'a [Segment],
+    displayed: &'a str,
+    inflection: &'a str,
+    attached: &'static str,
+    mark: &'static str,
+}
+
+impl<'a> Ending<'a> {
+    fn parse(parts: &'a [Segment]) -> Option<Self> {
+        let (last, prefix) = parts.split_last()?;
+        let mark = ["、", "。"]
+            .into_iter()
+            .find(|mark| last.reading.ends_with(mark))
+            .unwrap_or("");
+        let (verb, prefix, attached) = if !mark.is_empty() && last.reading == mark {
+            if last.value != mark {
+                return None;
+            }
+            let (verb, prefix) = prefix.split_last()?;
+            (verb, prefix, "")
+        } else {
+            (last, prefix, mark)
+        };
+        let reading = verb.reading.strip_suffix(attached)?;
+        let displayed = verb.value.strip_suffix(attached)?;
+        if !(1..=3).contains(&prefix.len())
+            || reading.contains(['、', '。'])
+            || prefix
+                .iter()
+                .any(|part| part.reading.contains(['、', '。']))
         {
-            job.candidates.push(c.value.clone());
+            return None;
         }
+        Some(Self {
+            prefix,
+            displayed,
+            inflection: ending(displayed)?,
+            attached,
+            mark,
+        })
     }
-    job.valid().then(|| Proposal {
-        before: String::new(),
-        after: String::new(),
-        penalties: vec![0.; job.candidates.len()],
-        job,
-        margin: ENDING_MARGIN,
-    })
+
+    fn proposal(&self, last: &[FocusCandidate], mut job: Job) -> Option<Proposal> {
+        job.reading = job.reading.strip_suffix(self.mark)?.to_owned();
+        job.prefix = self.prefix.iter().map(|s| s.value.as_str()).collect();
+        job.candidates.push(self.displayed.to_owned());
+        for c in last.iter().take(limits::CANDIDATES) {
+            let Some(value) = c.value.strip_suffix(self.attached) else {
+                continue;
+            };
+            if !c.transliteration
+                && ending(value) == Some(self.inflection)
+                && !job.candidates.iter().any(|v| v == value)
+                && job.candidates.len() < limits::CANDIDATES
+            {
+                job.candidates.push(value.to_owned());
+            }
+        }
+        job.valid().then(|| Proposal {
+            before: String::new(),
+            after: self.mark.to_owned(),
+            penalties: vec![0.; job.candidates.len()],
+            job,
+            margin: ENDING_MARGIN,
+        })
+    }
 }
 
 // Mozc can offer a reading in kana for an entire name, or omit the dots in
@@ -231,6 +271,11 @@ fn alternatives<C: ConversionEngine>(
 ) -> Option<Proposal> {
     let parts = &original.preedit.segments;
     let whole = reading(&original.preedit);
+    let ending = if context.is_empty() {
+        Some(Ending::parse(parts)?)
+    } else {
+        None
+    };
     let probe = backend.create_session().ok()?;
     let collect = |backend: &mut C| -> Option<Proposal> {
         backend.restore(probe, &whole).ok()?;
@@ -256,9 +301,9 @@ fn alternatives<C: ConversionEngine>(
             {
                 return None;
             }
-            if context.is_empty() {
-                if pos + 1 == parts.len() {
-                    return ending_proposal(parts, &snap.candidates, job);
+            if let Some(ending) = &ending {
+                if pos == ending.prefix.len() {
+                    return ending.proposal(&snap.candidates, job);
                 }
             } else {
                 if snap.candidates.first()?.value != parts[pos].value {
@@ -434,6 +479,37 @@ impl<C: ConversionEngine> Engine<C> {
 #[cfg(test)]
 mod tests {
     use super::preserves_name_spelling;
+
+    #[test]
+    fn ending_keeps_exactly_one_terminal_mark() {
+        use super::{Ending, Segment};
+        let make = |reading: &str, value: &str| Segment {
+            reading: reading.to_owned(),
+            value: value.to_owned(),
+            ..Default::default()
+        };
+        let base = make("のりものに", "乗り物に");
+        for parts in [
+            vec![base.clone(), make("のります。", "乗ります。")],
+            vec![base.clone(), make("のります", "乗ります"), make("。", "。")],
+        ] {
+            let span = Ending::parse(&parts).unwrap();
+            assert_eq!(
+                (span.prefix.len(), span.displayed, span.mark),
+                (1, "乗ります", "。")
+            );
+        }
+        assert!(Ending::parse(&[base.clone(), make("のります。", "乗ります．")]).is_none());
+        assert!(
+            Ending::parse(&[
+                base.clone(),
+                make("、", "、"),
+                make("のります。", "乗ります。")
+            ])
+            .is_none()
+        );
+        assert!(Ending::parse(&[base, make("のります", "乗ります"), make("。", "…")]).is_none());
+    }
 
     #[test]
     fn strong_context_scores_preserve_writing_inside_names() {

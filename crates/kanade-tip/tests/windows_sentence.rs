@@ -20,6 +20,8 @@ fn first_conversion_uses_the_reading_and_other_segments() -> Result<()> {
     for (initial, prefix, romaji, converted) in [
         (w!(""), "", "KURUMANINORIMASU", "車に乗ります"),
         (w!(""), "", "ZASSHININORIMASU", "雑誌に載ります"),
+        (w!(""), "", "KURUMANINORIMASU.", "車に乗ります。"),
+        (w!(""), "", "ZASSHININORIMASU.", "雑誌に載ります。"),
         (w!(""), "", "NISENNKYUUNENNNOHARU", "2009年の春"),
         (
             w!("それは、梅の"),
@@ -61,7 +63,7 @@ fn first_conversion_uses_the_reading_and_other_segments() -> Result<()> {
                 Ok(())
             };
             for vk in romaji.bytes().chain(std::iter::once(b' ')) {
-                press(vk)?;
+                press(if vk == b'.' { 0xbe } else { vk })?;
             }
             let deadline = Instant::now() + Duration::from_secs(1);
             let observed = loop {
