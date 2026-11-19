@@ -458,22 +458,21 @@ impl<C: ConversionEngine> Engine<C> {
                     automatic,
                 )?;
                 if refinable {
+                    self.refine(session, &mut reply, privacy, preceding);
                     if !was_converting
-                        && preceding.is_empty()
                         && self.settings.llm
                         && self.llm.is_some()
-                        && sentence::eligible(&session.snapshot)
                         && kanade_llm::eligible(
                             privacy,
                             &reading(&session.snapshot.preedit),
                             session.manual,
                         )
+                        && let Some(pending) = sentence::Pending::prepare(session, preceding)
                         && let Some(page) = &mut reply.candidates
+                        && page.refinement_outcome != RefinementOutcome::Unavailable as i32
                     {
-                        session.sentence = Some(sentence::Pending::new());
+                        session.sentence = Some(pending);
                         page.refinement_pending = true;
-                    } else {
-                        self.refine(session, &mut reply, privacy, preceding);
                     }
                 }
                 session.last_request = Some(request.clone());
@@ -707,10 +706,21 @@ impl<C: ConversionEngine> Engine<C> {
                 {
                     return Ok(Some(key_response(reply)));
                 }
-                if session.sentence.is_none() {
+                if session.sentence.is_none() || poll.preview_event_seq.is_none() {
                     return self.poll(session, poll);
                 }
                 let result = self.poll_sentence(session, poll)?;
+                // Modern clients also get the normal candidate ordering when the
+                // whole-reading comparison has no confident correction.
+                if session.refinement.is_some()
+                    && session.sentence.is_none()
+                    && matches!(
+                        result.as_ref().and_then(|r| r.body.as_ref()),
+                        Some(response::Body::Candidates(_))
+                    )
+                {
+                    return self.poll(session, poll);
+                }
                 if let Some(response::Body::Candidates(update)) =
                     result.as_ref().and_then(|r| r.body.as_ref())
                     && !update.pending

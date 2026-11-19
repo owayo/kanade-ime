@@ -158,7 +158,7 @@ impl ConversionEngine for Backend {
     }
     fn key(&mut self, id: SessionId, key: &Key, preceding: &str) -> Result<Snapshot> {
         if id == SessionId::scripted(2) {
-            assert!(preceding.is_empty());
+            assert!(preceding.is_empty() || preceding == CONTEXT);
             return self
                 .probe
                 .as_mut()
@@ -1091,4 +1091,50 @@ fn manual_navigation_supersedes_a_sentence_poll() {
             ..
         }))
     ));
+}
+
+#[test]
+fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
+    for (default_score, changes) in [(-8.0, true), (-5.5, false)] {
+        let mut f = fixture(settings(true));
+        let initial = f.convert("こうえんをきく");
+        let request = Request {
+            body: Some(request::Body::Poll(CandidatePoll {
+                revision: Some(f.revision),
+                candidate_revision: page(&initial).candidate_revision,
+                preview_event_seq: Some(f.seq + 1),
+            })),
+        };
+        f.llm.answer(&[
+            Some(default_score),
+            Some(0.),
+            Some(-10.),
+            Some(-11.),
+            Some(-12.),
+        ]);
+        let response = f.engine.handle(f.connection, request).unwrap().unwrap();
+        let script = f.llm.0.lock().unwrap();
+        let job = script.jobs.last().unwrap();
+        assert!(!job.context.is_empty());
+        assert!(job.prefix.is_empty());
+        assert_eq!(
+            job.candidates,
+            [
+                "公園を聞く",
+                "講演を聞く",
+                "公園を効く",
+                "公演を聞く",
+                "公園を菊"
+            ]
+        );
+        if changes {
+            let Some(response::Body::Key(reply)) = response.body else {
+                panic!("expected preview");
+            };
+            assert_eq!(surface(reply.preedit.as_ref().unwrap()), "講演を聞く");
+            assert!(reply.commit.is_none());
+        } else {
+            assert!(matches!(response.body, Some(response::Body::Candidates(_))));
+        }
+    }
 }

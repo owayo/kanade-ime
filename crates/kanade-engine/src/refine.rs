@@ -3,7 +3,7 @@
 //!
 //! The key path only queues a bounded job and later looks its result up. A
 //! document-context result reorders unselected choices. Sentence previews
-//! for an empty document context are handled in the sentence module.
+//! are handled in the sentence module.
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits};
 use std::time::Duration;

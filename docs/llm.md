@@ -34,7 +34,7 @@ The key loop copies a few short strings into a queue of two jobs and later looks
 
 Kanade accepts one local reranker, **Tsumugi**. Its F16 GGUF contains 28,058,112 parameters and occupies 56,386,208 bytes. The engine, worker and settings use the same pinned identity. The Windows EXE installs the GGUF in the application’s `models` directory. The macOS DMG includes it under `Settings.app/Contents/Resources/models` inside Kanade.app. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml)
 
-A Windows x64 installation matched all 373 tokenizer references and ranked the expected candidate first in 78 of 85 context tests (91.76%). Every case received a score. Repeated runs agreed. CPU scoring took 18 ms at the median and 27 ms at the 95th percentile on the installation PC. The 85 examples exercise selected homophones. An empty Windows TSF text store displayed 車に乗ります and 雑誌に載ります after one press of Space. The integration test cancels each conversion without recording a selection.
+A Windows x64 installation matched all 373 tokenizer references and ranked the expected candidate first in 78 of 85 context tests (91.76%). Every case received a score. Repeated runs agreed. CPU scoring took 15 ms at the median and 23 ms at the 95th percentile on the installation PC. The 85 examples exercise selected homophones. An empty Windows TSF text store displayed 車に乗ります and 雑誌に載ります after one press of Space. With それは、梅の already entered, the same test showed 木の下に立っている after one press of Space. The integration test cancels each conversion without recording a selection.
 
 ## Prompt and score
 
@@ -91,6 +91,8 @@ With preceding document text, the following rules govern the candidate list.
 - Any key, selection, reset, close, setting or model change cancels the job. A result is applied only to the exact revision and candidate identities it was computed for, and only after the acknowledgement.
 - An applied order stays while the same candidates are on screen. After a manual choice nothing is reordered until the conversion ends.
 - A repeated poll or key event returns the applied page again without new work.
+
+With preceding text and up to five segments, the engine can compare up to nine full spellings that change one segment at a time. It subtracts 0.75 per alternative rank from the model score, and updates the initial preview only if the best adjusted score leads the runner-up by at least 5.0. It preserves manual selections and Kanade’s learned preference. Without a confident correction, ordinary candidate ordering is available.
 
 At the beginning of a field, the engine opens a temporary Mozc session to obtain the last segment’s alternatives. It checks the segment readings against the live conversion and compares single-kanji spellings with the same kana ending. A clear score advantage can produce one whole-reading preview. The model does this after the original key reply has been acknowledged. Typing, navigating or changing focus supersedes the job. Pressing Enter commits the visible spelling. An automatic preview creates no dictionary entry.
 

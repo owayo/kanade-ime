@@ -1,11 +1,14 @@
-//! Check the first conversion in a disposable empty TSF text store.
+//! Check the first conversion in disposable TSF text stores.
 #![cfg(windows)]
 mod common;
 use std::time::{Duration, Instant};
 use windows::{
     Win32::{
         Foundation::{LPARAM, WPARAM},
-        UI::{TextServices::*, WindowsAndMessaging::GetWindowTextW},
+        UI::{
+            TextServices::*,
+            WindowsAndMessaging::{GetWindowTextW, SendMessageW},
+        },
     },
     core::{Result, w},
 };
@@ -14,12 +17,28 @@ use windows::{
 #[ignore = "requires a registered Kanade profile with its qualified model"]
 fn first_conversion_uses_the_reading_and_other_segments() -> Result<()> {
     let mut mismatches = Vec::new();
-    for (romaji, expected) in [
-        ("KURUMANINORIMASU", "車に乗ります"),
-        ("ZASSHININORIMASU", "雑誌に載ります"),
+    for (initial, prefix, romaji, converted) in [
+        (w!(""), "", "KURUMANINORIMASU", "車に乗ります"),
+        (w!(""), "", "ZASSHININORIMASU", "雑誌に載ります"),
+        (
+            w!("それは、梅の"),
+            "それは、梅の",
+            "KONOSHITANITATTEIRU",
+            "木の下に立っている",
+        ),
     ] {
+        let expected = format!("{prefix}{converted}");
         // Escape after observing the preview so the fixture never trains personal history.
-        common::with_rich_edit(w!(""), |window, keys, context, _| unsafe {
+        common::with_rich_edit(initial, |window, keys, context, _| unsafe {
+            // Place the insertion point after the committed context (EM_SETSEL).
+            let end = prefix.encode_utf16().count();
+            SendMessageW(
+                window,
+                0x00b1,
+                Some(WPARAM(end)),
+                Some(LPARAM(end as isize)),
+            );
+            common::dispatch_pending();
             let on = keys.GetPreservedKey(
                 context,
                 &TF_PRESERVEDKEY {

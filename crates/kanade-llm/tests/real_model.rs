@@ -103,7 +103,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "",
             "を聞く",
             &["公園", "講演", "公演", "後援"],
-            &[3237255305, 3198280273, 3234259627, 3238043439],
+            &[3237143196, 3197570217, 3234764389, 3237624772],
         ),
         // A space in the context: mapped by the profile, as it was by the
         // engine before.
@@ -113,7 +113,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "",
             "で遊んだ",
             &["公園", "講演"],
-            &[3221952566, 3238563712],
+            &[3221353185, 3238744712],
         ),
         (
             "彼は",
@@ -121,7 +121,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "今日は",
             "を渡る",
             &["橋", "箸", "端"],
-            &[3229003344, 3220315354, 3237294219],
+            &[3228779310, 3220591524, 3237283568],
         ),
         (
             "",
@@ -129,7 +129,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "雑誌に",
             "",
             &["乗ります", "載ります"],
-            &[3238457921, 3156936874],
+            &[3239171268, 3155205952],
         ),
     ];
     let mut worker = Worker::spawn(Path::new(WORKER)).unwrap();
