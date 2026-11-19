@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-emoji"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "hasami",
  "serde",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-engine"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "anyhow",
  "kanade-emoji",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-eval"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "anyhow",
  "kanade-engine",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-imk"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-indexer"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "anyhow",
  "hasami",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-ipc"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "libc",
  "prost",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-learn"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "hasami",
  "kanade-ipc",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-llm"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "base64",
  "flate2",
@@ -2762,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-mozc"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "kanade-ipc",
  "libc",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-tip"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "kanade-ipc",
  "windows 0.62.2",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-ui"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -6652,7 +6652,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "26.11.114"
+version = "26.11.115"
 dependencies = [
  "anyhow",
  "hasami",

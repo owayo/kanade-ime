@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Score an initial conversion against alternatives from a disposable Mozc session.
+mod boundary_data;
 mod calendar;
 mod clause;
+mod search;
 
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits};
@@ -18,6 +20,7 @@ struct Proposal {
     after: String,
     penalties: Vec<f32>,
     margin: f32,
+    original_count: usize,
 }
 
 impl Proposal {
@@ -65,7 +68,7 @@ impl Pending {
                     return None;
                 }
             } else {
-                let segment_limit = if punctuation { 8 } else { 5 };
+                let segment_limit = 8;
                 if !is_default
                     || !(1..=segment_limit).contains(&parts.len())
                     || (!punctuation
@@ -172,6 +175,7 @@ impl<'a> Ending<'a> {
             before: String::new(),
             after: self.mark.to_owned(),
             penalties: vec![0.; job.candidates.len()],
+            original_count: job.candidates.len(),
             job,
             margin: ENDING_MARGIN,
         })
@@ -214,11 +218,7 @@ fn preserves_name_spelling(original: &str, candidate: &str) -> bool {
         || (old_kanji > 0 && katakana(&original) >= 8))
 }
 
-fn contextual_proposal(
-    parts: &[Segment],
-    lists: &[Vec<FocusCandidate>],
-    mut job: Job,
-) -> Option<Proposal> {
+fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job: Job) -> Proposal {
     job.candidates
         .push(parts.iter().map(|s| s.value.as_str()).collect());
     let mut penalties = vec![0.0];
@@ -254,13 +254,17 @@ fn contextual_proposal(
             break;
         }
     }
-    job.valid().then_some(Proposal {
+    let original_count = job.candidates.len();
+    let mut p = Proposal {
         job,
         before: String::new(),
         after: String::new(),
         penalties,
         margin: SENTENCE_MARGIN,
-    })
+        original_count,
+    };
+    search::widen(&mut p, parts, lists);
+    p
 }
 
 // Keep the typing session untouched. Check the reconstructed segmentation before using each list.
@@ -276,6 +280,7 @@ fn alternatives<C: ConversionEngine>(
     } else {
         None
     };
+    let split_deadline = Instant::now() + Duration::from_millis(80);
     let probe = backend.create_session().ok()?;
     let collect = |backend: &mut C| -> Option<Proposal> {
         backend.restore(probe, &whole).ok()?;
@@ -314,7 +319,7 @@ fn alternatives<C: ConversionEngine>(
                     if !list.iter().any(|other| other.value == c.value) {
                         list.push(c.clone());
                     }
-                    if list.len() == 4 {
+                    if list.len() == 32 {
                         break;
                     }
                 }
@@ -325,9 +330,13 @@ fn alternatives<C: ConversionEngine>(
             }
         }
         if whole.contains(['、', '。']) {
-            clause::proposal(parts, &lists, &job)
+            clause::proposal(parts, &lists, &job, |segments, p| {
+                search::resegment(backend, probe, segments, p, split_deadline)
+            })
         } else {
-            contextual_proposal(parts, &lists, job)
+            let mut proposal = contextual_proposal(parts, &lists, job);
+            search::resegment(backend, probe, parts, &mut proposal, split_deadline);
+            proposal.job.valid_for(true).then_some(proposal)
         }
     };
     let result = collect(backend);
@@ -413,22 +422,39 @@ impl<C: ConversionEngine> Engine<C> {
             Poll::Gone => return status(false, RefinementOutcome::Unavailable),
             Poll::Ready(scores) => scores,
         };
-        let Some(mut scores) = scores.into_iter().collect::<Option<Vec<_>>>() else {
-            return status(false, RefinementOutcome::Unavailable);
-        };
-        if scores.len() != job.candidates.len() || scores.iter().any(|s| !s.is_finite()) {
+        if scores.len() != job.candidates.len()
+            || scores[..proposal.original_count]
+                .iter()
+                .any(Option::is_none)
+            || scores.iter().flatten().any(|s| !s.is_finite())
+        {
             return status(false, RefinementOutcome::Unavailable);
         }
         // Only change the provisional spelling with a clear advantage over
         // both Mozc's default and the other spellings under consideration.
-        for (score, penalty) in scores.iter_mut().zip(&proposal.penalties) {
-            *score -= penalty;
-        }
+        let scores: Vec<_> = scores
+            .iter()
+            .zip(&proposal.penalties)
+            .map(|(s, p)| s.map_or(f32::NEG_INFINITY, |v| v - p))
+            .collect();
         let mut order: Vec<_> = (0..scores.len()).collect();
         order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]));
-        let winner = order[0];
+        let originals: Vec<_> = order
+            .iter()
+            .copied()
+            .filter(|&i| i < proposal.original_count)
+            .collect();
+        let mut winner = 0;
+        if originals.len() >= 2 && scores[originals[0]] - scores[originals[1]] >= proposal.margin {
+            winner = originals[0];
+        }
+        let best = order[0];
+        if best >= proposal.original_count
+            && scores[best] - scores[order[1]] >= proposal.margin + 2.0
+        {
+            winner = best;
+        }
         if winner == 0
-            || scores[winner] - scores[order[1]] < proposal.margin
             || (!job.context.is_empty()
                 && !preserves_name_spelling(&proposal.render(0), &proposal.render(winner)))
         {

@@ -29,6 +29,8 @@ pub mod limits {
     pub const CONTEXT_CHARS: usize = 40;
     pub const READING_CHARS: usize = 64;
     pub const CANDIDATES: usize = 9;
+    /// Full-sentence pool, shortlisted before neural scoring.
+    pub const SENTENCE_POOL: usize = 96;
     pub const CANDIDATE_CHARS: usize = 32;
     /// Unfocused segments before or after the focused one, in characters.
     pub const SURROUND_CHARS: usize = 64;
@@ -65,6 +67,18 @@ pub struct Job {
 }
 impl Job {
     pub fn valid(&self) -> bool {
+        self.valid_for(false)
+    }
+    pub fn valid_for(&self, sentence: bool) -> bool {
+        let limit = if sentence
+            && !self.context.is_empty()
+            && self.prefix.is_empty()
+            && self.suffix.is_empty()
+        {
+            limits::SENTENCE_POOL
+        } else {
+            limits::CANDIDATES
+        };
         let chars = |s: &str| s.chars().count();
         let clean = |s: &str| !s.chars().any(char::is_control);
         (!self.context.is_empty() || !self.prefix.trim().is_empty())
@@ -79,7 +93,7 @@ impl Job {
             && chars(&self.suffix) <= limits::SURROUND_CHARS
             && clean(&self.prefix)
             && clean(&self.suffix)
-            && (2..=limits::CANDIDATES).contains(&self.candidates.len())
+            && (2..=limit).contains(&self.candidates.len())
             && self.candidates.iter().enumerate().all(|(index, value)| {
                 (1..=limits::CANDIDATE_CHARS).contains(&chars(value))
                     && clean(value)

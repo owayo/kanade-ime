@@ -85,10 +85,26 @@ fn main() {
                 },
                 Some((runtime, profile)) => {
                     let budget = Duration::from_millis(budget_ms.min(limits::BUDGET_MS) as u64);
-                    match score(runtime, profile, &job, budget) {
-                        Ok((mut scores, tokens)) => {
+                    let indices = if sentence && job.candidates.len() > limits::CANDIDATES {
+                        runtime
+                            .prior
+                            .as_ref()
+                            .map(|p| p.shortlist(&job))
+                            .unwrap_or_else(|| (0..limits::CANDIDATES).collect())
+                    } else {
+                        (0..job.candidates.len()).collect()
+                    };
+                    let mut selected = job.clone();
+                    selected.candidates =
+                        indices.iter().map(|&i| job.candidates[i].clone()).collect();
+                    match score(runtime, profile, &selected, budget) {
+                        Ok((mut local, tokens)) => {
                             if sentence && let Some(prior) = &runtime.prior {
-                                prior.combine(&job, &mut scores);
+                                prior.combine(&selected, &mut local);
+                            }
+                            let mut scores = vec![None; job.candidates.len()];
+                            for (index, value) in indices.into_iter().zip(local) {
+                                scores[index] = value;
                             }
                             Reply::Scores { id, scores, tokens }
                         }
@@ -579,39 +595,81 @@ mod llama {
             unsafe { sys::llama_memory_clear(sys::llama_get_memory(self.context), true) };
             self.decode(conditioning, 0, false)?;
             let first = self.log_probabilities(-1)?;
-            let mut scores = Vec::with_capacity(continuations.len());
-            for continuation in continuations {
-                let Some(tokens) = continuation else {
-                    scores.push(None);
-                    continue;
+            let mut scores = vec![None; continuations.len()];
+            let mut groups = std::collections::BTreeMap::<i32, Vec<(usize, &[i32])>>::new();
+            for (i, tokens) in continuations.iter().enumerate() {
+                if let Some(t) = tokens
+                    && (1..limits::CONTINUATION_TOKENS).contains(&t.len())
+                {
+                    groups.entry(t[0]).or_default().push((i, t));
+                }
+            }
+            for group in groups.values() {
+                let reference = group[0].1;
+                let common = if group.len() > 1 && continuations.len() > limits::CANDIDATES {
+                    group[1..].iter().fold(reference.len(), |n, (_, t)| {
+                        reference[..n]
+                            .iter()
+                            .zip(*t)
+                            .take_while(|(a, b)| a == b)
+                            .count()
+                    })
+                } else {
+                    0
                 };
-                if tokens.is_empty() || tokens.len() >= limits::CONTINUATION_TOKENS {
-                    scores.push(None);
-                    continue;
+                let mut prefix_sum = 0.0;
+                let mut branch = &first;
+                let distribution;
+                if common >= 2 {
+                    self.trim(base)?;
+                    self.decode(&reference[..common], base, true)?;
+                    evaluated += common as u32;
+                    prefix_sum = first[reference[0] as usize] as f64;
+                    for (i, t) in reference[1..common].iter().enumerate() {
+                        prefix_sum += self.log_probability(i as i32, *t)? as f64;
+                    }
+                    distribution = self.log_probabilities(-1)?;
+                    branch = &distribution;
                 }
-                // SAFETY: as above; removes only the previous continuation.
-                unsafe {
-                    sys::llama_memory_seq_rm(
-                        sys::llama_get_memory(self.context),
-                        0,
-                        base as i32,
-                        -1,
-                    );
+                let shared = if common >= 2 { common } else { 0 };
+                for &(i, tokens) in group {
+                    let tail = &tokens[shared..];
+                    let end = self.end;
+                    let mut total = prefix_sum;
+                    if tail.is_empty() {
+                        total += branch[end as usize] as f64;
+                    } else {
+                        self.trim(base + shared)?;
+                        self.decode(tail, base + shared, true)?;
+                        evaluated += tail.len() as u32;
+                        total += branch[tail[0] as usize] as f64;
+                        for (j, t) in tail[1..].iter().chain(std::iter::once(&end)).enumerate() {
+                            total += self.log_probability(j as i32, *t)? as f64;
+                        }
+                    }
+                    let total = total as f32;
+                    if !total.is_finite() || total > 0.0 {
+                        return Err(Fault::Internal);
+                    }
+                    scores[i] = Some(total);
                 }
-                self.decode(tokens, base, true)?;
-                evaluated += tokens.len() as u32;
-                let mut total = first[tokens[0] as usize] as f64;
-                let end = self.end;
-                for (index, next) in tokens[1..].iter().chain(std::iter::once(&end)).enumerate() {
-                    total += self.log_probability(index as i32, *next)? as f64;
-                }
-                let total = total as f32;
-                if !total.is_finite() || total > 0.0 {
-                    return Err(Fault::Internal);
-                }
-                scores.push(Some(total));
             }
             Ok((scores, evaluated))
+        }
+        fn trim(&mut self, position: usize) -> Result<(), Fault> {
+            // SAFETY: the context owns its KV memory. Sequence zero is the sole active sequence.
+            if unsafe {
+                sys::llama_memory_seq_rm(
+                    sys::llama_get_memory(self.context),
+                    0,
+                    position as i32,
+                    -1,
+                )
+            } {
+                Ok(())
+            } else {
+                Err(Fault::Decode)
+            }
         }
         fn decode(
             &mut self,

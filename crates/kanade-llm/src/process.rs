@@ -183,7 +183,7 @@ impl Worker {
         timeout: Duration,
         sentence: bool,
     ) -> Result<Vec<Option<f32>>, Failure> {
-        if !job.valid() {
+        if !job.valid_for(sentence) {
             return Err(Failure::Refused(Fault::Malformed));
         }
         if self
@@ -203,7 +203,7 @@ impl Worker {
         timeout: Duration,
         sentence: bool,
     ) -> Result<Vec<Option<f32>>, Failure> {
-        if !job.valid() {
+        if !job.valid_for(sentence) {
             return Err(Failure::Refused(Fault::Malformed));
         }
         let id = self.id();

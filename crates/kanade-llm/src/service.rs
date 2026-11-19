@@ -244,7 +244,7 @@ fn reset(state: &mut State) {
 }
 impl Service {
     fn enqueue(&self, job: Job, sentence: bool) -> Option<u64> {
-        if !job.valid() {
+        if !job.valid_for(sentence) {
             return None;
         }
         // The profile check runs outside the lock; the generation tells

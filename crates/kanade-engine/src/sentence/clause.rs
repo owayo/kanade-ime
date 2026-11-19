@@ -26,6 +26,7 @@ pub(super) fn proposal(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
     job: &Job,
+    resegment: impl FnOnce(&[Segment], &mut Proposal),
 ) -> Option<Proposal> {
     let mut clauses = vec![Clause::default()];
     for (part, list) in parts.iter().zip(lists) {
@@ -77,7 +78,7 @@ pub(super) fn proposal(
     let mut order = Vec::new();
     for cl in &clauses {
         let end = offset + cl.surface.len();
-        if (1..=5).contains(&cl.segments.len())
+        if (1..=8).contains(&cl.segments.len())
             && cl.surface.chars().count() <= limits::CANDIDATE_CHARS
         {
             order.push((cl, offset, end));
@@ -85,6 +86,7 @@ pub(super) fn proposal(
         offset = end + cl.separator.map_or(0, char::len_utf8);
     }
     order.sort_by_key(|(c, _, _)| std::cmp::Reverse(c.reading.chars().count()));
+    let mut split = Some(resegment);
     for (cl, start, end) in order {
         let before = &whole[..start];
         let Some(context) = kanade_llm::context_window(&format!("{}{before}", job.context)) else {
@@ -95,7 +97,11 @@ pub(super) fn proposal(
             reading: kanade_llm::katakana(&cl.reading),
             ..job.clone()
         };
-        if let Some(mut item) = contextual_proposal(&cl.segments, &cl.lists, local) {
+        let mut item = contextual_proposal(&cl.segments, &cl.lists, local);
+        if let Some(probe) = split.take() {
+            probe(&cl.segments, &mut item);
+        }
+        if item.job.valid_for(true) {
             item.before = before.to_owned();
             item.after = whole[end..].to_owned();
             item.margin = 7.0;
@@ -140,7 +146,7 @@ mod tests {
             suffix: String::new(),
             candidates: vec![],
         };
-        let choice = proposal(&parts, &lists, &job).unwrap();
+        let choice = proposal(&parts, &lists, &job, |_, _| {}).unwrap();
         assert_eq!(choice.job.reading, "ケントウ");
         assert_eq!(choice.job.context, "そうしてさて、");
         assert_eq!(choice.job.candidates, ["検討", "見当"]);

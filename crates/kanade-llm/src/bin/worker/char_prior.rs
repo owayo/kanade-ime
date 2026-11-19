@@ -163,12 +163,31 @@ impl Prior {
         total
     }
 
+    pub(super) fn shortlist(&self, job: &Job) -> Vec<usize> {
+        let keep = kanade_llm::limits::CANDIDATES.min(job.candidates.len());
+        let history = job
+            .context
+            .chars()
+            .fold(0, |h, c| self.advance(h, self.id(c)));
+        let costs: Vec<_> = job
+            .candidates
+            .iter()
+            .map(|s| self.cost(history, s))
+            .collect();
+        let cutoff = costs[..keep].iter().min().copied().unwrap_or_default() + 32;
+        let mut extra: Vec<_> = (keep..costs.len())
+            .filter(|&i| costs[i] <= cutoff)
+            .collect();
+        extra.sort_by_key(|&i| costs[i]);
+        (0..keep).chain(extra.into_iter().take(6)).collect()
+    }
+
     pub(super) fn combine(&self, job: &Job, scores: &mut [Option<f32>]) {
         if job.context.is_empty()
             || !job.prefix.is_empty()
             || !job.suffix.is_empty()
             || scores.len() < 2
-            || scores.iter().any(Option::is_none)
+            || scores.iter().filter(|s| s.is_some()).count() < 2
         {
             return;
         }
@@ -181,7 +200,11 @@ impl Prior {
             .iter()
             .map(|text| self.cost(history, text))
             .collect();
-        let mut ordered = costs.clone();
+        let mut ordered: Vec<_> = costs
+            .iter()
+            .zip(scores.iter())
+            .filter_map(|(c, s)| s.map(|_| *c))
+            .collect();
         ordered.sort_unstable();
         let use_character = ordered[1] - ordered[0] >= self.policy.gap_eighths;
         for (index, (score, cost)) in scores.iter_mut().zip(costs).enumerate() {

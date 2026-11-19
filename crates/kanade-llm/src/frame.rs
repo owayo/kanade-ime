@@ -5,8 +5,8 @@
 use crate::{Job, limits};
 use std::io::{self, Read, Write};
 
-/// Version 2 added the model ID to `Load` and the applied profile to `Loaded`.
-pub const PROTOCOL: u32 = 2;
+/// Version 3 admits expanded sentence pools and sparse score replies for those pools.
+pub const PROTOCOL: u32 = 3;
 /// Largest accepted frame body. A scoring request is far smaller.
 pub const MAX_FRAME: usize = 64 * 1024;
 const MAX_PATH: usize = 4096;
@@ -278,7 +278,13 @@ impl Request {
                 let prefix = input.text(bytes)?;
                 let suffix = input.text(bytes)?;
                 let count = input.u8()? as usize;
-                if count > limits::CANDIDATES {
+                if count
+                    > if op == 5 {
+                        limits::SENTENCE_POOL
+                    } else {
+                        limits::CANDIDATES
+                    }
+                {
                     return None;
                 }
                 let mut candidates = Vec::with_capacity(count);
@@ -292,7 +298,7 @@ impl Request {
                     suffix,
                     candidates,
                 };
-                if !job.valid() {
+                if !job.valid_for(op == 5) {
                     return None;
                 }
                 Self::Score {
@@ -425,7 +431,7 @@ impl Reply {
                 let id = input.u64()?;
                 let tokens = input.u32()?;
                 let count = input.u8()? as usize;
-                if count > limits::CANDIDATES {
+                if count > limits::SENTENCE_POOL {
                     return None;
                 }
                 let mut scores = Vec::with_capacity(count);
@@ -575,6 +581,36 @@ mod tests {
             assert_eq!(Reply::decode(&reply.encode()), Some(reply));
         }
     }
+    #[test]
+    fn expanded_pools_require_a_conditioned_sentence_and_round_trip_sparse_scores() {
+        let mut input = job();
+        input.context = "事前の文".into();
+        input.prefix.clear();
+        input.suffix.clear();
+        input.candidates = (0..limits::SENTENCE_POOL)
+            .map(|i| format!("候補{i}"))
+            .collect();
+        let request = Request::Score {
+            id: 7,
+            sentence: true,
+            budget_ms: 250,
+            job: input.clone(),
+        };
+        assert_eq!(Request::decode(&request.encode()), Some(request));
+        assert!(!input.valid());
+        input.context.clear();
+        input.prefix = "語".into();
+        assert!(!input.valid_for(true));
+        let mut scores = vec![None; limits::SENTENCE_POOL];
+        scores[0] = Some(-1.0);
+        let reply = Reply::Scores {
+            id: 7,
+            tokens: 11,
+            scores,
+        };
+        assert_eq!(Reply::decode(&reply.encode()), Some(reply));
+    }
+
     #[test]
     fn malformed_oversized_and_nonfinite_frames_are_refused() {
         let good = Request::Score {
