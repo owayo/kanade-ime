@@ -219,10 +219,10 @@ pub static TSUMUGI: Profile = Profile {
 /// The fixed model used by the engine and isolated worker.
 pub static CATALOG: &[Model] = &[Model {
     id: "tsumugi-s-f16",
-    name: "Tsumugi",
+    name: "Tsumugi 26.11.100",
     file_name: "tsumugi.gguf",
     size: 56386208,
-    sha256: "cf82b6ed496c6ee45ca0a12e5b87062991901c5f0c6ee584fae08a7dcdabceca",
+    sha256: "103f125bfc2eae3705195a020fdcafc96e2694f52ef642add7aeb27ea7df06fd",
     license: "LicenseRef-Kanade-Model-1.0",
     license_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md#tsumugi-model",
     source_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md",
@@ -457,6 +457,19 @@ mod tests {
             entry(&lines, "profile", model.profile.id);
             entry(&lines, "source", model.source_url);
             entry(&lines, "revision", model.revision);
+            let version = model
+                .name
+                .strip_prefix("Tsumugi ")
+                .expect("versioned model name");
+            entry(&lines, "version", version);
+            entry(
+                &lines,
+                "download_url",
+                &format!(
+                    "https://github.com/owayo/kanade-ime/releases/download/tsumugi-{version}/{}",
+                    model.file_name
+                ),
+            );
             entry(&lines, "file", model.file_name);
             entry(&lines, "size", &model.size.to_string());
             entry(&lines, "sha256", model.sha256);
@@ -531,7 +544,7 @@ mod tests {
         assert_eq!(model.size, 56386208);
         assert_eq!(
             model.sha256,
-            "cf82b6ed496c6ee45ca0a12e5b87062991901c5f0c6ee584fae08a7dcdabceca"
+            "103f125bfc2eae3705195a020fdcafc96e2694f52ef642add7aeb27ea7df06fd"
         );
         assert_eq!(model.license, "LicenseRef-Kanade-Model-1.0");
         let profile = model.profile;
@@ -736,7 +749,7 @@ mod tests {
         assert!(terms.contains("最大 40 文字"));
         assert_eq!(
             terms_sha256(model),
-            "0e19bfb6a6b1f9422d93e3a40493c3400fcf979da230fc40d825bbdd851e770a"
+            "1e744a06548df80785e97a3cdf3e06f16c3dda7de3a04610dab66f18bc0ed30b"
         );
         // Terms name the model, so no consent carries over to another one.
         assert_ne!(terms_sha256(fixture::alt()), terms_sha256(model));
