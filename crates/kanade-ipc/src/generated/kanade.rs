@@ -615,6 +615,7 @@ pub enum CandidateSource {
     Llm = 3,
     Date = 4,
     Emoji = 5,
+    English = 6,
 }
 impl CandidateSource {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -629,6 +630,7 @@ impl CandidateSource {
             Self::Llm => "LLM",
             Self::Date => "DATE",
             Self::Emoji => "EMOJI",
+            Self::English => "ENGLISH",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -640,6 +642,7 @@ impl CandidateSource {
             "LLM" => Some(Self::Llm),
             "DATE" => Some(Self::Date),
             "EMOJI" => Some(Self::Emoji),
+            "ENGLISH" => Some(Self::English),
             _ => None,
         }
     }

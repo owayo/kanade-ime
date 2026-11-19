@@ -122,6 +122,10 @@ pub fn macos(root: &Path, debug: bool) -> Result<()> {
         )?;
     }
     fs::copy(root.join("LICENSE"), resources.join("LICENSE"))?;
+    fs::copy(
+        root.join("crates/kanade-engine/data/SudachiDict-LEGAL.txt"),
+        resources.join("SudachiDict-LEGAL.txt"),
+    )?;
     let emoji_notices = resources.join("emoji-notices");
     fs::create_dir_all(&emoji_notices)?;
     for name in [

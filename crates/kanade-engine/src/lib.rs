@@ -9,6 +9,7 @@ use std::{
 mod candidates;
 pub mod config;
 pub mod dates;
+mod english;
 mod refine;
 mod sentence;
 #[cfg(any(unix, windows))]
@@ -63,6 +64,7 @@ struct Session {
     /// Protocol version negotiated for this connection.
     version: u32,
     preview_base: Option<Snapshot>,
+    literal_spelling: Option<String>,
     date_candidates: Option<(String, dates::Date)>,
     id: SessionId,
     revision: Revision,
@@ -89,6 +91,7 @@ struct Session {
     selection_intents: Vec<Word>,
 }
 pub struct Engine<C> {
+    spellings: &'static english::Spellings,
     emoji: &'static kanade_emoji::Catalog,
     projects: std::sync::Arc<kanade_indexer::Catalog>,
     settings: config::Config,
@@ -152,6 +155,7 @@ impl<C: ConversionEngine> Engine<C> {
             .unwrap_or_default()
             .as_nanos() as u64;
         Self {
+            spellings: english::Spellings::bundled(),
             emoji: kanade_emoji::Catalog::bundled(),
             projects: Default::default(),
             settings: config::Config::default(),
@@ -186,6 +190,7 @@ impl<C: ConversionEngine> Engine<C> {
             Session {
                 version,
                 preview_base: None,
+                literal_spelling: None,
                 date_candidates: None,
                 id,
                 revision: Revision {
@@ -302,6 +307,7 @@ impl<C: ConversionEngine> Engine<C> {
                     privacy = Privacy::Unknown;
                 }
                 if privacy == Privacy::Password {
+                    session.literal_spelling = None;
                     session.detector.cancel();
                     session.visible = None;
                     session.frozen = None;
@@ -318,6 +324,9 @@ impl<C: ConversionEngine> Engine<C> {
                 {
                     session.selection_intents.clear();
                     session.frozen = None;
+                }
+                if session.privacy != privacy || session.app != context.app {
+                    session.literal_spelling = None;
                 }
                 session.privacy = privacy;
                 session.app.clone_from(&context.app);
@@ -430,6 +439,12 @@ impl<C: ConversionEngine> Engine<C> {
                     && !history_delete
                     && !kanade_ipc::frontend::is_conversion_control(input)
                     && snapshot.commit.is_none();
+                english::update_literal(
+                    &mut session.literal_spelling,
+                    &session.snapshot,
+                    &snapshot,
+                    input,
+                );
                 if !snapshot.synthetic_preview {
                     let preferred = self.refresh_choices(session, &snapshot, &context.app);
                     if prefer_initial
@@ -630,6 +645,7 @@ impl<C: ConversionEngine> Engine<C> {
                 session.preceding.clear();
                 session.choices.clear();
                 session.date_candidates = None;
+                session.literal_spelling = None;
                 session.automatic = false;
                 Ok(Some(Response {
                     body: Some(response::Body::Ack(true)),
@@ -681,6 +697,7 @@ impl<C: ConversionEngine> Engine<C> {
                     ""
                 };
                 session.preceding = preceding.to_owned();
+                session.literal_spelling = None;
                 let snapshot = match self.backend.restore(session.id, &restore.reading) {
                     Ok(snapshot) => snapshot,
                     // The session is empty again; only this request failed.
@@ -879,6 +896,9 @@ impl<C: ConversionEngine> Engine<C> {
             .ok_or(Code::Unavailable)?;
         session.last_seq = seq;
         let composing = !snapshot.preedit.segments.is_empty();
+        if !composing {
+            session.literal_spelling = None;
+        }
         let page = self.page(session, &snapshot);
         let reply = KeyReply {
             revision: Some(session.revision),

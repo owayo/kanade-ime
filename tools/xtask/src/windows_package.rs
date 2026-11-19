@@ -37,6 +37,10 @@ pub fn stage(root: &Path) -> Result<()> {
     fs::copy(notices::collect(root)?, stage.join("CARGO_LICENSES.md"))?;
     for (source, name) in [
         ("LICENSE", "LICENSE"),
+        (
+            "crates/kanade-engine/data/SudachiDict-LEGAL.txt",
+            "SudachiDict-LEGAL.txt",
+        ),
         ("crates/kanade-ui/LICENSE-APACHE", "LICENSE-APACHE.ui"),
         ("docs/third-party.md", "THIRD_PARTY.md"),
         ("third_party/mozc/LICENSE", "LICENSE.mozc"),

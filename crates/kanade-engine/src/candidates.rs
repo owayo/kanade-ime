@@ -11,6 +11,29 @@ pub(super) struct Choice {
     transliteration: bool,
 }
 impl Choice {
+    fn insert_spellings(choices: &mut Vec<Self>, reading: &str, words: &str, whole: bool) {
+        for value in words.split('\t').rev() {
+            let slot = choices.iter().position(|c| c.value == value);
+            if slot == Some(0) {
+                continue;
+            }
+            // Keep native selection and learning for the same replacement.
+            let choice = match slot.map(|i| choices.remove(i)) {
+                Some(existing) if existing.whole_reading == whole => existing,
+                _ => Self {
+                    value: value.into(),
+                    reading: reading.into(),
+                    annotation: "英字".into(),
+                    source: CandidateSource::English,
+                    history_deletable: false,
+                    whole_reading: whole,
+                    transliteration: false,
+                },
+            };
+            choices.insert(choices.len().min(1), choice);
+        }
+    }
+
     pub(super) fn sentence(value: String, reading: String, source: CandidateSource) -> Self {
         Self {
             value,
@@ -77,6 +100,22 @@ impl<C: ConversionEngine> Engine<C> {
                 transliteration: c.transliteration,
             })
             .collect();
+        if let Some(segment) = focused {
+            let whole = reading(&snapshot.preedit);
+            let multi = snapshot.preedit.segments.len() > 1;
+            if let Some(words) = self.spellings.lookup(&whole) {
+                Choice::insert_spellings(&mut choices, &whole, words, multi);
+            } else if multi && let Some(words) = self.spellings.lookup(&segment.reading) {
+                Choice::insert_spellings(&mut choices, &segment.reading, words, false);
+            }
+            if let Some(word) = session
+                .literal_spelling
+                .as_deref()
+                .and_then(|s| self.spellings.literal(s))
+            {
+                Choice::insert_spellings(&mut choices, &whole, word, multi);
+            }
+        }
         if self.settings.learning
             && session.privacy == Privacy::Normal
             && let Some(segment) = focused
@@ -324,7 +363,10 @@ impl<C: ConversionEngine> Engine<C> {
         let mut preview = base.clone();
         let transient = matches!(
             choice.source,
-            CandidateSource::Date | CandidateSource::Emoji | CandidateSource::Llm
+            CandidateSource::Date
+                | CandidateSource::Emoji
+                | CandidateSource::Llm
+                | CandidateSource::English
         );
         if choice.source == CandidateSource::Date && !self.settings.calculated_dates {
             return Err(Code::Stale);

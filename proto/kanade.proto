@@ -27,7 +27,7 @@ message Segment { string reading = 1; string value = 2; bool focused = 3; uint32
 message Preedit { repeated Segment segments = 1; uint32 cursor_utf16 = 2; }
 message Word { string reading = 1; string value = 2; }
 message Commit { string reading = 1; string value = 2; repeated Word words = 3; bool synthetic = 4; bool transient = 5; }
-enum CandidateSource { MOZC = 0; LEARNED = 1; PROJECT = 2; LLM = 3; DATE = 4; EMOJI = 5; }
+enum CandidateSource { MOZC = 0; LEARNED = 1; PROJECT = 2; LLM = 3; DATE = 4; EMOJI = 5; ENGLISH = 6; }
 message CandidateItem { CandidateHandle handle = 1; string value = 2; string reading = 3; string annotation = 4; CandidateSource source = 5; uint32 number = 6; }
 enum RefinementOutcome { REFINEMENT_OUTCOME_UNSPECIFIED = 0; REFINEMENT_OUTCOME_EVALUATED = 1; REFINEMENT_OUTCOME_UNAVAILABLE = 2; REFINEMENT_OUTCOME_TIMED_OUT = 3; }
 message CandidatePage { uint64 candidate_revision = 1; uint32 total = 2; uint32 start = 3; uint32 selected = 4; repeated CandidateItem items = 5; string footer = 6; float font_size = 7; bool refinement_pending = 8; RefinementOutcome refinement_outcome = 9; }
