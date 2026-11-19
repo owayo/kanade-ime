@@ -97,6 +97,42 @@ fn ending_proposal(parts: &[Segment], last: &[FocusCandidate], mut job: Job) -> 
     })
 }
 
+// Mozc can offer a reading in kana for an entire name, or omit the dots in
+// a transliterated name. Those are useful manual choices even when a small
+// language model strongly prefers the more common spelling.
+fn preserves_name_spelling(original: &str, candidate: &str) -> bool {
+    let original: Vec<char> = original.chars().collect();
+    let candidate: Vec<char> = candidate.chars().collect();
+    let prefix = original
+        .iter()
+        .zip(&candidate)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let left = &original[prefix..];
+    let right = &candidate[prefix..];
+    let suffix = left
+        .iter()
+        .rev()
+        .zip(right.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old = &left[..left.len() - suffix];
+    let new = &right[..right.len() - suffix];
+    let kanji = |text: &[char]| text.iter().filter(|&&c| ('一'..='鿿').contains(&c)).count();
+    let katakana = |text: &[char]| {
+        text.iter()
+            .filter(|&&c| matches!(c, 'ァ'..='ヺ' | 'ー'))
+            .count()
+    };
+    let old_kanji = kanji(old);
+    let old_katakana = katakana(old);
+    !(old.contains(&'・')
+        || new.contains(&'・')
+        || (old_kanji >= 2 && kanji(new) < old_kanji)
+        || (old_katakana >= 3 && katakana(new) < old_katakana)
+        || (old_kanji > 0 && katakana(&original) >= 8))
+}
+
 fn contextual_proposal(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
@@ -288,7 +324,11 @@ impl<C: ConversionEngine> Engine<C> {
         let mut order: Vec<_> = (0..scores.len()).collect();
         order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]));
         let winner = order[0];
-        if winner == 0 || scores[winner] - scores[order[1]] < proposal.margin {
+        if winner == 0
+            || scores[winner] - scores[order[1]] < proposal.margin
+            || (!job.context.is_empty()
+                && !preserves_name_spelling(&job.candidates[0], &job.candidates[winner]))
+        {
             return status(false, RefinementOutcome::Evaluated);
         }
         let value = format!("{}{}", job.prefix, job.candidates[winner]);
@@ -314,5 +354,31 @@ impl<C: ConversionEngine> Engine<C> {
         });
         session.last_reply = Some(reply.clone());
         Ok(Some(key_response(reply)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preserves_name_spelling;
+
+    #[test]
+    fn strong_context_scores_preserve_writing_inside_names() {
+        for (shown, proposed) in [
+            ("アリス・ミラーの作品", "アリスミラーの作品"),
+            ("旧西山町に着く", "旧にしやまちょうに着く"),
+            ("オレゴン州に移る", "乙州に移る"),
+            ("ブルーサンダース東山ブルー", "ブルーサンダース頭ブルー"),
+        ] {
+            assert!(!preserves_name_spelling(shown, proposed));
+        }
+        assert!(preserves_name_spelling("検討がつかない", "見当がつかない"));
+        assert!(preserves_name_spelling(
+            "掲載・検討が必要",
+            "掲載・見当が必要"
+        ));
+        assert!(preserves_name_spelling(
+            "木の下に経っている",
+            "木の下に立っている"
+        ));
     }
 }
