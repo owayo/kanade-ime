@@ -1148,7 +1148,7 @@ fn manual_navigation_supersedes_a_sentence_poll() {
 }
 
 #[test]
-fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
+fn contextual_alternatives_need_a_clear_advantage_over_the_default() {
     for (default_score, changes) in [(-8.0, true), (-5.5, false)] {
         let mut f = fixture(settings(true));
         let initial = f.convert("こうえんをきく");
@@ -1165,6 +1165,9 @@ fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
             Some(-10.),
             Some(-11.),
             Some(-12.),
+            None,
+            None,
+            None,
         ]);
         let response = f.engine.handle(f.connection, request).unwrap().unwrap();
         let script = f.llm.0.lock().unwrap();
@@ -1178,7 +1181,10 @@ fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
                 "講演を聞く",
                 "公園を効く",
                 "公演を聞く",
-                "公園を菊"
+                "公園を菊",
+                "講演を効く",
+                "公演を効く",
+                "講演を菊"
             ]
         );
         if changes {
@@ -1187,6 +1193,40 @@ fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
             };
             assert_eq!(surface(reply.preedit.as_ref().unwrap()), "講演を聞く");
             assert!(reply.commit.is_none());
+        } else {
+            assert!(matches!(response.body, Some(response::Body::Candidates(_))));
+        }
+    }
+}
+
+#[test]
+fn nearby_joint_spellings_keep_the_displayed_default() {
+    for (other_joint, use_winner) in [(15.5, false), (-10.0, true)] {
+        let mut f = fixture(settings(true));
+        let initial = f.convert("こうえんをきく");
+        let request = Request {
+            body: Some(request::Body::Poll(CandidatePoll {
+                revision: Some(f.revision),
+                candidate_revision: page(&initial).candidate_revision,
+                preview_event_seq: Some(f.seq + 1),
+            })),
+        };
+        f.llm.answer(&[
+            Some(0.0),
+            Some(-1.0),
+            Some(-2.0),
+            Some(-3.0),
+            Some(-4.0),
+            Some(16.0),
+            Some(other_joint),
+            None,
+        ]);
+        let response = f.engine.handle(f.connection, request).unwrap().unwrap();
+        if use_winner {
+            let Some(response::Body::Key(reply)) = response.body else {
+                panic!("expected preview")
+            };
+            assert_eq!(surface(reply.preedit.as_ref().unwrap()), "講演を効く");
         } else {
             assert!(matches!(response.body, Some(response::Body::Candidates(_))));
         }

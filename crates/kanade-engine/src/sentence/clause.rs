@@ -26,7 +26,7 @@ pub(super) fn proposal(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
     job: &Job,
-    resegment: impl FnOnce(&[Segment], &mut Proposal),
+    resegment: impl FnOnce(&[Segment], &mut Proposal) -> Vec<search::Split>,
 ) -> Option<Proposal> {
     let mut clauses = vec![Clause::default()];
     for (part, list) in parts.iter().zip(lists) {
@@ -78,9 +78,7 @@ pub(super) fn proposal(
     let mut order = Vec::new();
     for cl in &clauses {
         let end = offset + cl.surface.len();
-        if (1..=8).contains(&cl.segments.len())
-            && cl.surface.chars().count() <= limits::CANDIDATE_CHARS
-        {
+        if !cl.segments.is_empty() {
             order.push((cl, offset, end));
         }
         offset = end + cl.separator.map_or(0, char::len_utf8);
@@ -89,7 +87,12 @@ pub(super) fn proposal(
     let mut split = Some(resegment);
     for (cl, start, end) in order {
         let before = &whole[..start];
-        let Some(context) = kanade_llm::context_window(&format!("{}{before}", job.context)) else {
+        let preceding = format!("{}{before}", job.context);
+        let context = if preceding.is_empty() {
+            String::new()
+        } else if let Some(context) = kanade_llm::context_window(&preceding) {
+            context
+        } else {
             continue;
         };
         let local = Job {
@@ -97,12 +100,12 @@ pub(super) fn proposal(
             reading: kanade_llm::katakana(&cl.reading),
             ..job.clone()
         };
-        let mut item = contextual_proposal(&cl.segments, &cl.lists, local);
-        if let Some(probe) = split.take() {
-            probe(&cl.segments, &mut item);
-        }
-        if item.job.valid_for(true) {
-            item.before = before.to_owned();
+        if let Some(mut item) = scored_window(&cl.segments, &cl.lists, local, |parts, item| {
+            split
+                .take()
+                .map_or_else(Vec::new, |probe| probe(parts, item))
+        }) {
+            item.before.insert_str(0, before);
             item.after = whole[end..].to_owned();
             item.margin = 7.0;
             return Some(item);
@@ -146,10 +149,49 @@ mod tests {
             suffix: String::new(),
             candidates: vec![],
         };
-        let choice = proposal(&parts, &lists, &job, |_, _| {}).unwrap();
+        let choice = proposal(&parts, &lists, &job, |_, _| Vec::new()).unwrap();
         assert_eq!(choice.job.reading, "ケントウ");
         assert_eq!(choice.job.context, "そうしてさて、");
         assert_eq!(choice.job.candidates, ["検討", "見当"]);
         assert_eq!(choice.render(1), "さて、見当。");
+    }
+
+    #[test]
+    fn displayed_prefix_supplies_missing_context_and_survives_a_second_edit() {
+        let parts = [
+            part("そっと", "そっと"),
+            part("きに", "木に"),
+            part("わしを", "和紙を"),
+            part("はる", "貼る"),
+        ];
+        let lists = [
+            vec![option("そっと")],
+            vec![option("木に"), option("気に")],
+            vec![option("和紙を")],
+            vec![option("貼る"), option("張る")],
+        ];
+        let job = Job {
+            context: String::new(),
+            reading: "ソットキニワシヲハル".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+        let item = scored_window(&parts, &lists, job, |window, p| {
+            assert_eq!(window[0].value, "木に");
+            p.job.candidates.push("木に和詩を貼る".into());
+            p.penalties.push(4.0);
+            vec![search::Split {
+                index: p.penalties.len() - 1,
+                start: 1,
+                end: 2,
+            }]
+        })
+        .unwrap();
+        assert_eq!(item.job.context, "そっと");
+        assert_eq!(item.job.reading, "キニワシヲハル");
+        for expected in ["そっと気に和詩を貼る", "そっと木に和詩を張る"] {
+            assert!((0..item.job.candidates.len()).any(|i| item.render(i) == expected));
+        }
     }
 }
