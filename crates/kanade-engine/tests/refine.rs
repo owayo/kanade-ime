@@ -19,6 +19,7 @@ struct Calls {
 /// A minimal conversion backend: one composition, fixed candidates per segment.
 #[derive(Default)]
 struct Backend {
+    probe: Option<Box<Backend>>,
     calls: Arc<Mutex<Calls>>,
     reading: String,
     segments: Vec<(String, Vec<&'static str>, usize)>,
@@ -28,6 +29,14 @@ struct Backend {
 fn table(reading: &str) -> Vec<(String, Vec<&'static str>, usize)> {
     let one = |reading: &str, values: Vec<&'static str>| vec![(reading.to_owned(), values, 0)];
     match reading {
+        "かめらでとります" => vec![
+            ("かめらで".into(), vec!["カメラで"], 0),
+            (
+                "とります".into(),
+                vec!["取ります", "とります", "撮ります"],
+                0,
+            ),
+        ],
         "こうえん" => one(reading, vec!["公園", "講演", "公演", "後援"]),
         "こんげつまつ" => one(reading, vec!["今月末", "今月松", "根月末"]),
         "こうえんをきく" => vec![
@@ -125,15 +134,37 @@ impl ConversionEngine for Backend {
         Ok(())
     }
     fn create_session(&mut self) -> Result<SessionId> {
-        Ok(SessionId::scripted(1))
+        if self.converting {
+            self.probe = Some(Box::default());
+            Ok(SessionId::scripted(2))
+        } else {
+            Ok(SessionId::scripted(1))
+        }
     }
-    fn delete_session(&mut self, _: SessionId) -> Result<()> {
+    fn restore(&mut self, id: SessionId, reading: &str) -> Result<Snapshot> {
+        assert_eq!(id, SessionId::scripted(2));
+        let probe = self.probe.as_mut().unwrap();
+        probe.reading = reading.into();
+        Ok(probe.snapshot())
+    }
+    fn delete_session(&mut self, id: SessionId) -> Result<()> {
+        if id == SessionId::scripted(2) {
+            self.probe = None;
+        }
         Ok(())
     }
     fn set_privacy(&mut self, _: Privacy) -> Result<()> {
         Ok(())
     }
-    fn key(&mut self, _: SessionId, key: &Key, _: &str) -> Result<Snapshot> {
+    fn key(&mut self, id: SessionId, key: &Key, preceding: &str) -> Result<Snapshot> {
+        if id == SessionId::scripted(2) {
+            assert!(preceding.is_empty());
+            return self
+                .probe
+                .as_mut()
+                .unwrap()
+                .key(SessionId::scripted(1), key, preceding);
+        }
         self.calls.lock().unwrap().keys += 1;
         match SpecialKey::try_from(key.special).unwrap() {
             SpecialKey::None if !self.converting => self.reading.push_str(&key.text),
@@ -343,6 +374,7 @@ impl Fixture {
                 self.connection,
                 Request {
                     body: Some(request::Body::Poll(CandidatePoll {
+                        preview_event_seq: None,
                         revision: Some(revision),
                         candidate_revision,
                     })),
@@ -992,4 +1024,71 @@ fn the_real_model_reorders_candidates_through_the_engine() {
     println!("warm update after {} ms", waited.as_millis());
     assert!(waited < Duration::from_millis(300));
     assert_eq!(updated.items[1].value, "後援");
+}
+
+#[test]
+fn sentence_preview_is_acknowledged_once_and_plain_enter_commits_it() {
+    let mut f = fixture(settings(true));
+    f.context.preceding_text.clear();
+    let initial = f.convert("かめらでとります");
+    let page = page(&initial);
+    assert!(page.refinement_pending);
+    let request = Request {
+        body: Some(request::Body::Poll(CandidatePoll {
+            revision: Some(f.revision),
+            candidate_revision: page.candidate_revision,
+            preview_event_seq: Some(f.seq + 1),
+        })),
+    };
+    f.llm.answer(&[Some(-4.0), Some(-0.2)]);
+    let response = f
+        .engine
+        .handle(f.connection, request.clone())
+        .unwrap()
+        .unwrap();
+    let Some(response::Body::Key(preview)) = response.body else {
+        panic!("expected a preview")
+    };
+    assert_eq!(
+        surface(preview.preedit.as_ref().unwrap()),
+        "カメラで撮ります"
+    );
+    assert!(preview.commit.is_none());
+    let retry = f.engine.handle(f.connection, request).unwrap().unwrap();
+    assert_eq!(retry.body, Some(response::Body::Key(preview.clone())));
+    assert_eq!(f.llm.jobs(), 1);
+    f.seq = preview.event_seq;
+    f.revision = preview.revision.unwrap();
+    f.ack(&preview);
+    let committed = f.special(SpecialKey::Enter);
+    let commit = committed.commit.as_ref().unwrap();
+    assert_eq!(commit.value, "カメラで撮ります");
+    assert!(commit.transient);
+}
+
+#[test]
+fn manual_navigation_supersedes_a_sentence_poll() {
+    let mut f = fixture(settings(true));
+    f.context.preceding_text.clear();
+    let initial = f.convert("かめらでとります");
+    let old = CandidatePoll {
+        revision: Some(f.revision),
+        candidate_revision: page(&initial).candidate_revision,
+        preview_event_seq: Some(f.seq + 1),
+    };
+    let request = Request {
+        body: Some(request::Body::Poll(old)),
+    };
+    f.engine.handle(f.connection, request.clone()).unwrap();
+    let navigation = f.special(SpecialKey::Right);
+    f.ack(&navigation);
+    let response = f.engine.handle(f.connection, request).unwrap().unwrap();
+    assert!(matches!(
+        response.body,
+        Some(response::Body::Candidates(CandidateUpdate {
+            pending: false,
+            candidates: None,
+            ..
+        }))
+    ));
 }

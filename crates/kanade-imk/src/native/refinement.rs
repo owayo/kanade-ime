@@ -1,5 +1,5 @@
-//! Read-only, bounded candidate refreshes while a local ranker is pending.
-//! The timer holds a weak controller and never fetches or edits document text.
+//! Bounded candidate refreshes while the local ranker is pending.
+//! The focused controller can apply and acknowledge a revised marked spelling.
 use super::*;
 use objc2::rc::Weak;
 use objc2_foundation::NSTimer;
@@ -127,7 +127,13 @@ impl Controller {
             }
             return;
         };
-        let result = client.poll_candidates(&page);
+        let result = client.poll_with_preview(
+            &page,
+            &mut NativeDocument {
+                controller: self,
+                sender: &sender,
+            },
+        );
         if let Ok(mut stored) = self.ivars().engine.try_borrow_mut() {
             *stored = Some(client);
         }

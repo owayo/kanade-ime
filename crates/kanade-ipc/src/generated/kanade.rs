@@ -267,6 +267,8 @@ pub struct CandidatePoll {
     pub revision: ::core::option::Option<Revision>,
     #[prost(uint64, tag = "2")]
     pub candidate_revision: u64,
+    #[prost(uint64, optional, tag = "3")]
+    pub preview_event_seq: ::core::option::Option<u64>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

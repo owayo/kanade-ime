@@ -96,14 +96,14 @@ fn tsumugi_scores_match_the_training_implementation() {
         &'static [&'static str],
         &'static [u32],
     );
-    let cases: [Case; 3] = [
+    let cases: [Case; 4] = [
         (
             "明日は市民ホールで有名な作家の",
             "こうえんをきく",
             "",
             "を聞く",
             &["公園", "講演", "公演", "後援"],
-            &[3226221214, 3208464866, 3231962496, 3232679491],
+            &[3237255305, 3198280273, 3234259627, 3238043439],
         ),
         // A space in the context: mapped by the profile, as it was by the
         // engine before.
@@ -113,7 +113,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "",
             "で遊んだ",
             &["公園", "講演"],
-            &[3218081206, 3238810439],
+            &[3221952566, 3238563712],
         ),
         (
             "彼は",
@@ -121,7 +121,15 @@ fn tsumugi_scores_match_the_training_implementation() {
             "今日は",
             "を渡る",
             &["橋", "箸", "端"],
-            &[3227859595, 3222808210, 3235374125],
+            &[3229003344, 3220315354, 3237294219],
+        ),
+        (
+            "",
+            "ざっしにのります",
+            "雑誌に",
+            "",
+            &["乗ります", "載ります"],
+            &[3238457921, 3156936874],
         ),
     ];
     let mut worker = Worker::spawn(Path::new(WORKER)).unwrap();
@@ -131,7 +139,11 @@ fn tsumugi_scores_match_the_training_implementation() {
     let mut exact = 0;
     for (context, reading, prefix, suffix, candidates, expected) in cases {
         let job = Job {
-            context: kanade_llm::context_window(context).unwrap(),
+            context: if context.is_empty() {
+                String::new()
+            } else {
+                kanade_llm::context_window(context).unwrap()
+            },
             reading: katakana(reading),
             prefix: prefix.into(),
             suffix: suffix.into(),
@@ -149,7 +161,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             exact += (score.to_bits() == *bits) as u32;
         }
     }
-    println!("scores identical to the bit: {exact} of 9");
+    println!("scores identical to the bit: {exact} of 11");
 }
 
 #[test]

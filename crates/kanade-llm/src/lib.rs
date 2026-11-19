@@ -53,7 +53,7 @@ pub mod limits {
 /// active profile in the worker; a job carries plain text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Job {
-    /// Trailing left context; never empty for an accepted job.
+    /// Trailing document context. A composition prefix also supplies context.
     pub context: String,
     /// Katakana reading of the whole composition.
     pub reading: String,
@@ -67,7 +67,8 @@ impl Job {
     pub fn valid(&self) -> bool {
         let chars = |s: &str| s.chars().count();
         let clean = |s: &str| !s.chars().any(char::is_control);
-        (1..=limits::CONTEXT_CHARS).contains(&chars(&self.context))
+        (!self.context.is_empty() || !self.prefix.trim().is_empty())
+            && chars(&self.context) <= limits::CONTEXT_CHARS
             && clean(&self.context)
             && (2..=limits::READING_CHARS).contains(&chars(&self.reading))
             && self

@@ -10,6 +10,19 @@ pub(super) struct Choice {
     whole_reading: bool,
     transliteration: bool,
 }
+impl Choice {
+    pub(super) fn model_sentence(value: String, reading: String) -> Self {
+        Self {
+            value,
+            reading,
+            source: CandidateSource::Llm,
+            annotation: "文脈".into(),
+            history_deletable: false,
+            whole_reading: true,
+            transliteration: false,
+        }
+    }
+}
 pub(super) fn remember_selection(session: &mut Session, choice: &Choice) {
     if session.privacy != Privacy::Normal
         || choice.source != CandidateSource::Mozc
@@ -306,7 +319,7 @@ impl<C: ConversionEngine> Engine<C> {
         let mut preview = base.clone();
         let transient = matches!(
             choice.source,
-            CandidateSource::Date | CandidateSource::Emoji
+            CandidateSource::Date | CandidateSource::Emoji | CandidateSource::Llm
         );
         if choice.source == CandidateSource::Date && !self.settings.calculated_dates {
             return Err(Code::Stale);

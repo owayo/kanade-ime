@@ -266,6 +266,21 @@ impl<T: Transport> Client<T> {
         &mut self,
         current: &CandidatePage,
     ) -> io::Result<Option<CandidatePage>> {
+        self.poll(current, None)
+    }
+    /// A focused native editor may accept a revision-bound provisional spelling.
+    pub fn poll_with_preview(
+        &mut self,
+        current: &CandidatePage,
+        document: &mut impl Document,
+    ) -> io::Result<Option<CandidatePage>> {
+        self.poll(current, Some(document))
+    }
+    fn poll(
+        &mut self,
+        current: &CandidatePage,
+        document: Option<&mut dyn Document>,
+    ) -> io::Result<Option<CandidatePage>> {
         if self.blocked
             || !self.policy.composing
             || !current.refinement_pending
@@ -273,14 +288,41 @@ impl<T: Transport> Client<T> {
         {
             return Ok(None);
         }
+        let preview_event_seq = document
+            .as_ref()
+            .and_then(|_| self.event_seq.checked_add(1));
         let request = Request {
             body: Some(request::Body::Poll(CandidatePoll {
+                preview_event_seq,
                 revision: Some(self.revision),
                 candidate_revision: current.candidate_revision,
             })),
         };
         let result = self.transport.as_mut().unwrap().exchange(&request);
         let result = match result {
+            Ok(Response {
+                body: Some(response::Body::Key(reply)),
+            }) if preview_event_seq == Some(reply.event_seq)
+                && self.matches(&reply, reply.event_seq)
+                && reply.commit.is_none()
+                && reply
+                    .preedit
+                    .as_ref()
+                    .is_some_and(|p| reading(p) == self.last_reading)
+                && reply.revision.is_some_and(|r| {
+                    Some(r.composition) == self.revision.composition.checked_add(1)
+                })
+                && reply.candidates.as_ref().is_some_and(|p| {
+                    !p.refinement_pending && p.candidate_revision > current.candidate_revision
+                }) =>
+            {
+                self.event_seq = reply.event_seq;
+                if document.is_some_and(|doc| self.accept(&reply, reply.event_seq, doc)) {
+                    Ok(reply.candidates)
+                } else {
+                    Err(io::ErrorKind::InvalidData.into())
+                }
+            }
             Ok(Response {
                 body: Some(response::Body::Candidates(update)),
             }) => {
@@ -375,7 +417,12 @@ impl<T: Transport> Client<T> {
             })
     }
     /// Applies a reply to the document and acknowledges the result.
-    fn accept(&mut self, reply: &KeyReply, seq: u64, document: &mut impl Document) -> bool {
+    fn accept(
+        &mut self,
+        reply: &KeyReply,
+        seq: u64,
+        document: &mut (impl Document + ?Sized),
+    ) -> bool {
         let applied = document.apply(reply);
         self.applied_seq = seq;
         if let Some(revision) = reply.revision {

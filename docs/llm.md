@@ -4,7 +4,7 @@ An optional local language model reorders the Mozc candidates of the focused seg
 
 Each importable file is registered together with a profile that fixes how it is loaded, prompted, scored and qualified. Registrations are compiled into Kanade. One model is installed at a time.
 
-The model never changes the preedit, a commit, the document or any learning record. Live conversion and writing assistance remain unimplemented.
+When conversion starts at the beginning of a field, the model can use the preceding segments of that conversion to choose the spelling of the final inflected word. The frontend can show the revised preedit until the user navigates, types or commits. The engine compares existing Mozc choices.
 
 ## Components
 
@@ -34,7 +34,7 @@ The key loop copies a few short strings into a queue of two jobs and later looks
 
 Kanade accepts one local reranker, **Tsumugi**. Its F16 GGUF contains 28,058,112 parameters and occupies 56,386,208 bytes. The engine, worker and settings use the same pinned identity. The Windows EXE installs the GGUF in the application’s `models` directory. The macOS DMG includes it under `Settings.app/Contents/Resources/models` inside Kanade.app. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml)
 
-A Windows x64 installation matched all 373 tokenizer references and ranked the expected candidate first in 78 of 85 context tests (91.76%). Every case received a score. Repeated runs agreed. CPU scoring took 21 ms at the median and 33 ms at the 95th percentile on the installation PC. The 85 examples exercise selected homophones.
+A Windows x64 installation matched all 373 tokenizer references and ranked the expected candidate first in 78 of 85 context tests (91.76%). Every case received a score. Repeated runs agreed. CPU scoring took 18 ms at the median and 27 ms at the 95th percentile on the installation PC. The 85 examples exercise selected homophones. An empty Windows TSF text store displayed 車に乗ります and 雑誌に載ります after one press of Space. The integration test cancels each conversion without recording a selection.
 
 ## Prompt and score
 
@@ -52,7 +52,7 @@ A job is queued only when all of the following hold. Otherwise nothing leaves th
 
 - `llm` is enabled and a qualified model is being served.
 - The context is `NORMAL` after the engine applies learning exclusions. Password input is refused earlier; private and unknown contexts, excluded applications and a disabled learning switch all yield no job.
-- The frontend reports surrounding text, and the context window is not empty.
+- The frontend can read surrounding text. At the beginning of a field, a conversion of two to four segments can supply its own prefix.
 - The window, and the text it may have been cut from, contain no `@`, `/`, `\`, `:`, control character or long credential-like token.
 - The reading is 2–64 kana, and at least two Mozc choices of at most 32 characters are among the first nine.
 - No text of the job contains a marker or reserved character of the served model's profile.
@@ -79,10 +79,10 @@ The additions to `proto/kanade.proto` are `CandidatePoll`, `CandidateUpdate` and
 
 1. A key reply sets `refinement_pending` when a job was queued for its page.
 2. After acknowledging the event, the frontend sends `CandidatePoll` with the reply's revision and the page's candidate revision.
-3. The answer is always a `CandidateUpdate`. It carries a new page, or `pending`, or neither. A stale, early or unknown poll is not an error.
+3. A candidate-only poll receives a `CandidateUpdate`. A focused native editor may also provide its next event sequence to accept a revised preedit. The editor acknowledges that edit through the same path as a key reply.
 4. A new page replaces the displayed one. It has a new candidate revision and new handles; handles of the old page are refused as stale.
 
-The engine guarantees the following.
+With preceding document text, the following rules govern the candidate list.
 
 - Only Mozc choices among the first nine slots move. Learned, project, date and emoji choices keep their slots.
 - The selected choice keeps its slot, so Enter commits the surface that was displayed.
@@ -92,7 +92,7 @@ The engine guarantees the following.
 - An applied order stays while the same candidates are on screen. After a manual choice nothing is reordered until the conversion ends.
 - A repeated poll or key event returns the applied page again without new work.
 
-Because the preedit is never changed and choices only move within the first nine slots, the top-one and first-nine counts of the 152-case input regression cannot measure an improvement from this feature. The real socket contract instead checks that a warm model delivers a changed candidate revision without editing the document or changing the Enter commit. Broader comparisons with real Mozc lists remain future work.
+At the beginning of a field, the engine opens a temporary Mozc session to obtain the last segment’s alternatives. It checks the segment readings against the live conversion and compares single-kanji spellings with the same kana ending. A clear score advantage can produce one whole-reading preview. The model does this after the original key reply has been acknowledged. Typing, navigating or changing focus supersedes the job. Pressing Enter commits the visible spelling. An automatic preview creates no dictionary entry.
 
 ## Installing a model
 

@@ -255,7 +255,7 @@ fn score(
         from = index;
     }
     let context = &normalized[from..];
-    if context.is_empty() {
+    if context.is_empty() && !job.context.is_empty() {
         return unscored();
     }
     // A start token only where the profile names one.

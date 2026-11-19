@@ -19,7 +19,7 @@ message Reset { uint64 context = 1; }
 message RestoreRequest { Revision revision = 1; uint64 event_seq = 2; string reading = 3; Context context = 4; }
 message Manage { enum Action { GET_SETTINGS = 0; SET_SETTINGS = 1; LIST_LEARNING = 2; DELETE_LEARNING = 3; CLEAR_LEARNING = 4; BLOCK_READING = 5; RELOAD_PROJECTS = 6; CLEAR_MOZC_CONVERSION = 7; CLEAR_MOZC_PREDICTION = 8; LIST_MOZC_DICTIONARY = 9; EDIT_MOZC_DICTIONARY = 10; DICTIONARY_JOB_STATUS = 11; CANCEL_DICTIONARY_JOB = 12; PROMOTE_LEARNING = 13; LIST_PROJECTS = 14; EDIT_PROJECT = 15; LLM_STATUS = 16; LLM_IMPORT = 17; LLM_QUALIFY = 18; LLM_REMOVE = 19; PREPARE_PROJECT = 20; START_PROJECT_JOB = 21; PROJECT_JOB_STATUS = 22; CANCEL_PROJECT_JOB = 23; LIST_PROJECT_READINGS = 24; PROJECT_MONITOR_STATUS = 25; SET_LEARNING_APPS = 26 [deprecated = true]; SET_LEARNING_EXCLUSIONS = 27; } Action action = 1; string json = 2; uint64 record_id = 3; uint32 offset = 4; uint64 job_id = 5; }
 // Asks whether a background reordering of the displayed candidates is ready. No event sequence, no acknowledgement.
-message CandidatePoll { Revision revision = 1; uint64 candidate_revision = 2; }
+message CandidatePoll { Revision revision = 1; uint64 candidate_revision = 2; optional uint64 preview_event_seq = 3; }
 message Request {
   oneof body { Hello hello = 1; KeyRequest key = 2; SelectRequest select = 3; Ack ack = 4; Reset reset = 5; bool close = 6; Manage manage = 7; CandidatePoll poll = 8; RestoreRequest restore = 9; }
 }

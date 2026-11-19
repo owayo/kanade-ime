@@ -334,7 +334,13 @@ impl Shared {
             }
             return;
         };
-        let update = client.poll_candidates(&page);
+        let update = client.poll_with_preview(
+            &page,
+            &mut NativeDocument {
+                shared: self.clone(),
+                context,
+            },
+        );
         if let Ok(mut stored) = self.client.try_borrow_mut() {
             *stored = Some(client);
         }

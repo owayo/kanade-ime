@@ -2,8 +2,8 @@
 //! Background reordering of displayed Mozc candidates.
 //!
 //! The key path only queues a bounded job and later looks its result up. A
-//! result changes the order of existing choices and nothing else: the selected
-//! surface, the preedit, commits and learning are untouched.
+//! document-context result reorders unselected choices. Sentence previews
+//! for an empty document context are handled in the sentence module.
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits};
 use std::time::Duration;
@@ -75,6 +75,9 @@ impl Frozen {
 
 /// Drops a queued or running job and forgets a delivered update.
 pub(super) fn cancel(llm: Option<&dyn Rerank>, session: &mut Session) {
+    if let Some(sentence) = session.sentence.take() {
+        sentence.cancel(llm);
+    }
     if let Some(refinement) = session.refinement.take()
         && let Some(llm) = llm
     {

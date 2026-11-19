@@ -10,6 +10,7 @@ mod candidates;
 pub mod config;
 pub mod dates;
 mod refine;
+mod sentence;
 #[cfg(any(unix, windows))]
 pub mod server;
 
@@ -82,6 +83,7 @@ struct Session {
     /// The user picked a candidate in this conversion; its order is final.
     manual: bool,
     refinement: Option<refine::Refinement>,
+    sentence: Option<sentence::Pending>,
     applied: Option<refine::Applied>,
     frozen: Option<refine::Frozen>,
     selection_intents: Vec<Word>,
@@ -197,6 +199,7 @@ impl<C: ConversionEngine> Engine<C> {
                 automatic: false,
                 manual: false,
                 refinement: None,
+                sentence: None,
                 applied: None,
                 frozen: None,
                 selection_intents: vec![],
@@ -455,7 +458,23 @@ impl<C: ConversionEngine> Engine<C> {
                     automatic,
                 )?;
                 if refinable {
-                    self.refine(session, &mut reply, privacy, preceding);
+                    if !was_converting
+                        && preceding.is_empty()
+                        && self.settings.llm
+                        && self.llm.is_some()
+                        && sentence::eligible(&session.snapshot)
+                        && kanade_llm::eligible(
+                            privacy,
+                            &reading(&session.snapshot.preedit),
+                            session.manual,
+                        )
+                        && let Some(page) = &mut reply.candidates
+                    {
+                        session.sentence = Some(sentence::Pending::new());
+                        page.refinement_pending = true;
+                    } else {
+                        self.refine(session, &mut reply, privacy, preceding);
+                    }
                 }
                 session.last_request = Some(request.clone());
                 session.last_reply = Some(reply.clone());
@@ -681,7 +700,33 @@ impl<C: ConversionEngine> Engine<C> {
                 session.last_reply = Some(reply.clone());
                 Ok(Some(key_response(reply)))
             }
-            request::Body::Poll(poll) => self.poll(session, poll),
+            request::Body::Poll(poll) => {
+                if let Some(seq) = poll.preview_event_seq
+                    && session.last_request.as_ref() == Some(request)
+                    && let Some(reply) = duplicate(session, request, seq)?
+                {
+                    return Ok(Some(key_response(reply)));
+                }
+                if session.sentence.is_none() {
+                    return self.poll(session, poll);
+                }
+                let result = self.poll_sentence(session, poll)?;
+                if let Some(response::Body::Candidates(update)) =
+                    result.as_ref().and_then(|r| r.body.as_ref())
+                    && !update.pending
+                    && update.revision == poll.revision
+                    && poll.revision == Some(session.revision)
+                    && let Some(page) = session
+                        .last_reply
+                        .as_mut()
+                        .and_then(|r| r.candidates.as_mut())
+                    && page.candidate_revision == poll.candidate_revision
+                {
+                    page.refinement_pending = false;
+                    page.refinement_outcome = update.refinement_outcome;
+                }
+                Ok(result)
+            }
             _ => Err(Code::Invalid),
         }
     }

@@ -222,11 +222,11 @@ pub static CATALOG: &[Model] = &[Model {
     name: "Tsumugi",
     file_name: "tsumugi.gguf",
     size: 56386208,
-    sha256: "dd7ed97afd42b5c64b2e6713b66395fbe57d3fbc560f7218a4bfc89fc0efb10b",
+    sha256: "6d90a5620dd50a04b78c6154421eddf892c39e6988895e1d702c3cac13e5e34e",
     license: "LicenseRef-Kanade-Model-1.0",
     license_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md#tsumugi-model",
     source_url: "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md",
-    revision: "43367b2a92d179cca0c5d92dabd53b3cdfe191b321316247361efe74ea7325ff",
+    revision: "727bc2ffec34b66c9d4513e6853faaeba90da36d15e4dec82ff570097d28c3e9",
     attribution: "Kanade",
     profile: &TSUMUGI,
 }];
@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(model.size, 56386208);
         assert_eq!(
             model.sha256,
-            "dd7ed97afd42b5c64b2e6713b66395fbe57d3fbc560f7218a4bfc89fc0efb10b"
+            "6d90a5620dd50a04b78c6154421eddf892c39e6988895e1d702c3cac13e5e34e"
         );
         assert_eq!(model.license, "LicenseRef-Kanade-Model-1.0");
         let profile = model.profile;
@@ -736,7 +736,7 @@ mod tests {
         assert!(terms.contains("最大 40 文字"));
         assert_eq!(
             terms_sha256(model),
-            "4eecf3e4ad8501b92d81077baa4c1d308992c67634304b34b7899a9779fa8de9"
+            "dcf63e0cb2efb1b6769d0123296f7a50039dd2c8a93f58489ea626a05443cccd"
         );
         // Terms name the model, so no consent carries over to another one.
         assert_ne!(terms_sha256(fixture::alt()), terms_sha256(model));
