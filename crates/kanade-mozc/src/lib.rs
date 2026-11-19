@@ -84,6 +84,11 @@ pub struct Snapshot {
     pub converting: bool,
 }
 pub trait ConversionEngine {
+    /// Process-backed engines expose their verified executable so optional searches
+    /// can run in a separate worker and profile. In-process backends need no executable.
+    fn probe_binary(&self) -> Option<&Path> {
+        None
+    }
     fn add_history(&mut self, reading: &str, value: &str) -> Result<()>;
     fn create_session(&mut self) -> Result<SessionId>;
     fn delete_session(&mut self, session: SessionId) -> Result<()>;
@@ -118,6 +123,7 @@ struct Job {
 }
 struct Process {
     child: Child,
+    probe: bool,
     /// The process stopped answering or its pipe broke; it must be replaced.
     failed: bool,
     jobs: Option<SyncSender<Job>>,
@@ -125,7 +131,7 @@ struct Process {
     _lock: Option<File>,
 }
 impl Process {
-    fn spawn(binary: &Path, profile: &Path) -> Result<Self> {
+    fn spawn(binary: &Path, profile: &Path, probe: bool) -> Result<Self> {
         fs::create_dir_all(profile)?;
         #[cfg(unix)]
         {
@@ -165,6 +171,7 @@ impl Process {
             })?;
         Ok(Self {
             child,
+            probe,
             failed: false,
             jobs: Some(tx),
             thread: Some(thread),
@@ -176,7 +183,12 @@ impl Process {
         pb::Output::decode(output.as_slice()).map_err(|_| Error::Protocol)
     }
     fn stop(&mut self) -> Error {
-        ipc::diagnostics::record(ipc::diagnostics::Event::WorkerCallTimedOut);
+        use ipc::diagnostics::{Event, record};
+        record(if self.probe {
+            Event::ProbeCallTimedOut
+        } else {
+            Event::WorkerCallTimedOut
+        });
         self.failed = true;
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -200,7 +212,12 @@ impl Process {
         match rx.recv_timeout(timeout) {
             Ok(result) => {
                 if result.is_err() {
-                    ipc::diagnostics::record(ipc::diagnostics::Event::WorkerCallFailed);
+                    use ipc::diagnostics::{Event, record};
+                    record(if self.probe {
+                        Event::ProbeCallFailed
+                    } else {
+                        Event::WorkerCallFailed
+                    });
                     self.failed = true;
                 }
                 result
@@ -388,8 +405,15 @@ impl Mozc {
         self.sync()
     }
     pub fn start(binary: &Path, profile: &Path) -> Result<Self> {
+        Self::start_worker(binary, profile, false)
+    }
+    /// Start optional sentence exploration in its own disposable profile.
+    pub fn start_probe(binary: &Path, profile: &Path) -> Result<Self> {
+        Self::start_worker(binary, profile, true)
+    }
+    fn start_worker(binary: &Path, profile: &Path, probe: bool) -> Result<Self> {
         let identity = worker_identity(binary)?;
-        let mut process = Process::spawn(binary, profile)?;
+        let mut process = Process::spawn(binary, profile, probe)?;
         let output = process.call(
             pb::Input {
                 r#type: Op::GetServerVersion as i32,
@@ -448,7 +472,7 @@ impl Mozc {
             let _ = thread.join();
         }
         self.process._lock.take();
-        let mut fresh = Self::start(&self.binary, &self.profile)?;
+        let mut fresh = Self::start_worker(&self.binary, &self.profile, self.process.probe)?;
         fresh.request_timeout = self.request_timeout;
         fresh.suggestions = self.suggestions;
         *self = fresh;
@@ -616,6 +640,9 @@ impl Mozc {
     }
 }
 impl ConversionEngine for Mozc {
+    fn probe_binary(&self) -> Option<&Path> {
+        Some(&self.binary)
+    }
     fn add_history(&mut self, reading: &str, value: &str) -> Result<()> {
         Mozc::add_history(self, reading, value)
     }
@@ -994,6 +1021,25 @@ mod deadline_tests {
         assert_eq!(mozc.create_session().unwrap(), SessionId(7));
         assert_eq!(mozc.create_session().unwrap(), SessionId(8));
     }
+    #[test]
+    fn an_unresponsive_probe_does_not_end_the_live_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = worker(
+            temp.path(),
+            &[version(), session(7), session(8)],
+            "case \"$1\" in */live) reply 1; reply 2;; esac",
+        );
+        let mut live = Mozc::start(&binary, &temp.path().join("live")).unwrap();
+        let first = live.create_session().unwrap();
+        let mut probe = Mozc::start_probe(&binary, &temp.path().join("search")).unwrap();
+        probe.set_deadline(Some(Instant::now() + Duration::from_millis(60)));
+        assert!(matches!(probe.create_session(), Err(Error::Timeout)));
+        assert!(!probe.healthy());
+        assert!(live.healthy());
+        assert!(live.sessions.contains_key(&first));
+        assert_ne!(live.create_session().unwrap(), first);
+    }
+
     #[test]
     fn a_silent_worker_is_stopped_at_the_request_deadline() {
         let temp = tempfile::tempdir().unwrap();

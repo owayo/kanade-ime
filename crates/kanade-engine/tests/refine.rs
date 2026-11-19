@@ -20,6 +20,7 @@ struct Calls {
 #[derive(Default)]
 struct Backend {
     probe: Option<Box<Backend>>,
+    probe_binary: Option<std::path::PathBuf>,
     calls: Arc<Mutex<Calls>>,
     reading: String,
     segments: Vec<(String, Vec<&'static str>, usize)>,
@@ -130,6 +131,9 @@ impl Backend {
     }
 }
 impl ConversionEngine for Backend {
+    fn probe_binary(&self) -> Option<&std::path::Path> {
+        self.probe_binary.as_deref()
+    }
     fn add_history(&mut self, _: &str, _: &str) -> Result<()> {
         Ok(())
     }
@@ -272,7 +276,9 @@ fn settings(llm: bool) -> Config {
     }
 }
 fn fixture(config: Config) -> Fixture {
-    let backend = Backend::default();
+    fixture_with_backend(config, Backend::default())
+}
+fn fixture_with_backend(config: Config, backend: Backend) -> Fixture {
     let calls = backend.calls.clone();
     let mut engine = Engine::new(backend, None);
     engine.configure(config);
@@ -1024,6 +1030,54 @@ fn the_real_model_reorders_candidates_through_the_engine() {
     println!("warm update after {} ms", waited.as_millis());
     assert!(waited < Duration::from_millis(300));
     assert_eq!(updated.items[1].value, "後援");
+}
+
+#[test]
+fn unavailable_search_leaves_the_displayed_conversion_committable() {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = Backend {
+        probe_binary: Some(temp.path().join("absent-worker")),
+        ..Default::default()
+    };
+    let mut f = fixture_with_backend(settings(true), backend);
+    f.context.preceding_text.clear();
+    let initial = f.convert("かめらでとります");
+    let initial_surface = surface(initial.preedit.as_ref().unwrap());
+    let page = page(&initial);
+    assert!(page.refinement_pending);
+    let request = Request {
+        body: Some(request::Body::Poll(CandidatePoll {
+            revision: Some(f.revision),
+            candidate_revision: page.candidate_revision,
+            preview_event_seq: Some(f.seq + 1),
+        })),
+    };
+    let start = std::time::Instant::now();
+    loop {
+        let response = f
+            .engine
+            .handle(f.connection, request.clone())
+            .unwrap()
+            .unwrap();
+        let Some(response::Body::Candidates(update)) = response.body else {
+            panic!("unexpected preview")
+        };
+        assert!(update.candidates.is_none());
+        if !update.pending {
+            assert_eq!(
+                update.refinement_outcome,
+                RefinementOutcome::Unavailable as i32
+            );
+            break;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(f.engine.worker_healthy());
+    assert_eq!(
+        f.special(SpecialKey::Enter).commit.unwrap().value,
+        initial_surface
+    );
 }
 
 #[test]
