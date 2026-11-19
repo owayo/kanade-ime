@@ -93,6 +93,7 @@ pub struct Engine<C> {
     projects: std::sync::Arc<kanade_indexer::Catalog>,
     settings: config::Config,
     backend: C,
+    probe: Option<sentence::probe::Worker>,
     sessions: HashMap<u64, Session>,
     next_epoch: u64,
     next_receipt: u64,
@@ -109,6 +110,11 @@ impl<C: ConversionEngine> Engine<C> {
             refine::cancel(self.llm.as_deref(), session);
         }
         self.llm = llm;
+        if self.llm.is_none()
+            && let Some(probe) = &mut self.probe
+        {
+            probe.stop();
+        }
     }
     pub fn set_date(&mut self, date: Option<dates::Date>) {
         self.date = date.map(dates::Calendar::fixed);
@@ -131,6 +137,9 @@ impl<C: ConversionEngine> Engine<C> {
             }
         }
         if !settings.llm {
+            if let Some(probe) = &mut self.probe {
+                probe.stop();
+            }
             for session in self.sessions.values_mut() {
                 refine::cancel(self.llm.as_deref(), session);
             }
@@ -146,6 +155,7 @@ impl<C: ConversionEngine> Engine<C> {
             emoji: kanade_emoji::Catalog::bundled(),
             projects: Default::default(),
             settings: config::Config::default(),
+            probe: backend.probe_binary().map(sentence::probe::Worker::new),
             backend,
             sessions: HashMap::new(),
             next_epoch: epoch.max(1),

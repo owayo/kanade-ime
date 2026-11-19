@@ -3,6 +3,7 @@
 mod boundary_data;
 mod calendar;
 mod clause;
+pub(super) mod probe;
 mod search;
 
 use super::*;
@@ -36,6 +37,7 @@ pub(super) struct Pending {
     started: Instant,
     context: String,
     year: Option<String>,
+    search: Option<probe::Ticket>,
     work: Option<(u64, Proposal)>,
 }
 
@@ -83,6 +85,7 @@ impl Pending {
             started: Instant::now(),
             context,
             year,
+            search: None,
             work: None,
         })
     }
@@ -270,11 +273,11 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
 // Keep the typing session untouched. Check the reconstructed segmentation before using each list.
 fn alternatives<C: ConversionEngine>(
     backend: &mut C,
-    original: &Snapshot,
+    original: &Preedit,
     context: &str,
 ) -> Option<Proposal> {
-    let parts = &original.preedit.segments;
-    let whole = reading(&original.preedit);
+    let parts = &original.segments;
+    let whole = reading(original);
     let ending = if context.is_empty() {
         Some(Ending::parse(parts)?)
     } else {
@@ -397,11 +400,34 @@ impl<C: ConversionEngine> Engine<C> {
             return self.apply_sentence(session, seq, poll, value, CandidateSource::Date);
         }
         if pending.work.is_none() {
-            let Some(proposal) =
-                alternatives(&mut self.backend, &session.snapshot, &pending.context)
-            else {
+            let proposal = if let Some(worker) = &mut self.probe {
+                if pending.search.is_none() {
+                    let expires = pending.started + Duration::from_millis(limits::RESULT_TTL_MS);
+                    pending.search =
+                        worker.submit(&session.snapshot.preedit, &pending.context, expires);
+                }
+                let Some(ticket) = pending.search.as_ref() else {
+                    return status(false, RefinementOutcome::Unavailable);
+                };
+                match ticket.poll() {
+                    std::task::Poll::Pending => {
+                        session.sentence = Some(pending);
+                        return status(true, RefinementOutcome::Unspecified);
+                    }
+                    std::task::Poll::Ready(Ok(proposal)) => proposal,
+                    std::task::Poll::Ready(Err(outcome)) => return status(false, outcome),
+                }
+            } else {
+                alternatives(
+                    &mut self.backend,
+                    &session.snapshot.preedit,
+                    &pending.context,
+                )
+            };
+            let Some(proposal) = proposal else {
                 return status(false, RefinementOutcome::Unspecified);
             };
+            pending.search = None;
             let ticket = if pending.context.is_empty() {
                 llm.submit(proposal.job.clone())
             } else {
