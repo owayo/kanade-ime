@@ -182,13 +182,8 @@ impl Process {
         let output = self.exchange(input.encode_to_vec(), timeout)?;
         pb::Output::decode(output.as_slice()).map_err(|_| Error::Protocol)
     }
-    fn stop(&mut self) -> Error {
-        use ipc::diagnostics::{Event, record};
-        record(if self.probe {
-            Event::ProbeCallTimedOut
-        } else {
-            Event::WorkerCallTimedOut
-        });
+    fn stop(&mut self, event: ipc::diagnostics::Event) -> Error {
+        ipc::diagnostics::record(event);
         self.failed = true;
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -196,9 +191,15 @@ impl Process {
         Error::Timeout
     }
     fn exchange(&mut self, input: Vec<u8>, timeout: Duration) -> Result<Vec<u8>> {
+        use ipc::diagnostics::{Event, record};
         if timeout.is_zero() {
-            // Part of this request already ran. Do not start more of it late.
-            return Err(self.stop());
+            // No call is in flight. Other input sessions can keep their state.
+            if self.probe {
+                // An interrupted probe can own a temporary session awaiting deletion.
+                return Err(self.stop(Event::ProbeRequestExpired));
+            }
+            record(Event::WorkerRequestExpired);
+            return Err(Error::Timeout);
         }
         let (tx, rx) = mpsc::sync_channel(1);
         self.jobs
@@ -212,7 +213,6 @@ impl Process {
         match rx.recv_timeout(timeout) {
             Ok(result) => {
                 if result.is_err() {
-                    use ipc::diagnostics::{Event, record};
                     record(if self.probe {
                         Event::ProbeCallFailed
                     } else {
@@ -222,7 +222,11 @@ impl Process {
                 }
                 result
             }
-            Err(_) => Err(self.stop()),
+            Err(_) => Err(self.stop(if self.probe {
+                Event::ProbeCallTimedOut
+            } else {
+                Event::WorkerCallTimedOut
+            })),
         }
     }
 }
@@ -1062,6 +1066,9 @@ mod deadline_tests {
         let mut mozc = Mozc::start(&binary, &temp.path().join("profile")).unwrap();
         mozc.set_deadline(Some(Instant::now()));
         assert!(matches!(mozc.create_session(), Err(Error::Timeout)));
+        mozc.set_deadline(None);
+        assert!(mozc.healthy());
+        assert_eq!(mozc.create_session().unwrap(), SessionId(7));
     }
     #[test]
     fn restart_succeeds_when_the_fresh_worker_answers_slowly() {
@@ -1091,6 +1098,25 @@ mod deadline_tests {
 #[cfg(test)]
 mod evaluation_settings_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires the locked worker; make contract"]
+    fn an_expired_request_keeps_another_session_composing() {
+        let profile = tempfile::tempdir().unwrap();
+        let mut mozc = Mozc::start(&default_worker(), profile.path()).unwrap();
+        let live = mozc.create_session().unwrap();
+        mozc.restore(live, "あした").unwrap();
+        mozc.set_deadline(Some(Instant::now()));
+        assert!(matches!(mozc.create_session(), Err(Error::Timeout)));
+        mozc.set_deadline(None);
+        let space = Key {
+            special: ipc::SpecialKey::Space as i32,
+            ..Default::default()
+        };
+        let preview = mozc.key(live, &space, "").unwrap();
+        assert!(preview.converting);
+        assert_eq!(ipc::reading(&preview.preedit), "あした");
+        mozc.delete_session(live).unwrap();
+    }
     #[test]
     #[ignore = "requires the locked worker; make contract"]
     fn offline_limits_preserve_the_input_deadline_and_survive_restart() {
