@@ -2,8 +2,13 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
+      channel:
+        description: Installer distribution channel
+        type: choice
+        options: [stable, preview]
+        default: stable
       dry_run:
-        description: Compute the next version without building or publishing
+        description: Check the release without publishing
         type: boolean
         default: false
 permissions:
@@ -16,7 +21,83 @@ env:
   MISE_LOCKED: "1"
   BINARY_NAME: kanade-ime
 jobs:
+  preview:
+    if: inputs.channel == 'preview'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Find the successful installer tests for this revision
+        id: ci
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          run_id=$(gh run list --workflow ci.yml --branch "$DEFAULT_BRANCH" --commit "$GITHUB_SHA" --event push --status success --json databaseId,headSha --jq '.[0] | select(.headSha == env.GITHUB_SHA) | .databaseId')
+          if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::Windows and macOS CI must pass on this exact default-branch commit"
+            exit 1
+          fi
+          echo "run=$run_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.ci.outputs.run }}
+          name: macos-development-installer
+          path: release
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.ci.outputs.run }}
+          name: kanade-ime-x86_64-pc-windows-msvc.exe
+          path: release
+          skip-decompress: true
+      - name: Check installers and identify the bundled model
+        id: assets
+        env:
+          CI_RUN: ${{ steps.ci.outputs.run }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-assets.py checksums release
+          (cd release && sha256sum --check SHA256SUMS)
+          python3 - <<'PY'
+          import os, pathlib, sys, tomllib
+          sys.path.insert(0, ".github/scripts")
+          from bundled_model import locked_model
+          model = locked_model()
+          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          tag = f"v{version}-preview.{os.environ['GITHUB_RUN_NUMBER']}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              print(f"tag={tag}", file=out)
+          ci = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['CI_RUN']}"
+          pathlib.Path("preview-notes.md").write_text(
+              f"Kanade {version} のプレビュー版です。Windows x64 の EXE は未署名、Apple Silicon Mac の DMG は一時署名・未公証です。\n\n"
+              f"どちらにも Tsumugi {model['version']}（{model['size']:,} バイト）を同梱しています。\n\n"
+              f"モデルの SHA-256 は `{model['sha256']}` です。インストーラーは添付の SHA256SUMS で照合できます。\n\n"
+              f"[両 OS のインストーラー検査]({ci})\n", encoding="utf-8")
+          PY
+          cat preview-notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish and verify the preview
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAG: ${{ steps.assets.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$GITHUB_SHA"
+            test "$(gh release view "$TAG" --json isPrerelease,isDraft --jq '.isPrerelease and (.isDraft | not)')" = true
+          else
+            gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "$TAG" --notes-file preview-notes.md --prerelease --latest=false
+          fi
+          python3 .github/scripts/release-assets.py verify release --tag "$TAG" --repo "$GITHUB_REPOSITORY"
   prepare-release:
+    if: inputs.channel != 'preview'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -90,7 +171,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Cargo.toml Cargo.lock packaging/macos/Info.plist packaging/macos/Settings.plist
-          git commit -m "chore(release): ${TAG}へ更新"
+          git commit -m "chore(release): ${TAG}へ更新" -m "ワークスペースとmacOSのアプリ情報を同じ版に揃え、WindowsとmacOSの署名済みインストーラーのビルド元を固定する。"
           git tag -a "$TAG" -m "リリース $TAG"
           git push --atomic origin "HEAD:refs/heads/$DEFAULT_BRANCH" "refs/tags/$TAG"
   build:
@@ -254,7 +335,7 @@ jobs:
         run: python3 .github/scripts/release-assets.py verify release --tag "$TAG" --repo "$GITHUB_REPOSITORY"
   release-summary:
     if: ${{ !cancelled() }}
-    needs: [prepare-release, build, release]
+    needs: [prepare-release, build, release, preview]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize results
@@ -264,6 +345,7 @@ jobs:
           BUILD: ${{ needs.build.result }}
           RELEASE: ${{ needs.release.result }}
           DRY_RUN: ${{ inputs.dry_run }}
+          PREVIEW: ${{ needs.preview.result }}
         run: |
           {
             echo "## Release $TAG"
@@ -271,6 +353,7 @@ jobs:
             echo "Prepare: $PREPARE"
             echo "Build: $BUILD"
             echo "Release: $RELEASE"
+            echo "Preview: $PREVIEW"
             echo 'Platforms: Windows x64; macOS Apple Silicon'
             echo 'Distribution: GitHub Releases only'
           } >> "$GITHUB_STEP_SUMMARY"
