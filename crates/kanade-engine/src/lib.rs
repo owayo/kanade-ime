@@ -462,12 +462,12 @@ impl<C: ConversionEngine> Engine<C> {
                     if !was_converting
                         && self.settings.llm
                         && self.llm.is_some()
-                        && kanade_llm::eligible(
-                            privacy,
-                            &reading(&session.snapshot.preedit),
-                            session.manual,
+                        && privacy == Privacy::Normal
+                        && let Some(pending) = sentence::Pending::prepare(
+                            session,
+                            preceding,
+                            self.settings.calculated_dates,
                         )
-                        && let Some(pending) = sentence::Pending::prepare(session, preceding)
                         && let Some(page) = &mut reply.candidates
                         && page.refinement_outcome != RefinementOutcome::Unavailable as i32
                     {

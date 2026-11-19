@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Score an initial conversion against alternatives from a disposable Mozc session.
+mod calendar;
+mod clause;
+
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits};
 use kanade_mozc::FocusCandidate;
@@ -11,39 +14,75 @@ const RANK_PENALTY: f32 = 0.75;
 
 struct Proposal {
     job: Job,
+    before: String,
+    after: String,
     penalties: Vec<f32>,
     margin: f32,
+}
+
+impl Proposal {
+    fn render(&self, index: usize) -> String {
+        format!(
+            "{}{}{}{}",
+            self.before, self.job.prefix, self.job.candidates[index], self.after
+        )
+    }
 }
 
 pub(super) struct Pending {
     started: Instant,
     context: String,
+    year: Option<String>,
     work: Option<(u64, Proposal)>,
 }
 
 impl Pending {
-    pub(super) fn prepare(session: &Session, preceding: &str) -> Option<Self> {
+    pub(super) fn prepare(session: &Session, preceding: &str, dates: bool) -> Option<Self> {
         let parts = &session.snapshot.preedit.segments;
+        let whole = reading(&session.snapshot.preedit);
+        let punctuation = whole.contains(['、', '。']);
+        if session.manual
+            || whole.chars().count() > limits::READING_CHARS
+            || !kanade_llm::eligible(Privacy::Normal, &whole.replace(['、', '。'], ""), false)
+        {
+            return None;
+        }
         let context = if preceding.is_empty() {
-            if !(2..=4).contains(&parts.len()) || ending(&parts.last()?.value).is_none() {
-                return None;
-            }
             String::new()
         } else {
-            // Respect a preference already applied by the installed learning service.
-            if session.automatic
-                || !(1..=5).contains(&parts.len())
-                || parts.iter().map(|s| s.value.chars().count()).sum::<usize>()
-                    > limits::CANDIDATE_CHARS
-                || session.choices.get(session.selected_choice)?.source != CandidateSource::Mozc
-            {
-                return None;
-            }
             kanade_llm::context_window(preceding)?
         };
+        let is_default = !session.automatic
+            && session.choices.get(session.selected_choice)?.source == CandidateSource::Mozc;
+        let year = if dates && is_default && whole.contains("ねん") {
+            calendar::surface(parts, &context)
+        } else {
+            None
+        };
+        if year.is_none() {
+            if context.is_empty() {
+                if punctuation
+                    || !(2..=4).contains(&parts.len())
+                    || ending(&parts.last()?.value).is_none()
+                {
+                    return None;
+                }
+            } else {
+                let segment_limit = if punctuation { 8 } else { 5 };
+                if !is_default
+                    || !(1..=segment_limit).contains(&parts.len())
+                    || (!punctuation
+                        && parts.iter().map(|s| s.value.chars().count()).sum::<usize>()
+                            > limits::CANDIDATE_CHARS)
+                {
+                    return None;
+                }
+            }
+        }
         Some(Self {
             started: Instant::now(),
             context,
+            year,
             work: None,
         })
     }
@@ -91,6 +130,8 @@ fn ending_proposal(parts: &[Segment], last: &[FocusCandidate], mut job: Job) -> 
         }
     }
     job.valid().then(|| Proposal {
+        before: String::new(),
+        after: String::new(),
         penalties: vec![0.; job.candidates.len()],
         job,
         margin: ENDING_MARGIN,
@@ -175,6 +216,8 @@ fn contextual_proposal(
     }
     job.valid().then_some(Proposal {
         job,
+        before: String::new(),
+        after: String::new(),
         penalties,
         margin: SENTENCE_MARGIN,
     })
@@ -236,7 +279,11 @@ fn alternatives<C: ConversionEngine>(
                 snap = backend.key(probe, &key(SpecialKey::Right), context).ok()?;
             }
         }
-        contextual_proposal(parts, &lists, job)
+        if whole.contains(['、', '。']) {
+            clause::proposal(parts, &lists, &job)
+        } else {
+            contextual_proposal(parts, &lists, job)
+        }
     };
     let result = collect(backend);
     backend.delete_session(probe).ok()?;
@@ -289,6 +336,12 @@ impl<C: ConversionEngine> Engine<C> {
         let Some(llm) = llm else {
             return status(false, RefinementOutcome::Unavailable);
         };
+        if let Some(value) = pending.year.take() {
+            if !self.settings.calculated_dates {
+                return status(false, RefinementOutcome::Unspecified);
+            }
+            return self.apply_sentence(session, seq, poll, value, CandidateSource::Date);
+        }
         if pending.work.is_none() {
             let Some(proposal) =
                 alternatives(&mut self.backend, &session.snapshot, &pending.context)
@@ -327,13 +380,30 @@ impl<C: ConversionEngine> Engine<C> {
         if winner == 0
             || scores[winner] - scores[order[1]] < proposal.margin
             || (!job.context.is_empty()
-                && !preserves_name_spelling(&job.candidates[0], &job.candidates[winner]))
+                && !preserves_name_spelling(&proposal.render(0), &proposal.render(winner)))
         {
             return status(false, RefinementOutcome::Evaluated);
         }
-        let value = format!("{}{}", job.prefix, job.candidates[winner]);
+        self.apply_sentence(
+            session,
+            seq,
+            poll,
+            proposal.render(winner),
+            CandidateSource::Llm,
+        )
+    }
+
+    fn apply_sentence(
+        &mut self,
+        session: &mut Session,
+        seq: u64,
+        poll: &CandidatePoll,
+        value: String,
+        source: CandidateSource,
+    ) -> Result<Option<Response>, Code> {
         refine::cancel(self.llm.as_deref(), session);
-        let choice = candidates::Choice::model_sentence(value, reading(&session.snapshot.preedit));
+        let choice =
+            candidates::Choice::sentence(value, reading(&session.snapshot.preedit), source);
         let preview = self.choose(session, &choice, false)?;
         session.choices.insert(0, choice);
         session.selected_choice = 0;
@@ -347,7 +417,11 @@ impl<C: ConversionEngine> Engine<C> {
             true,
         )?;
         if let Some(page) = &mut reply.candidates {
-            page.refinement_outcome = RefinementOutcome::Evaluated as i32;
+            page.refinement_outcome = if source == CandidateSource::Llm {
+                RefinementOutcome::Evaluated
+            } else {
+                RefinementOutcome::Unspecified
+            } as i32;
         }
         session.last_request = Some(Request {
             body: Some(request::Body::Poll(*poll)),

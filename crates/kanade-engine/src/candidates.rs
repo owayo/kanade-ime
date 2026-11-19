@@ -11,12 +11,17 @@ pub(super) struct Choice {
     transliteration: bool,
 }
 impl Choice {
-    pub(super) fn model_sentence(value: String, reading: String) -> Self {
+    pub(super) fn sentence(value: String, reading: String, source: CandidateSource) -> Self {
         Self {
             value,
             reading,
-            source: CandidateSource::Llm,
-            annotation: "文脈".into(),
+            source,
+            annotation: if source == CandidateSource::Date {
+                "西暦"
+            } else {
+                "文脈"
+            }
+            .into(),
             history_deletable: false,
             whole_reading: true,
             transliteration: false,
