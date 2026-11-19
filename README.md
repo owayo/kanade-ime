@@ -53,7 +53,7 @@ Kanadeは、選んで確定した言葉や訂正を覚え、次の変換候補�
 <!-- standard:install:start -->
 ### GitHub Releases から
 
-[Releases](https://github.com/owayo/kanade-ime/releases/latest)から自分の環境の配布ファイルを取得し、同梱の案内に従ってインストールします。各リリースには、取得したファイルを確かめるための `SHA256SUMS` も添付しています。
+プレビュー版を試す場合は、タグに `-preview.` が付いたリリースを開きます。Windows x64 の EXE は未署名、Apple Silicon Mac の DMG は一時署名・未公証です。どちらも Tsumugi を1つ同梱しています。インストーラーと同じリリースの `SHA256SUMS` でファイルを照合できます。[プレビュー版の一覧](https://github.com/owayo/kanade-ime/releases?q=preview)・[正式版](https://github.com/owayo/kanade-ime/releases/latest)
 
 | プラットフォーム | ファイル |
 |---|---|
