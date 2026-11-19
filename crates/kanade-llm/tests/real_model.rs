@@ -87,7 +87,7 @@ fn qualification_measures_the_real_runtime_and_model() {
 /// Reference costs from the exported 5-gram table, in natural-log units.
 #[test]
 #[ignore = "needs the bundled Tsumugi and its worker"]
-fn character_prior_matches_export_and_leaves_ambiguous_spellings_to_the_neural_model() {
+fn distilled_conversion_scores_match_the_exported_model() {
     let mut worker = Worker::spawn(Path::new(WORKER)).unwrap();
     worker
         .load(&model_path(), model(), limits::THREADS)
@@ -97,13 +97,13 @@ fn character_prior_matches_export_and_leaves_ambiguous_spellings_to_the_neural_m
             "一定の",
             "きかん",
             vec!["期間", "器官", "気管"],
-            vec![0.0, -6.5, -9.125],
+            vec![0.0, -19.5, -27.375],
         ),
         (
             "市内の",
             "こうえん",
             vec!["公園", "講演", "公演"],
-            vec![0.0; 3],
+            vec![-0.75, -4.875, 0.0],
         ),
     ] {
         let job = Job {
@@ -119,7 +119,7 @@ fn character_prior_matches_export_and_leaves_ambiguous_spellings_to_the_neural_m
             .score_conversion(&job, limits::BUDGET_MS, timeout, true)
             .unwrap();
         for ((a, b), offset) in raw.into_iter().zip(combined).zip(offsets) {
-            assert!((b.unwrap() - a.unwrap() - offset).abs() < 0.02);
+            assert!((b.unwrap() - 0.75 * a.unwrap() - offset).abs() < 0.02);
         }
     }
 }

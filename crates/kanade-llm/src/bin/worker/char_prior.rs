@@ -48,12 +48,46 @@ impl Table {
 }
 
 pub(super) struct Prior {
+    policy: Policy,
     ids: HashMap<char, u64>,
     unigrams: Vec<u8>,
     // Each level contains the backoff cost for a history and the cost of an observed continuation.
     levels: Vec<(Table, Table)>,
     radix: u64,
     history_modulus: u64,
+}
+
+// The four numbers in KNG2 are unsigned quarter-nat units (quarter units for multipliers).
+struct Policy {
+    neural: f32,
+    character: f32,
+    gap_eighths: i32,
+    first_bias: f32,
+}
+
+impl Policy {
+    fn read(data: &mut &[u8]) -> Option<Self> {
+        let values = match take(data, 4)? {
+            b"KNG1" => &[4, 4, 12, 0][..],
+            b"KNG2" => take(data, 4)?,
+            _ => return None,
+        };
+        let [
+            neural @ 1..=16,
+            character @ 1..=16,
+            gap @ 0..=32,
+            bias @ 0..=16,
+        ] = *values
+        else {
+            return None;
+        };
+        Some(Self {
+            neural: f32::from(neural) / 4.0,
+            character: f32::from(character) / 4.0,
+            gap_eighths: i32::from(gap) * 2,
+            first_bias: f32::from(bias) / 4.0,
+        })
+    }
 }
 
 impl Prior {
@@ -74,9 +108,7 @@ impl Prior {
     }
 
     fn parse(mut data: &[u8]) -> Option<Self> {
-        if take(&mut data, 4)? != b"KNG1" {
-            return None;
-        }
+        let policy = Policy::read(&mut data)?;
         let radix = count(&mut data)?;
         let order = count(&mut data)?;
         if !(4..=7131).contains(&radix) || order != 5 {
@@ -95,6 +127,7 @@ impl Prior {
             levels.push((Table::read(&mut data)?, Table::read(&mut data)?));
         }
         data.is_empty().then_some(Self {
+            policy,
             ids,
             unigrams,
             levels,
@@ -150,14 +183,43 @@ impl Prior {
             .collect();
         let mut ordered = costs.clone();
         ordered.sort_unstable();
-        // Costs are in eighths of a natural-log unit. Skip uncertain or tied comparisons.
-        if ordered[1] - ordered[0] < 24 {
-            return;
-        }
-        for (score, cost) in scores.iter_mut().zip(costs) {
+        let use_character = ordered[1] - ordered[0] >= self.policy.gap_eighths;
+        for (index, (score, cost)) in scores.iter_mut().zip(costs).enumerate() {
             if let Some(value) = score {
-                *value -= (cost - ordered[0]) as f32 / 8.0;
+                *value *= self.policy.neural;
+                if use_character {
+                    *value -= self.policy.character * (cost - ordered[0]) as f32 / 8.0;
+                }
+                if index == 0 {
+                    *value += self.policy.first_bias;
+                }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Policy;
+
+    #[test]
+    fn original_policy_and_encoded_policy_consume_their_own_header() {
+        let mut original = b"KNG1table".as_slice();
+        let policy = Policy::read(&mut original).unwrap();
+        assert_eq!(
+            (policy.neural, policy.character, policy.gap_eighths),
+            (1.0, 1.0, 24)
+        );
+        assert_eq!(original, b"table");
+        let mut encoded = b"KNG2\x03\x0c\0\0table".as_slice();
+        let policy = Policy::read(&mut encoded).unwrap();
+        assert_eq!(
+            (policy.neural, policy.character, policy.gap_eighths),
+            (0.75, 3.0, 0)
+        );
+        assert_eq!(encoded, b"table");
+        for data in [b"KNG2\0\x0c\0\0".as_slice(), b"KNG2\x03", b"KNG3"] {
+            assert!(Policy::read(&mut &data[..]).is_none());
         }
     }
 }
