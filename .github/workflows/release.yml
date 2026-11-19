@@ -188,7 +188,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset_name: kanade-ime-aarch64-apple-darwin.dmg
-          - os: windows-latest
+          # Use the same clang-cl / MSVC STL combination tested by installer CI.
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             asset_name: kanade-ime-x86_64-pc-windows-msvc.exe
     steps:

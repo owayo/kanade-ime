@@ -103,7 +103,8 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
+          # Mozc uses clang-cl with the Visual Studio 2022 STL on this image.
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
       - name: Keep LF line endings
