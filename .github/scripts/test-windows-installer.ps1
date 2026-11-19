@@ -36,14 +36,55 @@ function Invoke-Msi([string[]]$Arguments, [int[]]$Expected) {
 function Invoke-Setup([string[]]$Arguments, [int[]]$Expected) {
     Invoke-Installer $setup $Arguments $Expected
 }
+function New-LegacyMsi {
+    # Recreate the cached uninstall that ran before packages disabled Restart Manager.
+    [xml]$legacy = Get-Content packaging/windows/Package.wxs -Raw
+    $names = [Xml.XmlNamespaceManager]::new($legacy.NameTable)
+    $names.AddNamespace('w', $legacy.DocumentElement.NamespaceURI)
+    $package = $legacy.SelectSingleNode('/w:Wix/w:Package', $names)
+    foreach ($id in 'MSIRESTARTMANAGERCONTROL', 'REBOOT') {
+        [void]$package.RemoveChild($package.SelectSingleNode("w:Property[@Id='$id']", $names))
+    }
+    $package.SelectSingleNode('w:MajorUpgrade', $names).SetAttribute('Schedule', 'afterInstallInitialize')
+    $package.SelectSingleNode("w:InstallExecuteSequence/w:Custom[@Action='Rollback64']", $names).SetAttribute('After', 'InstallFiles')
+    $legacy.Save((Join-Path (Get-Location) 'artifacts/windows/legacy.wxs'))
+    $saved = $env:DOTNET_ROLL_FORWARD
+    try {
+        $env:DOTNET_ROLL_FORWARD = 'Major'
+        & ./artifacts/wix/wix.exe build artifacts/windows/legacy.wxs artifacts/windows/Payload.wxs -arch x64 -d Version=1.0.0 -o artifacts/windows/legacy.msi | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'Could not build the legacy installer fixture' }
+    } finally { $env:DOTNET_ROLL_FORWARD = $saved }
+    return (Resolve-Path artifacts/windows/legacy.msi).Path
+}
 $failure = $null
 $cleanupFailure = $null
+$legacyMsi = $null
+$editor = $null
 try {
     Invoke-Msi @('/i', $msi, '/qn', '/norestart', 'KANADE_TEST_ROLLBACK=1', '/l*v', 'artifacts/windows/rollback.log') @(1603)
     if (-not (Select-String -Path artifacts/windows/rollback.log -SimpleMatch 'CustomAction TestRollback returned actual error code 1' -Quiet)) { throw 'The requested failure action did not execute' }
     if (Test-Registered) { throw 'Rollback left a COM registration' }
     Write-Output 'MSI failure rollback removed both COM registrations'
+    $legacyMsi = New-LegacyMsi
+    Invoke-Msi @('/i', $legacyMsi, '/qn', '/norestart', '/l*v', 'artifacts/windows/legacy.log') @(0, 3010)
+    $readyFile = Join-Path $env:RUNNER_TEMP ('editor-ready-' + [Guid]::NewGuid())
+    $holder = (Resolve-Path .github/scripts/hold-installed-tip.ps1).Path
+    $editor = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -STA -File `"$holder`" -ReadyFile `"$readyFile`""
+    for ($i = 0; $i -lt 100 -and -not (Test-Path $readyFile); $i++) {
+        if ($editor.HasExited) { throw 'Test editor exited before loading the TIP' }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path $readyFile)) { throw 'Test editor did not load the installed TIP' }
     Invoke-Setup @('/install', '/quiet', '/norestart', '/log', 'artifacts/windows/install.log') @(0, 3010)
+    if ($editor.HasExited) { throw 'Silent major upgrade closed the running editor' }
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $legacyDb = $installer.OpenDatabase($legacyMsi, 0)
+    $view = $legacyDb.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductCode'")
+    $view.Execute()
+    $legacyCode = $view.Fetch().StringData(1)
+    $view.Close()
+    if ($installer.ProductState($legacyCode) -eq 5) { throw 'Legacy product was not removed by the upgrade' }
+    Write-Output 'Silent upgrade removed the legacy product and preserved the original TIP host process'
     if (-not (Test-Registered)) { throw 'COM registration is missing' }
     foreach ($view in @('Registry64', 'Registry32')) {
         $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', $view)
@@ -90,10 +131,15 @@ try {
     }
 } catch { $failure = $_ }
 finally {
+    if ($editor -and -not $editor.HasExited) { $editor.Kill(); $editor.WaitForExit() }
     try { Invoke-Setup @('/uninstall', '/quiet', '/norestart', '/log', 'artifacts/windows/bundle-uninstall.log') @(0, 1605, 3010) }
     catch { $cleanupFailure = $_ }
     try { Invoke-Msi @('/x', $msi, '/qn', '/norestart', '/l*v', 'artifacts/windows/uninstall.log') @(0, 1605, 3010) }
     catch { if (-not $cleanupFailure) { $cleanupFailure = $_ } }
+    if ($legacyMsi) {
+        try { Invoke-Msi @('/x', $legacyMsi, '/qn', '/norestart', 'MSIRESTARTMANAGERCONTROL=Disable') @(0, 1605, 3010) }
+        catch { if (-not $cleanupFailure) { $cleanupFailure = $_ } }
+    }
 }
 if ($failure) { throw $failure }
 if ($cleanupFailure) { throw $cleanupFailure }
