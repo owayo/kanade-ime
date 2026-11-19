@@ -1148,7 +1148,7 @@ fn manual_navigation_supersedes_a_sentence_poll() {
 }
 
 #[test]
-fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
+fn contextual_alternatives_need_a_clear_advantage_over_the_default() {
     for (default_score, changes) in [(-8.0, true), (-5.5, false)] {
         let mut f = fixture(settings(true));
         let initial = f.convert("こうえんをきく");
@@ -1165,6 +1165,9 @@ fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
             Some(-10.),
             Some(-11.),
             Some(-12.),
+            None,
+            None,
+            None,
         ]);
         let response = f.engine.handle(f.connection, request).unwrap().unwrap();
         let script = f.llm.0.lock().unwrap();
@@ -1178,7 +1181,10 @@ fn context_can_change_one_segment_only_with_a_clear_adjusted_margin() {
                 "講演を聞く",
                 "公園を効く",
                 "公演を聞く",
-                "公園を菊"
+                "公園を菊",
+                "講演を効く",
+                "公演を効く",
+                "講演を菊"
             ]
         );
         if changes {

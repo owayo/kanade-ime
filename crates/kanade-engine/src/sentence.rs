@@ -3,6 +3,8 @@
 mod boundary_data;
 mod calendar;
 mod clause;
+mod cut_data;
+mod edit_data;
 pub(super) mod probe;
 mod search;
 
@@ -65,20 +67,15 @@ impl Pending {
             None
         };
         if year.is_none() {
-            if context.is_empty() {
-                if (punctuation && !is_default) || Ending::parse(parts).is_none() {
+            if context.is_empty() && Ending::parse(parts).is_some() {
+                if punctuation && !is_default {
                     return None;
                 }
-            } else {
-                let segment_limit = 8;
-                if !is_default
-                    || !(1..=segment_limit).contains(&parts.len())
-                    || (!punctuation
-                        && parts.iter().map(|s| s.value.chars().count()).sum::<usize>()
-                            > limits::CANDIDATE_CHARS)
-                {
-                    return None;
-                }
+            } else if !is_default
+                || !(1..=24).contains(&parts.len())
+                || (context.is_empty() && parts.len() == 1 && !punctuation)
+            {
+                return None;
             }
         }
         Some(Self {
@@ -270,6 +267,42 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
     p
 }
 
+// Score a bounded suffix when the complete clause exceeds the model's limits.
+// The already displayed prefix supplies the same left context as preceding text.
+fn scored_window(
+    parts: &[Segment],
+    lists: &[Vec<FocusCandidate>],
+    mut job: Job,
+    explore: impl FnOnce(&[Segment], &mut Proposal) -> Vec<search::Split>,
+) -> Option<Proposal> {
+    let mut start = 0;
+    let mut length: usize = parts.iter().map(|s| s.value.chars().count()).sum();
+    while parts.len() - start > 8
+        || length > limits::CANDIDATE_CHARS
+        || (start == 0 && job.context.is_empty())
+    {
+        length -= parts.get(start)?.value.chars().count();
+        start += 1;
+    }
+    if start == parts.len() {
+        return None;
+    }
+    let before: String = parts[..start].iter().map(|s| s.value.as_str()).collect();
+    if start > 0 {
+        job.context = kanade_llm::context_window(&format!("{}{before}", job.context))?;
+        let reading: String = parts[start..].iter().map(|s| s.reading.as_str()).collect();
+        job.reading = kanade_llm::katakana(&reading);
+    }
+    let parts = &parts[start..];
+    let lists = &lists[start..];
+    let mut item = contextual_proposal(parts, lists, job);
+    let splits = explore(parts, &mut item);
+    search::paired(&mut item, parts, lists);
+    search::extend_splits(&mut item, parts, lists, &splits);
+    item.before = before;
+    item.job.valid_for(true).then_some(item)
+}
+
 // Keep the typing session untouched. Check the reconstructed segmentation before using each list.
 fn alternatives<C: ConversionEngine>(
     backend: &mut C,
@@ -279,7 +312,7 @@ fn alternatives<C: ConversionEngine>(
     let parts = &original.segments;
     let whole = reading(original);
     let ending = if context.is_empty() {
-        Some(Ending::parse(parts)?)
+        Ending::parse(parts)
     } else {
         None
     };
@@ -337,9 +370,9 @@ fn alternatives<C: ConversionEngine>(
                 search::resegment(backend, probe, segments, p, split_deadline)
             })
         } else {
-            let mut proposal = contextual_proposal(parts, &lists, job);
-            search::resegment(backend, probe, parts, &mut proposal, split_deadline);
-            proposal.job.valid_for(true).then_some(proposal)
+            scored_window(parts, &lists, job, |segments, p| {
+                search::resegment(backend, probe, segments, p, split_deadline)
+            })
         }
     };
     let result = collect(backend);
@@ -428,7 +461,7 @@ impl<C: ConversionEngine> Engine<C> {
                 return status(false, RefinementOutcome::Unspecified);
             };
             pending.search = None;
-            let ticket = if pending.context.is_empty() {
+            let ticket = if proposal.job.context.is_empty() {
                 llm.submit(proposal.job.clone())
             } else {
                 llm.submit_sentence(proposal.job.clone())
@@ -471,12 +504,23 @@ impl<C: ConversionEngine> Engine<C> {
             .filter(|&i| i < proposal.original_count)
             .collect();
         let mut winner = 0;
-        if originals.len() >= 2 && scores[originals[0]] - scores[originals[1]] >= proposal.margin {
-            winner = originals[0];
+        if let [first, second, ..] = originals[..] {
+            let runner_up_margin = if job.context.is_empty() {
+                proposal.margin
+            } else {
+                0.75 * proposal.margin
+            };
+            if scores[first] - scores[0] >= proposal.margin
+                && scores[first] - scores[second] >= runner_up_margin
+            {
+                winner = first;
+            }
         }
         let best = order[0];
+        let expanded_margin = proposal.margin + 2.0;
         if best >= proposal.original_count
-            && scores[best] - scores[order[1]] >= proposal.margin + 2.0
+            && scores[best] - scores[originals[0]] >= expanded_margin
+            && scores[best] - scores[order[1]] >= 0.75 * expanded_margin
         {
             winner = best;
         }
