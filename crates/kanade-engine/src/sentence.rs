@@ -518,10 +518,7 @@ impl<C: ConversionEngine> Engine<C> {
         }
         let best = order[0];
         let expanded_margin = proposal.margin + 2.0;
-        if best >= proposal.original_count
-            && scores[best] - scores[originals[0]] >= expanded_margin
-            && scores[best] - scores[order[1]] >= 0.75 * expanded_margin
-        {
+        if best >= proposal.original_count && scores[best] - scores[order[1]] >= expanded_margin {
             winner = best;
         }
         if winner == 0
