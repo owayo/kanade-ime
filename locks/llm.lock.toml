@@ -28,7 +28,7 @@ license = "LicenseRef-Kanade-Model-1.0"
 attribution = "Kanade"
 terms_sha256 = "b4002897e8d631a4b5030d954b78834f1796167113ba911ec2d0db3d89300e58"
 # Score leads that change the displayed conversion, fitted to these weights.
-preview = "sentence=5 clause=7 runner_up=0.75 added=2 ending=1.5 rank=0.75 digits_seen=0 digits=3 shortlist=6 shortlist_cost=32 rounds=1"
+preview = "sentence=5 clause=7 runner_up=0.75 added=2 ending=1.5 rank=0.75 digits_seen=0 digits=3 shortlist=6 shortlist_cost=32 rounds=1 katakana=8"
 
 [profile."tsumugi-s"]
 version = 1

@@ -179,7 +179,7 @@ impl Proposal {
         }
         if winner != 0
             && !job.context.is_empty()
-            && !preserves_name_spelling(&self.render(0), &self.render(winner))
+            && !preserves_name_spelling(&self.render(0), &self.render(winner), self.policy.katakana)
         {
             winner = 0;
         }
@@ -405,8 +405,10 @@ impl<'a> Ending<'a> {
 
 // Mozc can offer a reading in kana for an entire name, or omit the dots in
 // a transliterated name. Those are useful manual choices even when a small
-// language model strongly prefers the more common spelling.
-fn preserves_name_spelling(original: &str, candidate: &str) -> bool {
+// language model strongly prefers the more common spelling. Kanji in a text
+// with `katakana` or more katakana characters, as beside a transliterated
+// name, are kept as well; zero leaves them to the model.
+fn preserves_name_spelling(original: &str, candidate: &str, katakana_limit: u8) -> bool {
     let original: Vec<char> = original.chars().collect();
     let candidate: Vec<char> = candidate.chars().collect();
     let prefix = original
@@ -436,7 +438,9 @@ fn preserves_name_spelling(original: &str, candidate: &str) -> bool {
         || new.contains(&'・')
         || (old_kanji >= 2 && kanji(new) < old_kanji)
         || (old_katakana >= 3 && katakana(new) < old_katakana)
-        || (old_kanji > 0 && katakana(&original) >= 8))
+        || (old_kanji > 0
+            && katakana_limit > 0
+            && katakana(&original) >= usize::from(katakana_limit)))
 }
 
 fn contextual_proposal(
@@ -455,7 +459,7 @@ fn contextual_proposal(
         if let Some((spelling, support)) = search::teacher_spelling(&part.reading, &part.value) {
             let value = search::substitute(parts, pos, &spelling);
             if value.chars().count() <= limits::CANDIDATE_CHARS
-                && preserves_name_spelling(&job.candidates[0], &value)
+                && preserves_name_spelling(&job.candidates[0], &value, policy.katakana)
                 && !job.candidates.contains(&value)
             {
                 job.candidates.push(value);
@@ -1264,16 +1268,36 @@ mod tests {
             ("オレゴン州に移る", "乙州に移る"),
             ("ブルーサンダース東山ブルー", "ブルーサンダース頭ブルー"),
         ] {
-            assert!(!preserves_name_spelling(shown, proposed));
+            assert!(!preserves_name_spelling(shown, proposed, 8));
         }
-        assert!(preserves_name_spelling("検討がつかない", "見当がつかない"));
+        assert!(preserves_name_spelling(
+            "検討がつかない",
+            "見当がつかない",
+            8
+        ));
         assert!(preserves_name_spelling(
             "掲載・検討が必要",
-            "掲載・見当が必要"
+            "掲載・見当が必要",
+            8
         ));
         assert!(preserves_name_spelling(
             "木の下に経っている",
-            "木の下に立っている"
+            "木の下に立っている",
+            8
         ));
+        // Weights registered without a katakana limit may respell a word beside
+        // a long transliterated name. Names themselves stay as displayed.
+        let (shown, proposed) = ("ブルーサンダースの講演", "ブルーサンダースの公演");
+        assert!(!preserves_name_spelling(shown, proposed, 8));
+        assert!(preserves_name_spelling(shown, proposed, 9));
+        assert!(preserves_name_spelling(shown, proposed, 0));
+        for (shown, proposed) in [
+            ("アリス・ミラーの作品", "アリスミラーの作品"),
+            ("旧西山町に着く", "旧にしやまちょうに着く"),
+            ("オレゴン州に移る", "乙州に移る"),
+            ("ブルーサンダース東山ブルー", "ブルーサンダース頭ブルー"),
+        ] {
+            assert!(!preserves_name_spelling(shown, proposed, 0));
+        }
     }
 }

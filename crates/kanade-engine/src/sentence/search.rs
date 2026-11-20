@@ -46,7 +46,7 @@ impl Proposal {
             && !value.chars().any(char::is_control)
             && !kanade_llm::profile::TSUMUGI.prompt.reserves(&value)
             && !self.job.candidates.contains(&value)
-            && preserves_name_spelling(&self.job.candidates[0], &value)
+            && preserves_name_spelling(&self.job.candidates[0], &value, self.policy.katakana)
         {
             self.job.candidates.push(value);
             self.penalties.push(penalty);

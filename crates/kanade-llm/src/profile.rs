@@ -69,13 +69,17 @@ pub struct Preview {
     pub shortlist_cost: u16,
     /// Spellings accepted in one window, each scored around the previous one.
     pub rounds: u8,
+    /// Katakana characters in a window from which the weights are not trusted
+    /// to respell its kanji, as beside a transliterated name. Zero trusts them
+    /// in every window.
+    pub katakana: u8,
 }
 impl Preview {
     /// The form recorded in `locks/llm.lock.toml`.
     pub fn spec(&self) -> String {
         format!(
             "sentence={} clause={} runner_up={} added={} ending={} rank={} digits_seen={} \
-             digits={} shortlist={} shortlist_cost={} rounds={}",
+             digits={} shortlist={} shortlist_cost={} rounds={} katakana={}",
             self.sentence,
             self.clause,
             self.runner_up,
@@ -87,6 +91,7 @@ impl Preview {
             self.shortlist,
             self.shortlist_cost,
             self.rounds,
+            self.katakana,
         )
     }
 }
@@ -294,6 +299,7 @@ pub static CATALOG: &[Model] = &[Model {
         shortlist: 6,
         shortlist_cost: 32,
         rounds: 1,
+        katakana: 8,
     },
 }];
 
