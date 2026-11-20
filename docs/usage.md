@@ -83,6 +83,8 @@ JIS 英数キーを押すと、未確定文字の文書への反映を確認し�
 
 Windows では「半角／全角」でかな入力と半角英数の直接入力を切り替えます。英語配列では Alt とバッククォートの同時押しも使えます。IME オン・オフ専用キーに対応します。直接入力中の英字・数字・記号・スペースは、そのままアプリに入ります。
 
+英単語の綴りを入力したいときは、かなで読みを入力し、Space で候補を開きます。「まんでー」なら `Monday`、「こーひー」なら `coffee`、「らいと」なら `light` や `right` を選べます。かな入力のまま英字キーで続けて `monday` や `google` と打った場合も、Space で `Monday` や `Google` を選べます。英字候補は同梱辞書から表示され、オフラインでも使えます。
+
 未確定文字があるときは、F6〜F10で順に、ひらがな・全角カタカナ・半角カタカナ・全角英数・半角英数へ変換できます。Ctrl+U / I / O / P / Tも同じ操作です。確定後や修飾付きFキーはアプリへ渡します。Macのキーボード設定によってはfnキーとの同時押しが必要です。
 
 `make bundle` は `artifacts/macos.noindex/Kanade.app` までを生成します。`cargo xtask bundle-macos --debug` で開発用ビルドも作れます。設定アプリは `Contents/Helpers/Settings.app`、エンジンは `Contents/MacOS/kanade-engine` に入ります。これはローカル導入用の手順です。Windows への導入は [配布とインストール](distribution.md) を参照してください。

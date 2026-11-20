@@ -453,6 +453,70 @@ impl Editor {
 
 #[test]
 #[ignore = "requires the locked worker; make contract"]
+fn english_spellings_appear_on_the_first_page_and_commit() {
+    for (keys, expected, katakana) in [
+        ("mande-", "Monday", false),
+        ("mande-", "Monday", true),
+        ("monday", "Monday", false),
+        ("google", "Google", false),
+        ("tyu-zude-", "Tuesday", false),
+        ("wenzude-", "Wednesday", false),
+        ("sa-zude-", "Thursday", false),
+        ("furaide-", "Friday", false),
+        ("satade-", "Saturday", false),
+        ("sande-", "Sunday", false),
+        ("seputenba-", "September", false),
+        ("aisukuri-mu", "ice cream", false),
+        ("ko-hi-", "coffee", false),
+        ("raito", "right", false),
+    ] {
+        let (_temp, engine, id, revision) = engine();
+        let mut editor = Editor {
+            engine,
+            id,
+            revision,
+            seq: 0,
+            document: String::new(),
+            last: Default::default(),
+        };
+        for ch in keys.chars() {
+            editor.key(&ch.to_string(), SpecialKey::None);
+        }
+        if katakana {
+            editor.modified_key("i", SpecialKey::None, MOD_CONTROL);
+            assert_eq!(surface(editor.last.preedit.as_ref().unwrap()), "マンデー");
+        }
+        editor.key("", SpecialKey::Space);
+        let page = editor.last.candidates.as_ref().unwrap();
+        if keys == "mande-" && !katakana {
+            assert_eq!(surface(editor.last.preedit.as_ref().unwrap()), "マンデー");
+        }
+        let matches: Vec<_> = page
+            .items
+            .iter()
+            .filter(|item| item.value == expected)
+            .collect();
+        assert_eq!(matches.len(), 1, "{keys}: {:?}", page.items);
+        if keys == "mande-" && !katakana {
+            assert_eq!(matches[0].number, 2);
+        }
+        let number = matches[0].number.to_string();
+        editor.key(&number, SpecialKey::None);
+        assert_eq!(editor.document, expected);
+        if keys == "monday" {
+            for ch in "raito".chars() {
+                editor.key(&ch.to_string(), SpecialKey::None);
+            }
+            editor.key("", SpecialKey::Space);
+            let page = editor.last.candidates.as_ref().unwrap();
+            assert!(page.items.iter().any(|c| c.value == "light"));
+            assert!(!page.items.iter().any(|c| c.value == "Monday"));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the locked worker; make contract"]
 fn standard_character_conversions_preserve_composition_and_commit() {
     for convert in [None, Some(SpecialKey::Space), Some(SpecialKey::Tab)] {
         for (control, expected) in [
