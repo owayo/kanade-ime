@@ -27,15 +27,17 @@ pub(super) fn proposals(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
     job: &Job,
+    policy: &Preview,
     resegment: impl FnOnce(&[Segment], &mut Proposal) -> Vec<search::Split>,
 ) -> Vec<Proposal> {
-    split(parts, lists, job, resegment).unwrap_or_default()
+    split(parts, lists, job, policy, resegment).unwrap_or_default()
 }
 
 fn split(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
     job: &Job,
+    policy: &Preview,
     resegment: impl FnOnce(&[Segment], &mut Proposal) -> Vec<search::Split>,
 ) -> Option<Vec<Proposal>> {
     let mut clauses = vec![Clause::default()];
@@ -119,6 +121,7 @@ fn split(
             &cl.lists,
             &local,
             MAX_WINDOWS - found.len(),
+            policy,
             |parts, item| {
                 probe
                     .take()
@@ -128,7 +131,7 @@ fn split(
         for mut item in windows {
             item.before.insert_str(0, before);
             item.after.push_str(&whole[end..]);
-            item.margin = 7.0;
+            item.margin = policy.clause;
             found.push(item);
         }
     }
@@ -171,7 +174,13 @@ mod tests {
             candidates: vec![],
         };
         // The first clause has no alternative of its own and is not scored.
-        let found = proposals(&parts, &lists, &job, |_, _| Vec::new());
+        let found = proposals(
+            &parts,
+            &lists,
+            &job,
+            &kanade_llm::profile::CATALOG[0].preview,
+            |_, _| Vec::new(),
+        );
         assert_eq!(found.len(), 1);
         let choice = &found[0];
         assert_eq!(choice.job.reading, "ケントウ");
@@ -201,16 +210,24 @@ mod tests {
             suffix: String::new(),
             candidates: vec![],
         };
-        let mut found = scored_windows(&parts, &lists, &job, MAX_WINDOWS, |window, p| {
-            assert_eq!(window[0].value, "木に");
-            p.job.candidates.push("木に和詩を貼る".into());
-            p.penalties.push(4.0);
-            vec![search::Split {
-                index: p.penalties.len() - 1,
-                start: 1,
-                end: 2,
-            }]
-        });
+        let mut found = scored_windows(
+            &parts,
+            &lists,
+            &job,
+            MAX_WINDOWS,
+            &kanade_llm::profile::CATALOG[0].preview,
+            |window, p| {
+                assert_eq!(window[0].value, "木に");
+                p.job.candidates.push("木に和詩を貼る".into());
+                p.penalties.push(4.0);
+                p.changes.push(None);
+                vec![search::Split {
+                    index: p.penalties.len() - 1,
+                    start: 1,
+                    end: 2,
+                }]
+            },
+        );
         assert_eq!(found.len(), 1);
         let item = found.pop().unwrap();
         assert_eq!(item.job.context, "そっと");
@@ -239,7 +256,13 @@ mod tests {
             suffix: String::new(),
             candidates: vec![],
         };
-        let found = proposals(&parts, &lists, &job, |_, _| Vec::new());
+        let found = proposals(
+            &parts,
+            &lists,
+            &job,
+            &kanade_llm::profile::CATALOG[0].preview,
+            |_, _| Vec::new(),
+        );
         let whole = "人気は、二年とする。";
         // The longer clause comes first; both render the unchanged text by default.
         assert_eq!(found.len(), 2);

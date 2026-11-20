@@ -2,6 +2,7 @@
 //! Explore candidate boundaries without borrowing the live input process or its profile.
 use super::{Proposal, alternatives};
 use kanade_ipc::{Preedit, Privacy, RefinementOutcome, WORKER_KEY_TIMEOUT, diagnostics};
+use kanade_llm::profile::Preview;
 use kanade_mozc::{ConversionEngine, Mozc};
 use std::{
     path::{Path, PathBuf},
@@ -19,6 +20,7 @@ struct Input {
     preedit: Preedit,
     context: String,
     years: bool,
+    policy: Preview,
 }
 
 struct Request {
@@ -65,6 +67,7 @@ impl Worker {
         preedit: &Preedit,
         context: &str,
         years: bool,
+        policy: &Preview,
         expires: Instant,
     ) -> Option<Ticket> {
         if self.jobs.is_none() {
@@ -80,6 +83,7 @@ impl Worker {
             preedit: preedit.clone(),
             context: context.to_owned(),
             years,
+            policy: *policy,
         });
         let (reply, result) = mpsc::sync_channel(1);
         let request = Request {
@@ -137,9 +141,15 @@ fn run(binary: &Path, jobs: Receiver<Request>) {
             Err(RefinementOutcome::TimedOut)
         } else {
             backend.set_deadline(Some(deadline));
-            let proposal = backend
-                .set_privacy(Privacy::Normal)
-                .map(|()| alternatives(backend, &input.preedit, &input.context, input.years));
+            let proposal = backend.set_privacy(Privacy::Normal).map(|()| {
+                alternatives(
+                    backend,
+                    &input.preedit,
+                    &input.context,
+                    input.years,
+                    &input.policy,
+                )
+            });
             if Instant::now() >= deadline {
                 Err(RefinementOutcome::TimedOut)
             } else if !backend.healthy() {

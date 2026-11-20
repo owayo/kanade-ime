@@ -223,6 +223,10 @@ struct Script {
     takes: u32,
     /// What `take` answers for every job.
     answer: Option<Poll>,
+    /// Index of the candidate preferred by every job taken after the first taken one.
+    later: Option<usize>,
+    /// The first job taken once `later` is set. It receives `answer`.
+    main: Option<u64>,
     refuse: bool,
 }
 #[derive(Clone, Default)]
@@ -236,9 +240,17 @@ impl Rerank for Reranker {
         script.jobs.push(job);
         Some(script.jobs.len() as u64)
     }
-    fn take(&self, _: u64) -> Poll {
+    fn take(&self, id: u64) -> Poll {
         let mut script = self.0.lock().unwrap();
         script.takes += 1;
+        if let Some(preferred) = script.later
+            && *script.main.get_or_insert(id) != id
+        {
+            let count = script.jobs[id as usize - 1].candidates.len();
+            let mut scores = vec![Some(-40.0); count];
+            scores[preferred.min(count - 1)] = Some(0.0);
+            return Poll::Ready(scores);
+        }
         script.answer.clone().unwrap_or(Poll::Pending)
     }
     fn cancel(&self, id: u64) {
@@ -251,6 +263,10 @@ impl Reranker {
     }
     fn answer(&self, scores: &[Option<f32>]) {
         self.0.lock().unwrap().answer = Some(Poll::Ready(scores.to_vec()));
+    }
+    /// Jobs taken after the next one clearly prefer the candidate at `index`.
+    fn later(&self, index: usize) {
+        self.0.lock().unwrap().later = Some(index);
     }
     fn cancelled(&self) -> Vec<u64> {
         self.0.lock().unwrap().cancelled.clone()
@@ -1233,6 +1249,52 @@ fn nearby_joint_spellings_keep_the_displayed_default() {
             assert!(matches!(response.body, Some(response::Body::Candidates(_))));
         }
     }
+}
+
+#[test]
+fn an_accepted_spelling_is_scored_again_for_a_second_change() {
+    let mut f = fixture(settings(true));
+    // A model registered with two accepted spellings per window.
+    f.engine.set_preview(kanade_llm::profile::Preview {
+        rounds: 2,
+        ..kanade_llm::profile::CATALOG[0].preview
+    });
+    let initial = f.convert("こうえんをきく");
+    let request = Request {
+        body: Some(request::Body::Poll(CandidatePoll {
+            revision: Some(f.revision),
+            candidate_revision: page(&initial).candidate_revision,
+            preview_event_seq: Some(f.seq + 1),
+        })),
+    };
+    // The first job accepts 講演 for the first segment.
+    f.llm.answer(&[
+        Some(-8.0),
+        Some(0.),
+        Some(-10.),
+        Some(-11.),
+        Some(-12.),
+        None,
+        None,
+        None,
+    ]);
+    // The second job starts from that spelling and accepts another word for the next segment.
+    f.llm.later(2);
+    let response = f.engine.handle(f.connection, request).unwrap().unwrap();
+    let script = f.llm.0.lock().unwrap();
+    // The focused segment's own job, then two looks at the whole text.
+    assert_eq!(script.jobs.len(), 3);
+    let second = &script.jobs[2];
+    assert_eq!(second.candidates[0], "講演を聞く");
+    assert_eq!(second.context, script.jobs[1].context);
+    assert_eq!(second.reading, script.jobs[1].reading);
+    let Some(response::Body::Key(reply)) = response.body else {
+        panic!("expected preview");
+    };
+    // Both accepted spellings are shown at once, and no third job follows.
+    assert_eq!(second.candidates[1], "公園を聞く");
+    assert_eq!(second.candidates[2], "講演を効く");
+    assert_eq!(surface(reply.preedit.as_ref().unwrap()), "講演を効く");
 }
 
 #[test]

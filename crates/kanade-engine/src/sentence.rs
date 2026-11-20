@@ -11,23 +11,19 @@ mod search;
 mod spelling_data;
 
 use super::*;
-use kanade_llm::{Job, Poll, Rerank, limits};
+use kanade_llm::{Job, Poll, Rerank, limits, profile::Preview};
 use kanade_mozc::FocusCandidate;
 use std::time::Duration;
 
-const ENDING_MARGIN: f32 = 1.5;
-const SENTENCE_MARGIN: f32 = 5.0;
-const RANK_PENALTY: f32 = 0.75;
 /// Windows scored for one conversion: every clause, and each part of a long clause.
 const MAX_WINDOWS: usize = 4;
 /// A later window is submitted only this early in the preview's lifetime.
 const SCAN_START_MS: u64 = 350;
 /// Changes already chosen are shown instead of waiting longer for another window.
 const SCAN_APPLY_MS: u64 = 600;
-/// Lead that digits need over kanji numerals when the committed text shows
-/// ASCII digits, and when it shows no number at all.
-const NUMERAL_MARGIN_SEEN: f32 = 0.0;
-const NUMERAL_MARGIN: f32 = 3.0;
+
+/// A segment whose displayed spelling a candidate replaces.
+type Change = (usize, String);
 
 struct Proposal {
     job: Job,
@@ -38,6 +34,15 @@ struct Proposal {
     original_count: usize,
     /// Compares ways to write the numbers of a spelling that is already chosen.
     numerals: bool,
+    /// For each candidate, the segments it respells. `None` when it moves a
+    /// segment boundary or was not built from the window's segments.
+    changes: Vec<Option<Vec<Change>>>,
+    /// The scored segments and their dictionary candidates.
+    lattice: Option<(Vec<Segment>, Vec<Vec<FocusCandidate>>)>,
+    /// How many spellings of this window have been accepted before.
+    round: u8,
+    /// Thresholds of the model that scores the candidates.
+    policy: Preview,
 }
 
 impl Proposal {
@@ -46,6 +51,44 @@ impl Proposal {
             "{}{}{}{}",
             self.before, self.job.prefix, self.job.candidates[index], self.after
         )
+    }
+
+    // A text with one confirmed correction often needs another. Look once
+    // more around the accepted spelling, with the same context and reading.
+    fn next_round(&self, winner: usize) -> Option<Proposal> {
+        if self.numerals || self.round >= self.policy.rounds || winner == 0 {
+            return None;
+        }
+        let (parts, lists) = self.lattice.as_ref()?;
+        let mut parts = parts.clone();
+        let mut lists = lists.clone();
+        for (pos, value) in self.changes.get(winner)?.as_ref()? {
+            parts[*pos].value.clone_from(value);
+            let list = &mut lists[*pos];
+            let chosen = match list.iter().position(|c| c.value == *value) {
+                Some(index) => list.remove(index),
+                None => FocusCandidate {
+                    reading: String::new(),
+                    annotation: String::new(),
+                    value: value.clone(),
+                    transliteration: false,
+                    history_deletable: false,
+                },
+            };
+            list.insert(0, chosen);
+        }
+        let job = Job {
+            candidates: Vec::new(),
+            ..self.job.clone()
+        };
+        let mut item = contextual_proposal(&parts, &lists, job, &self.policy);
+        search::paired(&mut item, &parts, &lists);
+        item.before.clone_from(&self.before);
+        item.after.clone_from(&self.after);
+        item.margin = self.margin;
+        item.round = self.round + 1;
+        item.lattice = Some((parts, lists));
+        item.job.valid_for(true).then_some(item)
     }
 
     // After the words are chosen, the model compares the same text with its
@@ -74,12 +117,16 @@ impl Proposal {
             after: self.after.clone(),
             penalties: vec![0.0; count],
             margin: if seen {
-                NUMERAL_MARGIN_SEEN
+                self.policy.digits_seen
             } else {
-                NUMERAL_MARGIN
+                self.policy.digits
             },
             original_count: count,
             numerals: true,
+            changes: vec![None; count],
+            lattice: None,
+            round: self.round,
+            policy: self.policy,
         })
     }
 
@@ -117,7 +164,7 @@ impl Proposal {
             let runner_up_margin = if job.context.is_empty() {
                 self.margin
             } else {
-                0.75 * self.margin
+                self.policy.runner_up * self.margin
             };
             if scores[first] - scores[0] >= self.margin
                 && scores[first] - scores[second] >= runner_up_margin
@@ -126,7 +173,7 @@ impl Proposal {
             }
         }
         let best = order[0];
-        let expanded_margin = self.margin + 2.0;
+        let expanded_margin = self.margin + self.policy.added;
         if best >= self.original_count && scores[best] - scores[order[1]] >= expanded_margin {
             winner = best;
         }
@@ -314,7 +361,12 @@ impl<'a> Ending<'a> {
         })
     }
 
-    fn proposal(&self, last: &[FocusCandidate], mut job: Job) -> Option<Proposal> {
+    fn proposal(
+        &self,
+        last: &[FocusCandidate],
+        mut job: Job,
+        policy: &Preview,
+    ) -> Option<Proposal> {
         job.reading = job.reading.strip_suffix(self.mark)?.to_owned();
         job.prefix = self.prefix.iter().map(|s| s.value.as_str()).collect();
         job.candidates.push(self.displayed.to_owned());
@@ -335,9 +387,13 @@ impl<'a> Ending<'a> {
             after: self.mark.to_owned(),
             penalties: vec![0.; job.candidates.len()],
             original_count: job.candidates.len(),
+            changes: vec![None; job.candidates.len()],
             job,
-            margin: ENDING_MARGIN,
+            margin: policy.ending,
             numerals: false,
+            lattice: None,
+            round: 1,
+            policy: *policy,
         })
     }
 }
@@ -378,10 +434,16 @@ fn preserves_name_spelling(original: &str, candidate: &str) -> bool {
         || (old_kanji > 0 && katakana(&original) >= 8))
 }
 
-fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job: Job) -> Proposal {
+fn contextual_proposal(
+    parts: &[Segment],
+    lists: &[Vec<FocusCandidate>],
+    mut job: Job,
+    policy: &Preview,
+) -> Proposal {
     job.candidates
         .push(parts.iter().map(|s| s.value.as_str()).collect());
     let mut penalties = vec![0.0];
+    let mut changes = vec![Some(Vec::new())];
     // Reserve at most two slots for source-confirmed alternatives. They still
     // need a positive model score lead and pass the normal preview checks.
     for (pos, part) in parts.iter().enumerate() {
@@ -393,6 +455,7 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
             {
                 job.candidates.push(value);
                 penalties.push(if support >= 5 { -3.5 } else { -2.5 });
+                changes.push(Some(vec![(pos, spelling)]));
                 if job.candidates.len() == 3 {
                     break;
                 }
@@ -420,7 +483,8 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
                     && !job.candidates.contains(&value)
                 {
                     job.candidates.push(value);
-                    penalties.push(rank as f32 * RANK_PENALTY);
+                    penalties.push(rank as f32 * policy.rank);
+                    changes.push(Some(vec![(pos, c.value.clone())]));
                     if job.candidates.len() == limits::CANDIDATES {
                         break;
                     }
@@ -437,9 +501,13 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
         before: String::new(),
         after: String::new(),
         penalties,
-        margin: SENTENCE_MARGIN,
+        margin: policy.sentence,
         original_count,
         numerals: false,
+        changes,
+        lattice: None,
+        round: 1,
+        policy: *policy,
     };
     search::widen(&mut p, parts, lists);
     p
@@ -453,6 +521,7 @@ fn scored_windows(
     lists: &[Vec<FocusCandidate>],
     job: &Job,
     limit: usize,
+    policy: &Preview,
     explore: impl FnOnce(&[Segment], &mut Proposal) -> Vec<search::Split>,
 ) -> Vec<Proposal> {
     let mut found = Vec::new();
@@ -492,7 +561,7 @@ fn scored_windows(
             };
             job.context = context;
         }
-        let mut item = contextual_proposal(window, choices, job);
+        let mut item = contextual_proposal(window, choices, job, policy);
         let splits = explore
             .take()
             .map_or_else(Vec::new, |probe| probe(window, &mut item));
@@ -500,6 +569,7 @@ fn scored_windows(
         search::extend_splits(&mut item, window, choices, &splits);
         item.before = before;
         item.after = parts[end..].iter().map(|s| s.value.as_str()).collect();
+        item.lattice = Some((window.to_vec(), choices.to_vec()));
         if item.job.valid_for(true) {
             found.push(item);
         }
@@ -548,6 +618,7 @@ fn alternatives<C: ConversionEngine>(
     original: &Preedit,
     context: &str,
     years: bool,
+    policy: &Preview,
 ) -> Option<Vec<Proposal>> {
     let parts = &original.segments;
     let whole = reading(original);
@@ -584,7 +655,9 @@ fn alternatives<C: ConversionEngine>(
             }
             if let Some(ending) = &ending {
                 if pos == ending.prefix.len() {
-                    return ending.proposal(&snap.candidates, job).map(|p| vec![p]);
+                    return ending
+                        .proposal(&snap.candidates, job, policy)
+                        .map(|p| vec![p]);
                 }
             } else {
                 if snap.candidates.first()?.value != parts[pos].value {
@@ -616,11 +689,11 @@ fn alternatives<C: ConversionEngine>(
             None => (parts.as_slice(), lists.as_slice()),
         };
         let found = if whole.contains(['、', '。']) {
-            clause::proposals(parts, lists, &job, |segments, p| {
+            clause::proposals(parts, lists, &job, policy, |segments, p| {
                 search::resegment(backend, probe, segments, p, split_deadline)
             })
         } else {
-            scored_windows(parts, lists, &job, MAX_WINDOWS, |segments, p| {
+            scored_windows(parts, lists, &job, MAX_WINDOWS, policy, |segments, p| {
                 search::resegment(backend, probe, segments, p, split_deadline)
             })
         };
@@ -683,6 +756,7 @@ impl<C: ConversionEngine> Engine<C> {
         let scan = Self::scan(
             &mut self.probe,
             &mut self.backend,
+            &self.preview,
             llm,
             &session.snapshot.preedit,
             &mut pending,
@@ -716,6 +790,7 @@ impl<C: ConversionEngine> Engine<C> {
     fn scan(
         probe: &mut Option<probe::Worker>,
         backend: &mut C,
+        policy: &Preview,
         llm: &dyn Rerank,
         preedit: &Preedit,
         pending: &mut Pending,
@@ -725,7 +800,8 @@ impl<C: ConversionEngine> Engine<C> {
             let proposals = if let Some(worker) = probe {
                 if pending.search.is_none() {
                     let expires = pending.started + Duration::from_millis(limits::RESULT_TTL_MS);
-                    pending.search = worker.submit(preedit, &pending.context, years, expires);
+                    pending.search =
+                        worker.submit(preedit, &pending.context, years, policy, expires);
                 }
                 let Some(ticket) = pending.search.as_ref() else {
                     return Scan::Finished(None, RefinementOutcome::Unavailable);
@@ -736,7 +812,7 @@ impl<C: ConversionEngine> Engine<C> {
                     std::task::Poll::Ready(Err(outcome)) => return Scan::Finished(None, outcome),
                 }
             } else {
-                alternatives(backend, preedit, &pending.context, years)
+                alternatives(backend, preedit, &pending.context, years, policy)
             };
             let Some(mut proposals) = proposals.filter(|found| !found.is_empty()) else {
                 return Scan::Finished(None, RefinementOutcome::Unspecified);
@@ -796,7 +872,11 @@ impl<C: ConversionEngine> Engine<C> {
                             format!("{}{}", proposal.job.prefix, proposal.job.candidates[winner]);
                         pending.edits.push((start, end, value));
                     }
-                    if let Some(next) = proposal.numeral_choice(winner, &pending.context)
+                    // Settle the words of this window first, then its numbers.
+                    let next = proposal
+                        .next_round(winner)
+                        .or_else(|| proposal.numeral_choice(winner, &pending.context));
+                    if let Some(next) = next
                         && let Some(queue) = pending.queue.as_mut()
                     {
                         queue.push(next);
@@ -858,6 +938,7 @@ mod tests {
     #[test]
     fn a_long_clause_is_scored_in_consecutive_windows() {
         use super::{FocusCandidate, Job, MAX_WINDOWS, Segment, scored_windows};
+        let policy = &kanade_llm::profile::CATALOG[0].preview;
         let option = |value: &str| FocusCandidate {
             reading: String::new(),
             annotation: String::new(),
@@ -886,7 +967,7 @@ mod tests {
             candidates: vec![],
         };
         let whole: String = parts.iter().map(|p| p.value.as_str()).collect();
-        let found = scored_windows(&parts, &lists, &job, MAX_WINDOWS, |_, _| Vec::new());
+        let found = scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new());
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|item| item.render(0) == whole));
         // The last eight segments come first, with the first two as their context.
@@ -904,13 +985,15 @@ mod tests {
             context: String::new(),
             ..job.clone()
         };
-        let found = scored_windows(&parts, &lists, &alone, MAX_WINDOWS, |_, _| Vec::new());
+        let found = scored_windows(&parts, &lists, &alone, MAX_WINDOWS, policy, |_, _| {
+            Vec::new()
+        });
         assert_eq!(found.len(), 2);
         assert_eq!(found[1].before, "書き区0");
         assert_eq!(found[1].job.context, "書き区0");
         assert_eq!(found[1].job.candidates[0], "書き区1");
         assert_eq!(
-            scored_windows(&parts, &lists, &job, 1, |_, _| Vec::new()).len(),
+            scored_windows(&parts, &lists, &job, 1, policy, |_, _| Vec::new()).len(),
             1
         );
     }
@@ -943,6 +1026,10 @@ mod tests {
             margin: 5.0,
             original_count: 3,
             numerals: false,
+            changes: vec![None; 3],
+            lattice: None,
+            round: 1,
+            policy: kanade_llm::profile::CATALOG[0].preview,
         };
         // A lead of five over the display and 3.75 over the runner-up, after penalties.
         assert_eq!(
@@ -983,7 +1070,8 @@ mod tests {
 
     #[test]
     fn numbers_are_compared_after_the_words_and_follow_committed_digits() {
-        use super::{Job, NUMERAL_MARGIN, NUMERAL_MARGIN_SEEN, Proposal};
+        use super::{Job, Proposal};
+        let policy = kanade_llm::profile::CATALOG[0].preview;
         let words = Proposal {
             job: Job {
                 context: "2010年には".into(),
@@ -998,6 +1086,10 @@ mod tests {
             margin: 5.0,
             original_count: 2,
             numerals: false,
+            changes: vec![None; 2],
+            lattice: None,
+            round: 1,
+            policy,
         };
         let choice = words.numeral_choice(0, "2010年には").unwrap();
         assert!(choice.numerals);
@@ -1007,23 +1099,84 @@ mod tests {
             ("同じく", "場合には")
         );
         // Committed digits settle a tie; the kanji numeral stays when it scores higher.
-        assert_eq!(choice.margin, NUMERAL_MARGIN_SEEN);
+        assert_eq!(choice.margin, policy.digits_seen);
         assert_eq!(choice.winner(&[Some(-8.0), Some(-8.0)]), Some(1));
         assert_eq!(choice.winner(&[Some(-8.0), Some(-8.5)]), Some(0));
         // Without them the digits need a clear lead.
         let plain = words.numeral_choice(0, "前の文。").unwrap();
-        assert_eq!(plain.margin, NUMERAL_MARGIN);
+        assert_eq!(plain.margin, policy.digits);
         assert_eq!(
-            plain.winner(&[Some(-8.0), Some(-8.0 + NUMERAL_MARGIN - 0.5)]),
+            plain.winner(&[Some(-8.0), Some(-8.0 + policy.digits - 0.5)]),
             Some(0)
         );
         assert_eq!(
-            plain.winner(&[Some(-8.0), Some(-8.0 + NUMERAL_MARGIN)]),
+            plain.winner(&[Some(-8.0), Some(-8.0 + policy.digits)]),
             Some(1)
         );
         // A word without a number, and a choice that is already about numbers.
         assert!(words.numeral_choice(1, "2010年には").is_none());
         assert!(choice.numeral_choice(1, "2010年には").is_none());
+    }
+
+    #[test]
+    fn an_accepted_correction_is_followed_by_one_more_look_at_its_window() {
+        use super::{FocusCandidate, Job, MAX_WINDOWS, Preview, Segment, scored_windows};
+        // A model whose registration allows a second accepted spelling per window.
+        let policy = &Preview {
+            rounds: 2,
+            ..kanade_llm::profile::CATALOG[0].preview
+        };
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        let parts: Vec<_> = [
+            ("しんこうと", "進行と"),
+            ("しぜん", "自然"),
+            ("かんの", "感の"),
+        ]
+        .iter()
+        .map(|(reading, value)| Segment {
+            reading: (*reading).into(),
+            value: (*value).into(),
+            ..Default::default()
+        })
+        .collect();
+        let lists = [
+            vec![option("進行と"), option("信仰と"), option("侵攻と")],
+            vec![option("自然")],
+            vec![option("感の"), option("観の"), option("間の")],
+        ];
+        let job = Job {
+            context: "古代の".into(),
+            reading: "シンコウトシゼンカンノ".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+        let found = scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new());
+        let first = &found[0];
+        let accepted = "信仰と自然感の".to_owned();
+        let index = first
+            .job
+            .candidates
+            .iter()
+            .position(|c| *c == accepted)
+            .unwrap();
+        // The accepted spelling becomes the display that the next candidates change.
+        let second = first.next_round(index).unwrap();
+        assert_eq!((first.round, second.round), (1, 2));
+        assert_eq!(second.job.candidates[0], accepted);
+        assert!(second.job.candidates.contains(&"信仰と自然観の".to_owned()));
+        assert_eq!(second.job.context, first.job.context);
+        assert_eq!(second.job.reading, first.job.reading);
+        assert_eq!(second.render(0), accepted);
+        // No further look after two accepted spellings, or when nothing changed.
+        assert!(second.next_round(1).is_none());
+        assert!(first.next_round(0).is_none());
     }
 
     #[test]
