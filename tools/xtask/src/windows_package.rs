@@ -34,7 +34,7 @@ pub fn stage(root: &Path) -> Result<()> {
         stage.join("manifest.json"),
     )?;
     analyzer::package(root, &stage.join("kanade-project-analyzer.exe"), &stage)?;
-    fs::copy(notices::collect(root)?, stage.join("CARGO_LICENSES.md"))?;
+    notices::collect(root, &stage)?;
     for (source, name) in [
         ("LICENSE", "LICENSE"),
         (
@@ -47,19 +47,6 @@ pub fn stage(root: &Path) -> Result<()> {
         (
             "third_party/mozc/src/data/installer/credits_en.html",
             "credits_en.html",
-        ),
-        ("third_party/hasami/LICENSE", "LICENSE.hasami"),
-        (
-            "third_party/hasami/LICENSE-APACHE-2.0",
-            "LICENSE-APACHE-2.0.hasami",
-        ),
-        (
-            "third_party/hasami/THIRD_PARTY_LICENSES.md",
-            "LICENSES.hasami-data.md",
-        ),
-        (
-            "third_party/hasami/src/sentence/builtin_exceptions.NOTICE",
-            "NOTICE.hasami-exceptions",
         ),
     ] {
         fs::copy(root.join(source), stage.join(name))?;
