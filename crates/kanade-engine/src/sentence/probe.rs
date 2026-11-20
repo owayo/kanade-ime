@@ -18,6 +18,7 @@ type Answer = Result<Option<Vec<Proposal>>, RefinementOutcome>;
 struct Input {
     preedit: Preedit,
     context: String,
+    years: bool,
 }
 
 struct Request {
@@ -63,6 +64,7 @@ impl Worker {
         &mut self,
         preedit: &Preedit,
         context: &str,
+        years: bool,
         expires: Instant,
     ) -> Option<Ticket> {
         if self.jobs.is_none() {
@@ -77,6 +79,7 @@ impl Worker {
         let input = Arc::new(Input {
             preedit: preedit.clone(),
             context: context.to_owned(),
+            years,
         });
         let (reply, result) = mpsc::sync_channel(1);
         let request = Request {
@@ -136,7 +139,7 @@ fn run(binary: &Path, jobs: Receiver<Request>) {
             backend.set_deadline(Some(deadline));
             let proposal = backend
                 .set_privacy(Privacy::Normal)
-                .map(|()| alternatives(backend, &input.preedit, &input.context));
+                .map(|()| alternatives(backend, &input.preedit, &input.context, input.years));
             if Instant::now() >= deadline {
                 Err(RefinementOutcome::TimedOut)
             } else if !backend.healthy() {

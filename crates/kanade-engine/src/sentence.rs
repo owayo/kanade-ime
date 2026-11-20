@@ -5,6 +5,7 @@ mod calendar;
 mod clause;
 mod cut_data;
 mod edit_data;
+mod numerals;
 pub(super) mod probe;
 mod search;
 mod spelling_data;
@@ -23,6 +24,10 @@ const MAX_WINDOWS: usize = 4;
 const SCAN_START_MS: u64 = 350;
 /// Changes already chosen are shown instead of waiting longer for another window.
 const SCAN_APPLY_MS: u64 = 600;
+/// Lead that digits need over kanji numerals when the committed text shows
+/// ASCII digits, and when it shows no number at all.
+const NUMERAL_MARGIN_SEEN: f32 = 0.0;
+const NUMERAL_MARGIN: f32 = 3.0;
 
 struct Proposal {
     job: Job,
@@ -31,6 +36,8 @@ struct Proposal {
     penalties: Vec<f32>,
     margin: f32,
     original_count: usize,
+    /// Compares ways to write the numbers of a spelling that is already chosen.
+    numerals: bool,
 }
 
 impl Proposal {
@@ -39,6 +46,41 @@ impl Proposal {
             "{}{}{}{}",
             self.before, self.job.prefix, self.job.candidates[index], self.after
         )
+    }
+
+    // After the words are chosen, the model compares the same text with its
+    // numbers in digits. Both have one reading, so only the context decides.
+    fn numeral_choice(&self, winner: usize, committed: &str) -> Option<Proposal> {
+        if self.numerals || self.job.context.is_empty() || !self.job.prefix.is_empty() {
+            return None;
+        }
+        let text = &self.job.candidates[winner];
+        let mut candidates = vec![text.clone()];
+        for variant in numerals::variants(text, &self.after) {
+            if variant.chars().count() <= limits::CANDIDATE_CHARS && !candidates.contains(&variant)
+            {
+                candidates.push(variant);
+            }
+        }
+        let count = candidates.len();
+        let job = Job {
+            candidates,
+            ..self.job.clone()
+        };
+        let seen = committed.bytes().any(|b| b.is_ascii_digit());
+        (count > 1 && job.valid_for(true)).then(|| Proposal {
+            job,
+            before: self.before.clone(),
+            after: self.after.clone(),
+            penalties: vec![0.0; count],
+            margin: if seen {
+                NUMERAL_MARGIN_SEEN
+            } else {
+                NUMERAL_MARGIN
+            },
+            original_count: count,
+            numerals: true,
+        })
     }
 
     // Only change the provisional spelling with a clear advantage over
@@ -50,6 +92,13 @@ impl Proposal {
             || scores.iter().flatten().any(|s| !s.is_finite())
         {
             return None;
+        }
+        if self.numerals {
+            // Every candidate is scored: the check above covers the whole list.
+            let values: Vec<f32> = scores.iter().copied().collect::<Option<_>>()?;
+            let best = (1..values.len()).max_by(|a, b| values[*a].total_cmp(&values[*b]))?;
+            let lead = values[best] - values[0];
+            return Some(if lead >= self.margin { best } else { 0 });
         }
         let scores: Vec<_> = scores
             .iter()
@@ -91,6 +140,13 @@ impl Proposal {
     }
 }
 
+enum Scan {
+    /// The search or a model job has not answered yet.
+    Waiting,
+    /// The text with every accepted change, if any window was scored.
+    Finished(Option<String>, RefinementOutcome),
+}
+
 // Put the chosen spelling of each scored window back into the displayed text.
 fn compose(base: &str, edits: &[(usize, usize, String)]) -> String {
     let mut ordered: Vec<_> = edits.iter().collect();
@@ -103,12 +159,13 @@ fn compose(base: &str, edits: &[(usize, usize, String)]) -> String {
 }
 
 // Keep the numerical value chosen by the converter. Use the width of digits
-// already typed in committed text only when that text uses ASCII digits consistently.
+// already typed in committed text only when that text uses ASCII digits
+// consistently. Digits in the conversion itself, such as a calendar year,
+// are the same evidence: one text does not mix the two widths.
 fn contextual_digits(surface: &str, committed: &str) -> Option<String> {
     let wide = |c: char| ('０'..='９').contains(&c);
-    if !surface.contains(wide)
-        || !committed.bytes().any(|b| b.is_ascii_digit())
-        || committed.contains(wide)
+    let ascii = |text: &str| text.bytes().any(|b| b.is_ascii_digit());
+    if !surface.contains(wide) || !(ascii(committed) || ascii(surface)) || committed.contains(wide)
     {
         return None;
     }
@@ -280,6 +337,7 @@ impl<'a> Ending<'a> {
             original_count: job.candidates.len(),
             job,
             margin: ENDING_MARGIN,
+            numerals: false,
         })
     }
 }
@@ -381,6 +439,7 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
         penalties,
         margin: SENTENCE_MARGIN,
         original_count,
+        numerals: false,
     };
     search::widen(&mut p, parts, lists);
     p
@@ -449,15 +508,50 @@ fn scored_windows(
     found
 }
 
+fn with_years(
+    parts: &[Segment],
+    lists: &[Vec<FocusCandidate>],
+    spans: &[(usize, usize, String)],
+) -> (Vec<Segment>, Vec<Vec<FocusCandidate>>) {
+    let mut segments = Vec::new();
+    let mut choices = Vec::new();
+    let mut at = 0;
+    for (start, end, year) in spans {
+        segments.extend_from_slice(&parts[at..*start]);
+        choices.extend_from_slice(&lists[at..*start]);
+        segments.push(Segment {
+            reading: parts[*start..*end]
+                .iter()
+                .map(|s| s.reading.as_str())
+                .collect(),
+            value: year.clone(),
+            ..Default::default()
+        });
+        choices.push(vec![FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: year.clone(),
+            transliteration: false,
+            history_deletable: false,
+        }]);
+        at = *end;
+    }
+    segments.extend_from_slice(&parts[at..]);
+    choices.extend_from_slice(&lists[at..]);
+    (segments, choices)
+}
+
 // Keep the typing session untouched. Check the reconstructed segmentation before using each list.
+// With `years`, calendar years written across segments are replaced before scoring.
 fn alternatives<C: ConversionEngine>(
     backend: &mut C,
     original: &Preedit,
     context: &str,
+    years: bool,
 ) -> Option<Vec<Proposal>> {
     let parts = &original.segments;
     let whole = reading(original);
-    let ending = if context.is_empty() {
+    let ending = if context.is_empty() && !years {
         Ending::parse(parts)
     } else {
         None
@@ -511,12 +605,22 @@ fn alternatives<C: ConversionEngine>(
                 snap = backend.key(probe, &key(SpecialKey::Right), context).ok()?;
             }
         }
+        // A calendar year takes the place of the segments that spell it. The
+        // other segments are scored around it; the year itself has one spelling.
+        let dated = years
+            .then(|| calendar::years(parts, context))
+            .flatten()
+            .map(|spans| with_years(parts, &lists, &spans));
+        let (parts, lists) = match &dated {
+            Some((parts, lists)) => (parts.as_slice(), lists.as_slice()),
+            None => (parts.as_slice(), lists.as_slice()),
+        };
         let found = if whole.contains(['、', '。']) {
-            clause::proposals(parts, &lists, &job, |segments, p| {
+            clause::proposals(parts, lists, &job, |segments, p| {
                 search::resegment(backend, probe, segments, p, split_deadline)
             })
         } else {
-            scored_windows(parts, &lists, &job, MAX_WINDOWS, |segments, p| {
+            scored_windows(parts, lists, &job, MAX_WINDOWS, |segments, p| {
                 search::resegment(backend, probe, segments, p, split_deadline)
             })
         };
@@ -573,47 +677,75 @@ impl<C: ConversionEngine> Engine<C> {
         let Some(llm) = llm else {
             return status(false, RefinementOutcome::Unavailable);
         };
-        if let Some(value) = pending.year.take() {
-            if !self.settings.calculated_dates {
-                return status(false, RefinementOutcome::Unspecified);
-            }
-            return self.apply_sentence(session, seq, poll, value, CandidateSource::Date);
+        if pending.year.is_some() && !self.settings.calculated_dates {
+            return status(false, RefinementOutcome::Unspecified);
         }
+        let scan = Self::scan(
+            &mut self.probe,
+            &mut self.backend,
+            llm,
+            &session.snapshot.preedit,
+            &mut pending,
+        );
+        let (scored, outcome) = match scan {
+            Scan::Waiting => {
+                session.sentence = Some(pending);
+                return status(true, RefinementOutcome::Unspecified);
+            }
+            Scan::Finished(scored, outcome) => (scored, outcome),
+        };
+        // A calendar year needs no model. Show it even when nothing was scored.
+        let digits = |text: String| contextual_digits(&text, &pending.context).unwrap_or(text);
+        let year = pending.year.take().map(digits);
+        let Some(value) = scored.map(digits).or_else(|| year.clone()) else {
+            return status(false, outcome);
+        };
+        if value == surface(&session.snapshot.preedit) {
+            return status(false, RefinementOutcome::Evaluated);
+        }
+        let source = if year.as_ref() == Some(&value) {
+            CandidateSource::Date
+        } else {
+            CandidateSource::Llm
+        };
+        self.apply_sentence(session, seq, poll, value, source)
+    }
+
+    // Score one window at a time. Each keeps the text displayed around it, so
+    // the accepted changes are independent and are shown together.
+    fn scan(
+        probe: &mut Option<probe::Worker>,
+        backend: &mut C,
+        llm: &dyn Rerank,
+        preedit: &Preedit,
+        pending: &mut Pending,
+    ) -> Scan {
         if pending.queue.is_none() {
-            let proposals = if let Some(worker) = &mut self.probe {
+            let years = pending.year.is_some();
+            let proposals = if let Some(worker) = probe {
                 if pending.search.is_none() {
                     let expires = pending.started + Duration::from_millis(limits::RESULT_TTL_MS);
-                    pending.search =
-                        worker.submit(&session.snapshot.preedit, &pending.context, expires);
+                    pending.search = worker.submit(preedit, &pending.context, years, expires);
                 }
                 let Some(ticket) = pending.search.as_ref() else {
-                    return status(false, RefinementOutcome::Unavailable);
+                    return Scan::Finished(None, RefinementOutcome::Unavailable);
                 };
                 match ticket.poll() {
-                    std::task::Poll::Pending => {
-                        session.sentence = Some(pending);
-                        return status(true, RefinementOutcome::Unspecified);
-                    }
+                    std::task::Poll::Pending => return Scan::Waiting,
                     std::task::Poll::Ready(Ok(proposals)) => proposals,
-                    std::task::Poll::Ready(Err(outcome)) => return status(false, outcome),
+                    std::task::Poll::Ready(Err(outcome)) => return Scan::Finished(None, outcome),
                 }
             } else {
-                alternatives(
-                    &mut self.backend,
-                    &session.snapshot.preedit,
-                    &pending.context,
-                )
+                alternatives(backend, preedit, &pending.context, years)
             };
             let Some(mut proposals) = proposals.filter(|found| !found.is_empty()) else {
-                return status(false, RefinementOutcome::Unspecified);
+                return Scan::Finished(None, RefinementOutcome::Unspecified);
             };
             pending.search = None;
             pending.base = proposals[0].render(0);
             proposals.reverse();
             pending.queue = Some(proposals);
         }
-        // Score one window at a time. Each keeps the text displayed around it,
-        // so the accepted changes are independent and are shown together.
         loop {
             let (ticket, proposal) = match pending.work.take() {
                 Some(work) => work,
@@ -647,8 +779,7 @@ impl<C: ConversionEngine> Engine<C> {
                         break;
                     }
                     pending.work = Some((ticket, proposal));
-                    session.sentence = Some(pending);
-                    return status(true, RefinementOutcome::Unspecified);
+                    return Scan::Waiting;
                 }
                 Poll::Gone => break,
                 Poll::Ready(scores) => {
@@ -656,25 +787,30 @@ impl<C: ConversionEngine> Engine<C> {
                         continue;
                     };
                     pending.evaluated = true;
+                    let start = proposal.before.len();
+                    let end = pending.base.len() - proposal.after.len();
                     if winner != 0 {
-                        let start = proposal.before.len();
-                        let end = pending.base.len() - proposal.after.len();
+                        // The numeral choice replaces the spelling chosen for its window.
+                        pending.edits.retain(|edit| edit.0 != start);
                         let value =
                             format!("{}{}", proposal.job.prefix, proposal.job.candidates[winner]);
                         pending.edits.push((start, end, value));
+                    }
+                    if let Some(next) = proposal.numeral_choice(winner, &pending.context)
+                        && let Some(queue) = pending.queue.as_mut()
+                    {
+                        queue.push(next);
                     }
                 }
             }
         }
         if !pending.evaluated {
-            return status(false, RefinementOutcome::Unavailable);
+            return Scan::Finished(None, RefinementOutcome::Unavailable);
         }
-        let surface = compose(&pending.base, &pending.edits);
-        let surface = contextual_digits(&surface, &pending.context).unwrap_or(surface);
-        if surface == pending.base {
-            return status(false, RefinementOutcome::Evaluated);
-        }
-        self.apply_sentence(session, seq, poll, surface, CandidateSource::Llm)
+        Scan::Finished(
+            Some(compose(&pending.base, &pending.edits)),
+            RefinementOutcome::Evaluated,
+        )
     }
 
     fn apply_sentence(
@@ -806,6 +942,7 @@ mod tests {
             penalties: vec![0.0, 0.75, 1.5],
             margin: 5.0,
             original_count: 3,
+            numerals: false,
         };
         // A lead of five over the display and 3.75 over the runner-up, after penalties.
         assert_eq!(
@@ -836,6 +973,95 @@ mod tests {
             assert_eq!(contextual_digits(surface, context), None);
         }
         assert_eq!(contextual_digits("三人で12回", "9月に"), None);
+        // A year in digits is evidence from the conversion itself.
+        assert_eq!(
+            contextual_digits("1993年３月場所に", "").as_deref(),
+            Some("1993年3月場所に")
+        );
+        assert_eq!(contextual_digits("1993年３月場所に", "第９回。"), None);
+    }
+
+    #[test]
+    fn numbers_are_compared_after_the_words_and_follow_committed_digits() {
+        use super::{Job, NUMERAL_MARGIN, NUMERAL_MARGIN_SEEN, Proposal};
+        let words = Proposal {
+            job: Job {
+                context: "2010年には".into(),
+                reading: "ニイダッタ".into(),
+                prefix: String::new(),
+                suffix: String::new(),
+                candidates: vec!["二位だった".into(), "二医だった".into()],
+            },
+            before: "同じく".into(),
+            after: "場合には".into(),
+            penalties: vec![0.0, 0.75],
+            margin: 5.0,
+            original_count: 2,
+            numerals: false,
+        };
+        let choice = words.numeral_choice(0, "2010年には").unwrap();
+        assert!(choice.numerals);
+        assert_eq!(choice.job.candidates, ["二位だった", "2位だった"]);
+        assert_eq!(
+            (choice.before.as_str(), choice.after.as_str()),
+            ("同じく", "場合には")
+        );
+        // Committed digits settle a tie; the kanji numeral stays when it scores higher.
+        assert_eq!(choice.margin, NUMERAL_MARGIN_SEEN);
+        assert_eq!(choice.winner(&[Some(-8.0), Some(-8.0)]), Some(1));
+        assert_eq!(choice.winner(&[Some(-8.0), Some(-8.5)]), Some(0));
+        // Without them the digits need a clear lead.
+        let plain = words.numeral_choice(0, "前の文。").unwrap();
+        assert_eq!(plain.margin, NUMERAL_MARGIN);
+        assert_eq!(
+            plain.winner(&[Some(-8.0), Some(-8.0 + NUMERAL_MARGIN - 0.5)]),
+            Some(0)
+        );
+        assert_eq!(
+            plain.winner(&[Some(-8.0), Some(-8.0 + NUMERAL_MARGIN)]),
+            Some(1)
+        );
+        // A word without a number, and a choice that is already about numbers.
+        assert!(words.numeral_choice(1, "2010年には").is_none());
+        assert!(choice.numeral_choice(1, "2010年には").is_none());
+    }
+
+    #[test]
+    fn a_calendar_year_is_one_fixed_segment_among_the_scored_ones() {
+        use super::{FocusCandidate, Segment, calendar, with_years};
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        let parts: Vec<_> = [
+            ("せん", "船"),
+            ("きゅうひゃく", "九百"),
+            ("きゅうじゅう", "九十"),
+            ("さんねん", "三年"),
+            ("さんがつ", "３月"),
+            ("ばしょに", "場所に"),
+        ]
+        .iter()
+        .map(|(reading, value)| Segment {
+            reading: (*reading).into(),
+            value: (*value).into(),
+            ..Default::default()
+        })
+        .collect();
+        let lists: Vec<_> = parts
+            .iter()
+            .map(|p| vec![option(&p.value), option("別")])
+            .collect();
+        let spans = calendar::years(&parts, "").unwrap();
+        let (segments, choices) = with_years(&parts, &lists, &spans);
+        let values: Vec<_> = segments.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(values, ["1993年", "３月", "場所に"]);
+        assert_eq!(segments[0].reading, "せんきゅうひゃくきゅうじゅうさんねん");
+        assert_eq!(choices[0].len(), 1);
+        assert_eq!(choices[1].len(), 2);
     }
 
     #[test]

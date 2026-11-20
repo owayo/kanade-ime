@@ -78,11 +78,28 @@ fn is_quantity(segment: &Segment) -> bool {
     ) || segment.value.ends_with(['万', '億', '兆'])
 }
 
+/// The displayed text with every calendar year written in digits, when that
+/// changes it.
 pub(super) fn surface(parts: &[Segment], context: &str) -> Option<String> {
+    let spans = years(parts, context)?;
+    let mut result = String::new();
+    let mut at = 0;
+    for (start, end, year) in &spans {
+        result.extend(parts[at..*start].iter().map(|s| s.value.as_str()));
+        result.push_str(year);
+        at = *end;
+    }
+    result.extend(parts[at..].iter().map(|s| s.value.as_str()));
+    Some(result)
+}
+
+/// Segment ranges that spell a calendar year, with the year in digits. `None`
+/// when no range would change the displayed text or a number is not a year.
+pub(super) fn years(parts: &[Segment], context: &str) -> Option<Vec<(usize, usize, String)>> {
     if parts.len() > 16 {
         return None;
     }
-    let mut result = String::new();
+    let mut spans = Vec::new();
     let mut changed = false;
     let mut start = 0;
     while start < parts.len() {
@@ -125,14 +142,13 @@ pub(super) fn surface(parts: &[Segment], context: &str) -> Option<String> {
                 return None;
             }
             changed |= original != replacement;
-            result.push_str(&replacement);
+            spans.push((start, end, replacement));
             start = end;
         } else {
-            result.push_str(&parts[start].value);
             start += 1;
         }
     }
-    changed.then_some(result)
+    changed.then_some(spans)
 }
 
 #[cfg(test)]
