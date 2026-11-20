@@ -293,6 +293,11 @@ impl Pending {
         })
     }
 
+    // Past this point, changes already chosen are shown without further scoring.
+    fn late(&self) -> bool {
+        self.started.elapsed() > Duration::from_millis(SCAN_APPLY_MS)
+    }
+
     pub(super) fn cancel(self, llm: Option<&dyn Rerank>) {
         if let (Some((ticket, _)), Some(llm)) = (self.work, llm) {
             llm.cancel(ticket);
@@ -807,6 +812,10 @@ impl<C: ConversionEngine> Engine<C> {
                     return Scan::Finished(None, RefinementOutcome::Unavailable);
                 };
                 match ticket.poll() {
+                    // A calendar year is not held back by a slow search.
+                    std::task::Poll::Pending if years && pending.late() => {
+                        return Scan::Finished(None, RefinementOutcome::TimedOut);
+                    }
                     std::task::Poll::Pending => return Scan::Waiting,
                     std::task::Poll::Ready(Ok(proposals)) => proposals,
                     std::task::Poll::Ready(Err(outcome)) => return Scan::Finished(None, outcome),
@@ -848,9 +857,8 @@ impl<C: ConversionEngine> Engine<C> {
             };
             match llm.take(ticket) {
                 Poll::Pending => {
-                    if !pending.edits.is_empty()
-                        && pending.started.elapsed() > Duration::from_millis(SCAN_APPLY_MS)
-                    {
+                    // Show what is already decided rather than lose it to a slow job.
+                    if (!pending.edits.is_empty() || pending.year.is_some()) && pending.late() {
                         llm.cancel(ticket);
                         break;
                     }
