@@ -2,10 +2,7 @@
 members = ["crates/*", "tools/xtask"]
 default-members = ["crates/kanade-engine", "crates/kanade-eval", "crates/kanade-imk", "crates/kanade-tip"]
 resolver = "3"
-exclude = ["third_party/mozc", "third_party/hasami", "artifacts/analyzer-source"]
-
-[patch."https://github.com/owayo/hasami"]
-hasami = { path = "third_party/hasami" }
+exclude = ["third_party/mozc", "artifacts/analyzer-source"]
 
 [workspace.package]
 version = "26.11.116"
@@ -31,8 +28,8 @@ sha2 = "0.11.1"
 libc = "0.2.191"
 tempfile = "3.27.0"
 notify = "8.2.2"
-hasami = { git = "https://github.com/owayo/hasami", rev = "47c7dec1870d812b60cbddc67be18bcc077947a2", default-features = false, features = ["analyzer"] }
-noslop = { git = "https://github.com/owayo/noslop", tag = "v26.11.101", default-features = false }
+hasami = { git = "https://github.com/owayo/hasami", tag = "v26.11.106", default-features = false, features = ["analyzer"] }
+noslop = { git = "https://github.com/owayo/noslop", tag = "v26.11.102", default-features = false }
 kanade-ipc = { path = "crates/kanade-ipc" }
 kanade-mozc = { path = "crates/kanade-mozc" }
 kanade-learn = { path = "crates/kanade-learn" }

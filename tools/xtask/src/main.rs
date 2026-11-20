@@ -16,32 +16,6 @@ mod protocol;
 mod version;
 mod windows_package;
 
-fn prepare(root: &Path) -> Result<()> {
-    let source = root.join("third_party/hasami");
-    let manifest: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.toml"))?)?;
-    let commit = manifest["workspace"]["dependencies"]["hasami"]["rev"]
-        .as_str()
-        .context("hasami dependency must pin a commit")?;
-    ensure!(
-        output(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&source)
-        )? == commit,
-        "hasami commit differs from lock"
-    );
-    ensure!(
-        output(
-            Command::new("git")
-                .args(["status", "--porcelain", "--untracked-files=normal"])
-                .current_dir(&source)
-        )?
-        .is_empty(),
-        "hasami checkout must be unmodified"
-    );
-    Ok(())
-}
-
 fn run(command: &mut Command) -> Result<()> {
     ensure!(command.status()?.success(), "command failed");
     Ok(())
@@ -449,14 +423,13 @@ fn main() -> Result<()> {
             );
             version::bump(&root, !arguments.is_empty())
         }
-        Some("prepare") => prepare(&root),
+        Some("prepare") => run(Command::new("cargo")
+            .args(["fetch", "--locked"])
+            .current_dir(&root)),
         Some("install-macos") => install::macos(&root),
         Some("fetch-dictionary") => dictionary::fetch(&root),
         Some("emoji-data") => emoji::generate(&root),
-        Some("notices") => {
-            notices::collect(&root)?;
-            Ok(())
-        }
+        Some("notices") => notices::collect(&root, &root.join("artifacts/notices")),
         Some("proto-check") => protocol::check(
             &root,
             &PathBuf::from(

@@ -1,21 +1,41 @@
 use super::*;
-pub fn collect(root: &Path) -> Result<PathBuf> {
-    collect_graph(
-        root,
-        Some("kanade-ui/native,kanade-llm/llama"),
-        false,
-        &root.join("artifacts/notices/CARGO_LICENSES.md"),
+pub fn collect(root: &Path, destination: &Path) -> Result<()> {
+    let packages = cargo_packages(root, Some("kanade-ui/native,kanade-llm/llama"))?;
+    let mut versions = packages.iter().filter(|p| p["name"] == "hasami");
+    let hasami = versions
+        .next()
+        .context("hasami is missing from the locked Cargo graph")?;
+    ensure!(
+        versions.next().is_none(),
+        "multiple hasami packages in the locked Cargo graph"
+    );
+    let source = Path::new(
+        hasami["manifest_path"]
+            .as_str()
+            .context("missing hasami manifest")?,
     )
+    .parent()
+    .context("missing hasami source directory")?;
+    fs::create_dir_all(destination)?;
+    for (path, name) in [
+        ("LICENSE", "LICENSE.hasami"),
+        ("LICENSE-APACHE-2.0", "LICENSE-APACHE-2.0.hasami"),
+        ("THIRD_PARTY_LICENSES.md", "LICENSES.hasami-data.md"),
+        (
+            "src/sentence/builtin_exceptions.NOTICE",
+            "NOTICE.hasami-exceptions",
+        ),
+    ] {
+        fs::copy(source.join(path), destination.join(name))
+            .with_context(|| format!("copy hasami notice {path}"))?;
+    }
+    collect_graph(&packages, false, &destination.join("CARGO_LICENSES.md"))?;
+    Ok(())
 }
 pub fn collect_analyzer(root: &Path, destination: &Path) -> Result<PathBuf> {
-    collect_graph(root, None, true, destination)
+    collect_graph(&cargo_packages(root, None)?, true, destination)
 }
-fn collect_graph(
-    root: &Path,
-    features: Option<&str>,
-    include_local: bool,
-    destination: &Path,
-) -> Result<PathBuf> {
+fn cargo_packages(root: &Path, features: Option<&str>) -> Result<Vec<serde_json::Value>> {
     let target = format!(
         "{}-{}",
         std::env::consts::ARCH,
@@ -42,16 +62,20 @@ fn collect_graph(
         command.args(["--features", features]);
     }
     let data = output(&mut command)?;
-    let metadata: serde_json::Value = serde_json::from_str(&data)?;
-    let packages = metadata["packages"]
-        .as_array()
-        .context("package metadata missing")?;
+    let mut metadata: serde_json::Value = serde_json::from_str(&data)?;
+    Ok(serde_json::from_value(metadata["packages"].take())?)
+}
+fn collect_graph(
+    packages: &[serde_json::Value],
+    include_local: bool,
+    destination: &Path,
+) -> Result<PathBuf> {
     let mut text = String::from(
         "# Cargo dependency notices\n\nGenerated from the locked dependency graph. Each package retains its stated license.\n\n",
     );
     let mut sorted: Vec<_> = packages
         .iter()
-        .filter(|p| include_local || p["source"].is_string() || p["name"] == "hasami")
+        .filter(|p| include_local || p["source"].is_string())
         .collect();
     sorted.sort_by_key(|p| (p["name"].as_str(), p["version"].as_str()));
     for package in sorted {

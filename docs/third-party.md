@@ -5,7 +5,7 @@ Kanade's original source is MIT licensed. Components retain their own licenses; 
 | Component | Pin | License and notice |
 |---|---|---|
 | Mozc | 3.35.6354 | BSD 3-Clause; `third_party/mozc/LICENSE` and generated `credits_en.html` |
-| hasami | `47c7dec1870d812b60cbddc67be18bcc077947a2` ([PR #145](https://github.com/owayo/hasami/pull/145)) | MIT code; embedded exception data also uses NAIST-2003, Apache-2.0 and BSD-3-Clause. Include its LICENSE, THIRD_PARTY_LICENSES.md, Apache license and builtin_exceptions.NOTICE; IME APIs are included upstream |
+| hasami | [v26.11.106](https://github.com/owayo/hasami/releases/tag/v26.11.106), pinned in Cargo.lock | MIT code; embedded exception data also uses NAIST-2003, Apache-2.0 and BSD-3-Clause. Include its LICENSE, THIRD_PARTY_LICENSES.md, Apache license and builtin_exceptions.NOTICE; IME APIs are included upstream |
 | Project analyzer | astro-sight `429f894188842b0ba183db766793d4aafca19e12` | MIT source and separately licensed dependencies. The macOS bundle includes `ANALYZER_LICENSES.md` with the pinned root, vendored packages and dependency notices; `project-analyzer.json` records its revision, version and signed-binary digest |
 | noslop | v26.11.101 | MIT; its repository LICENSE |
 | GPUI preview crates | =0.3.12 | Apache-2.0; crate license files |

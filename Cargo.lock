@@ -2161,7 +2161,8 @@ dependencies = [
 
 [[package]]
 name = "hasami"
-version = "26.11.103"
+version = "26.11.106"
+source = "git+https://github.com/owayo/hasami?tag=v26.11.106#662f9061bc77e82f9ed2c922e8577e2fabae94dd"
 dependencies = [
  "bytemuck",
  "memmap2",
@@ -3276,8 +3277,8 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
 name = "noslop"
-version = "26.11.101"
-source = "git+https://github.com/owayo/noslop?tag=v26.11.101#3380906541cbca7b7ebdfdb0dda2e642b197a3a2"
+version = "26.11.102"
+source = "git+https://github.com/owayo/noslop?tag=v26.11.102#dded6bf641577ae27f89fb22334e99b824bfc19f"
 dependencies = [
  "aho-corasick",
  "anstyle",

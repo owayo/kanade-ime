@@ -136,26 +136,10 @@ pub fn macos(root: &Path, debug: bool) -> Result<()> {
             emoji_notices.join(name),
         )?;
     }
-    fs::copy(notices::collect(root)?, resources.join("CARGO_LICENSES.md"))?;
+    notices::collect(root, &resources)?;
     fs::copy(
         root.join("docs/third-party.md"),
         resources.join("THIRD_PARTY.md"),
-    )?;
-    fs::copy(
-        root.join("third_party/hasami/LICENSE"),
-        resources.join("LICENSE.hasami"),
-    )?;
-    fs::copy(
-        root.join("third_party/hasami/src/sentence/builtin_exceptions.NOTICE"),
-        resources.join("NOTICE.hasami-exceptions"),
-    )?;
-    fs::copy(
-        root.join("third_party/hasami/THIRD_PARTY_LICENSES.md"),
-        resources.join("LICENSES.hasami-data.md"),
-    )?;
-    fs::copy(
-        root.join("third_party/hasami/LICENSE-APACHE-2.0"),
-        resources.join("LICENSE-APACHE-2.0.hasami"),
     )?;
     for name in ["LICENSE.mozc", "credits_en.html"] {
         fs::copy(root.join("artifacts/mozc").join(name), resources.join(name))?;

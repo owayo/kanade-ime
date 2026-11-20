@@ -59,7 +59,6 @@ jobs:
           git worktree add --detach "$probe" HEAD
           git clone --shared --no-checkout third_party/mozc "$probe/third_party/mozc"
           git -C "$probe/third_party/mozc" checkout --detach "$candidate"
-          git -C "$probe" submodule update --init --recursive third_party/hasami
           cd "$probe"
           mise trust
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
