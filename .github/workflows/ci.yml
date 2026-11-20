@@ -72,6 +72,9 @@ jobs:
       - name: Compile the Windows installer definitions
         shell: pwsh
         run: ./.github/scripts/test-windows-authoring.ps1
+        - name: Verify Windows engine recovery
+          shell: pwsh
+          run: ./.github/scripts/test-windows-engine-recovery.ps1
   quality:
     strategy:
       fail-fast: false
