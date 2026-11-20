@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Answer = Result<Option<Proposal>, RefinementOutcome>;
+type Answer = Result<Option<Vec<Proposal>>, RefinementOutcome>;
 
 struct Input {
     preedit: Preedit,
