@@ -103,6 +103,11 @@ try {
     $engine = $null
     try {
         $application = Join-Path $env:ProgramFiles Kanade
+        $startup = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade
+        $launcher = Join-Path $application 'start-engine.ps1'
+        if (-not (Test-Path -LiteralPath $launcher) -or -not $startup.EndsWith(('"{0}" -Watch' -f $launcher), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Installed startup entry does not launch the engine supervisor.'
+        }
         python .github/scripts/bundled_model.py --verify-windows-install $application
         if ($LASTEXITCODE -ne 0) { throw 'The installed Tsumugi model does not match the release lock' }
         $engine = Start-Process (Join-Path $application kanade-engine.exe) -PassThru -NoNewWindow -RedirectStandardOutput artifacts/windows/engine-out.log -RedirectStandardError artifacts/windows/engine-error.log
