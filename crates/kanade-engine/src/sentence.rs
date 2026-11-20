@@ -7,6 +7,7 @@ mod cut_data;
 mod edit_data;
 pub(super) mod probe;
 mod search;
+mod spelling_data;
 
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits};
@@ -246,6 +247,23 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
     job.candidates
         .push(parts.iter().map(|s| s.value.as_str()).collect());
     let mut penalties = vec![0.0];
+    // Reserve at most two slots for source-confirmed alternatives. They still
+    // need a positive model score lead and pass the normal preview checks.
+    for (pos, part) in parts.iter().enumerate() {
+        if let Some((spelling, support)) = search::teacher_spelling(&part.reading, &part.value) {
+            let value = search::substitute(parts, pos, &spelling);
+            if value.chars().count() <= limits::CANDIDATE_CHARS
+                && preserves_name_spelling(&job.candidates[0], &value)
+                && !job.candidates.contains(&value)
+            {
+                job.candidates.push(value);
+                penalties.push(if support >= 5 { -3.5 } else { -2.5 });
+                if job.candidates.len() == 3 {
+                    break;
+                }
+            }
+        }
+    }
     // Take the next distinct alternative at each position before exploring lower ranks.
     for rank in 1..=3 {
         for (pos, list) in lists.iter().enumerate() {

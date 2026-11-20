@@ -5,12 +5,36 @@ use super::*;
 const SEGMENT_DEPTH: usize = 32;
 const SPLIT_RESERVE: usize = 18;
 
-fn substitute(parts: &[Segment], pos: usize, word: &str) -> String {
+pub(super) fn substitute(parts: &[Segment], pos: usize, word: &str) -> String {
     parts
         .iter()
         .enumerate()
         .map(|(i, p)| if i == pos { word } else { &p.value })
         .collect()
+}
+
+pub(super) fn teacher_spelling(reading: &str, shown: &str) -> Option<(String, u16)> {
+    let lookup = |r: &str, s: &str| {
+        let table = spelling_data::SPELLINGS;
+        let i = table
+            .binary_search_by(|&(y, v, _, _)| (y, v).cmp(&(r, s)))
+            .ok()?;
+        Some((table[i].2, table[i].3))
+    };
+    if let Some((word, n)) = lookup(reading, shown) {
+        return Some((word.to_owned(), n));
+    }
+    for suffix in [
+        "には", "では", "から", "まで", "より", "の", "に", "が", "を", "は", "も", "で", "と",
+        "へ",
+    ] {
+        if let (Some(r), Some(s)) = (reading.strip_suffix(suffix), shown.strip_suffix(suffix))
+            && let Some((word, n)) = lookup(r, s)
+        {
+            return Some((format!("{word}{suffix}"), n));
+        }
+    }
+    None
 }
 
 impl Proposal {
@@ -277,4 +301,25 @@ pub(super) fn resegment<C: ConversionEngine>(
         }
     }
     splits
+}
+
+#[cfg(test)]
+mod spelling_tests {
+    use super::*;
+
+    #[test]
+    fn teacher_proposals_require_both_the_reading_and_displayed_word() {
+        assert_eq!(teacher_spelling("きどう", "起動"), Some(("軌道".into(), 5)));
+        assert_eq!(
+            teacher_spelling("きどうへ", "起動へ"),
+            Some(("軌道へ".into(), 5))
+        );
+        assert_eq!(teacher_spelling("きどうへ", "起動に"), None);
+        assert_eq!(teacher_spelling("きどう", "軌道"), None);
+        assert!(
+            spelling_data::SPELLINGS
+                .windows(2)
+                .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1))
+        );
+    }
 }
