@@ -178,7 +178,7 @@ mod tests {
             &parts,
             &lists,
             &job,
-            &kanade_llm::profile::CATALOG[0].preview,
+            &crate::sentence::TEST_POLICY,
             |_, _| Vec::new(),
         );
         assert_eq!(found.len(), 1);
@@ -215,7 +215,7 @@ mod tests {
             &lists,
             &job,
             MAX_WINDOWS,
-            &kanade_llm::profile::CATALOG[0].preview,
+            &crate::sentence::TEST_POLICY,
             |window, p| {
                 assert_eq!(window[0].value, "木に");
                 p.job.candidates.push("木に和詩を貼る".into());
@@ -260,7 +260,7 @@ mod tests {
             &parts,
             &lists,
             &job,
-            &kanade_llm::profile::CATALOG[0].preview,
+            &crate::sentence::TEST_POLICY,
             |_, _| Vec::new(),
         );
         let whole = "人気は、二年とする。";

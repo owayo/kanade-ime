@@ -58,6 +58,10 @@ jobs:
           name: kanade-ime-x86_64-pc-windows-msvc.exe
           path: release
           skip-decompress: true
+      # The release carries the model beside the installers that bundle it.
+      # Later builds find it there by its SHA-256.
+      - name: Add the bundled model to the release files
+        run: python3 .github/scripts/bundled_model.py release
       - name: Check installers and identify the bundled model
         id: assets
         env:
@@ -80,6 +84,7 @@ jobs:
               f"Kanade {version} のプレビュー版です。Windows x64 の EXE は未署名、Apple Silicon Mac の DMG は一時署名・未公証です。\n\n"
               f"どちらにも Tsumugi {model['version']}（{model['size']:,} バイト）を同梱しています。\n\n"
               f"モデルの SHA-256 は `{model['sha256']}` です。インストーラーは添付の SHA256SUMS で照合できます。\n\n"
+              f"`{model['file']}` は同梱しているモデルの写しで、インストーラーのビルドが取得するために添付しています。利用するときにダウンロードする必要はありません。\n\n"
               f"[両 OS のインストーラー検査]({ci})\n", encoding="utf-8")
           PY
           cat preview-notes.md >> "$GITHUB_STEP_SUMMARY"
@@ -96,6 +101,8 @@ jobs:
             gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "$TAG" --notes-file preview-notes.md --prerelease --latest=false
           fi
           python3 .github/scripts/release-assets.py verify release --tag "$TAG" --repo "$GITHUB_REPOSITORY"
+          # A copy attached to an earlier release for builds is no longer needed.
+          python3 .github/scripts/release-assets.py prune --tag "$TAG" --repo "$GITHUB_REPOSITORY"
   prepare-release:
     if: inputs.channel != 'preview'
     runs-on: ubuntu-latest
@@ -206,6 +213,10 @@ jobs:
           cache: false
       - name: Add the Rust target
         run: rustup target add ${{ matrix.target }}
+      - name: Fetch the bundled model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/bundled_model.py --fetch
       - name: Build the native release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p kanade-engine -p kanade-imk -p kanade-ui -p kanade-tip -p kanade-llm -p kanade-indexer --features kanade-ui/native,kanade-llm/llama
       - name: Import macOS signing credentials
@@ -307,7 +318,12 @@ jobs:
           minimum_release_age: 14d
           cache: false
           install_args: python
-      - name: Validate installers and write SHA256SUMS
+      # The release carries the model beside the installers that bundle it.
+      - name: Add the bundled model to the release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/bundled_model.py release
+      - name: Validate the release files and write SHA256SUMS
         env:
           EXPECTED: ${{ needs.build.outputs.assets }}
         run: python3 .github/scripts/release-assets.py checksums release --expected "$EXPECTED"
@@ -323,17 +339,25 @@ jobs:
           files: |
             release/kanade-ime-aarch64-apple-darwin.dmg
             release/kanade-ime-x86_64-pc-windows-msvc.exe
+            release/tsumugi.gguf
             release/SHA256SUMS
           body: |
             Windows x64とApple Silicon Mac向けの日本語入力IMEです。
             SHA256SUMSで照合してから、インストーラーを開いてください。
             macOSはDMG内の「Kanade インストーラー.app」、WindowsはEXEを起動します。
             導入手順とネイティブ検証の状況も確認してください。
+            tsumugi.ggufは同梱しているモデルの写しです。インストーラーのビルドが取得するために添付しています。
       - name: Verify published assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare-release.outputs.tag }}
         run: python3 .github/scripts/release-assets.py verify release --tag "$TAG" --repo "$GITHUB_REPOSITORY"
+      # A copy attached to an earlier release for builds is no longer needed.
+      - name: Remove copies of the model from earlier releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: python3 .github/scripts/release-assets.py prune --tag "$TAG" --repo "$GITHUB_REPOSITORY"
   release-summary:
     if: ${{ !cancelled() }}
     needs: [prepare-release, build, release, preview]

@@ -84,26 +84,29 @@ fn qualification_measures_the_real_runtime_and_model() {
     );
 }
 
-/// Reference costs from the exported 5-gram table, in natural-log units.
+/// Reference costs from the exported 5-gram table, in nats above the cheapest
+/// candidate. The bundled file weights neural scores by 4 and these costs by 1.5.
 #[test]
 #[ignore = "needs the bundled Tsumugi and its worker"]
 fn distilled_conversion_scores_match_the_exported_model() {
+    const NEURAL: f32 = 4.0;
+    const CHARACTER: f32 = 1.5;
     let mut worker = Worker::spawn(Path::new(WORKER)).unwrap();
     worker
         .load(&model_path(), model(), limits::THREADS)
         .unwrap();
-    for (context, reading, candidates, offsets) in [
+    for (context, reading, candidates, costs) in [
         (
             "一定の",
             "きかん",
             vec!["期間", "器官", "気管"],
-            vec![0.0, -19.5, -27.375],
+            vec![0.0, 6.5, 9.125],
         ),
         (
             "市内の",
             "こうえん",
             vec!["公園", "講演", "公演"],
-            vec![-0.75, -4.875, 0.0],
+            vec![0.25, 1.625, 0.0],
         ),
     ] {
         let job = Job {
@@ -118,8 +121,8 @@ fn distilled_conversion_scores_match_the_exported_model() {
         let combined = worker
             .score_conversion(&job, limits::BUDGET_MS, timeout, true)
             .unwrap();
-        for ((a, b), offset) in raw.into_iter().zip(combined).zip(offsets) {
-            assert!((b.unwrap() - 0.75 * a.unwrap() - offset).abs() < 0.02);
+        for ((a, b), cost) in raw.into_iter().zip(combined).zip(costs) {
+            assert!((b.unwrap() - NEURAL * a.unwrap() + CHARACTER * cost).abs() < 0.02);
         }
     }
 }
@@ -143,7 +146,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "",
             "を聞く",
             &["公園", "講演", "公演", "後援"],
-            &[3237143196, 3197570217, 3234764389, 3237624772],
+            &[3239396472, 3218195788, 3226034063, 3225378981],
         ),
         // A space in the context: mapped by the profile, as it was by the
         // engine before.
@@ -153,7 +156,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "",
             "で遊んだ",
             &["公園", "講演"],
-            &[3221353185, 3238744712],
+            &[3183249099, 3231923474],
         ),
         (
             "彼は",
@@ -161,7 +164,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "今日は",
             "を渡る",
             &["橋", "箸", "端"],
-            &[3228779310, 3220591524, 3237283568],
+            &[3215632064, 3222793515, 3238970909],
         ),
         (
             "",
@@ -169,7 +172,7 @@ fn tsumugi_scores_match_the_training_implementation() {
             "雑誌に",
             "",
             &["乗ります", "載ります"],
-            &[3239171268, 3155205952],
+            &[3239681798, 3158630429],
         ),
     ];
     let mut worker = Worker::spawn(Path::new(WORKER)).unwrap();

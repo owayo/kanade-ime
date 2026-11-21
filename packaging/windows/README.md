@@ -29,4 +29,4 @@ The released EXE uses WiX Burn to embed the MSI. `Bundle.wxs` selects the Japane
 
 The Windows MSI includes the locked Tsumugi F16 GGUF. The packaging script accepts `-ModelPath` or `KANADE_TSUMUGI_GGUF` for a local build. It checks the staged bytes against `locks/llm.lock.toml` before creating the embedded cabinet. The settings window imports the bundled copy with the user’s consent.
 
-Clean builds fetch the model from the GitHub Release pinned in `locks/llm.lock.toml`. Local builds can reuse a copy in `artifacts/models/`.
+Each Kanade release carries the model its installers bundle. A build without a copy finds the file among the release assets by the SHA-256 in `locks/llm.lock.toml` and keeps it in `artifacts/models/`, where later builds reuse it.

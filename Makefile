@@ -68,7 +68,7 @@ llm-worker: prepare ## CPU用のモデルワーカーをビルドする (CMake�
 	$(RUN) cargo build $(CARGO_FLAGS) -p kanade-llm --features llama --bin kanade-llm-worker --release
 
 llm-contract: worker ## 手動導入したモデルを検証する (KANADE_LLM_MODELに絶対パスを指定)
-	@test -n "$(KANADE_LLM_MODEL)" || { echo 'Set KANADE_LLM_MODEL to a manually obtained supported GGUF file.' >&2; exit 1; }
+	@test -n "$(KANADE_LLM_MODEL)" || { echo 'Set KANADE_LLM_MODEL to the supported GGUF file. python3 .github/scripts/bundled_model.py --fetch prints the path of the bundled one.' >&2; exit 1; }
 	KANADE_LLM_MODEL="$(KANADE_LLM_MODEL)" $(RUN) cargo test $(CARGO_FLAGS) -p kanade-llm --features llama --test real_model -- --ignored --nocapture --test-threads 1
 	KANADE_LLM_MODEL="$(KANADE_LLM_MODEL)" $(RUN) cargo test $(CARGO_FLAGS) -p kanade-llm --features llama,fixture-profiles --test real_model -- --ignored --nocapture --test-threads 1
 	$(RUN) cargo build $(CARGO_FLAGS) -p kanade-llm --features llama --bin kanade-llm-worker

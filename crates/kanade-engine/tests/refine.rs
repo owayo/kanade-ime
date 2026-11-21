@@ -321,12 +321,30 @@ fn settings(llm: bool) -> Config {
         ..Config::default()
     }
 }
+/// Thresholds that the scripted scores of these tests are written against. A
+/// new engine starts with those of the registered weights; fixing them here
+/// keeps every expectation when other weights are registered.
+const POLICY: kanade_llm::profile::Preview = kanade_llm::profile::Preview {
+    sentence: 5.0,
+    clause: 7.0,
+    runner_up: 0.75,
+    added: 2.0,
+    ending: 1.5,
+    rank: 0.75,
+    digits_seen: 0.0,
+    digits: 3.0,
+    shortlist: 6,
+    shortlist_cost: 32,
+    rounds: 1,
+    katakana: 8,
+};
 fn fixture(config: Config) -> Fixture {
     fixture_with_backend(config, Backend::default())
 }
 fn fixture_with_backend(config: Config, backend: Backend) -> Fixture {
     let calls = backend.calls.clone();
     let mut engine = Engine::new(backend, None);
+    engine.set_preview(POLICY);
     engine.configure(config);
     let llm = Reranker::default();
     engine.set_reranker(Some(Box::new(llm.clone())));
@@ -1285,7 +1303,7 @@ fn an_accepted_spelling_is_scored_again_for_a_second_change() {
     // A model registered with two accepted spellings per window.
     f.engine.set_preview(kanade_llm::profile::Preview {
         rounds: 2,
-        ..kanade_llm::profile::CATALOG[0].preview
+        ..POLICY
     });
     let initial = f.convert("こうえんをきく");
     let request = Request {

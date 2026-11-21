@@ -122,6 +122,12 @@ jobs:
           cache: false
       - name: Add the Rust target
         run: rustup target add ${{ matrix.target }}
+      # The model is an asset of the release that carries it, found by its
+      # SHA-256. Packaging checks the copy against locks/llm.lock.toml.
+      - name: Fetch the bundled model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/bundled_model.py --fetch
       - name: Test Windows
         if: runner.os == 'Windows'
         run: cargo test --locked --workspace --no-fail-fast
