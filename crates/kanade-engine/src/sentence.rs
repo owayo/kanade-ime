@@ -1696,7 +1696,7 @@ mod tests {
         })
         .collect();
         let job = Job {
-            context: "減点基準は".into(),
+            context: "検定は".into(),
             reading: "ヨンキュウカラショダンマデ".into(),
             prefix: String::new(),
             suffix: String::new(),
@@ -1804,7 +1804,7 @@ mod tests {
                 .collect();
             lists[0].extend(more.then(|| option("詠ん")));
             let job = Job {
-                context: "減点は".into(),
+                context: "検定は".into(),
                 reading: "ヨンキュウカラショダンマデゼンブオナジキジュンデハカル".into(),
                 prefix: String::new(),
                 suffix: String::new(),
@@ -1867,7 +1867,7 @@ mod tests {
 
         // Digits that the safeguards refuse are not worth the place: a
         // transliterated name follows, and the weights keep 四級 beside it.
-        let item = window(7, false, "、ウィルト・チェンバレン、");
+        let item = window(7, false, "、アレクサンダー・ミラー、");
         assert_eq!(places(&item), (Some(1), Some(2), None));
         assert!(item.references.is_empty());
     }
@@ -1898,7 +1898,7 @@ mod tests {
             vec![option("シーズン")],
         ];
         let job = Job {
-            context: "3年目の".into(),
+            context: "加入2年目の".into(),
             reading: "ロクナナシーズン".into(),
             prefix: String::new(),
             suffix: String::new(),
@@ -1915,13 +1915,13 @@ mod tests {
         scores[0] = Some(-60.0);
         scores[kanji] = Some(-50.0);
         scores[digits] = Some(-20.0);
-        assert_eq!(found[0].winner(&scores, "1966年の"), Some(digits));
+        assert_eq!(found[0].winner(&scores, "2015年の"), Some(digits));
         // A transliterated name follows. With that much katakana the 七 of the
         // display is kept, so the digits cannot replace ロク七. The kanji
         // numerals replace only ロク and still stand for the number; the
         // comparison of notations writes 67 afterwards.
-        found[0].after = "、ウィルト・チェンバレン、".into();
-        assert_eq!(found[0].winner(&scores, "1966年の"), Some(kanji));
+        found[0].after = "、アレクサンダー・ミラー、".into();
+        assert_eq!(found[0].winner(&scores, "2015年の"), Some(kanji));
     }
 
     #[test]
