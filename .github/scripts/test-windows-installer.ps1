@@ -107,8 +107,14 @@ try {
     try {
         $application = Join-Path $env:ProgramFiles Kanade
         if (-not (Test-Path -LiteralPath $shortcut)) { throw 'The Start menu shortcut is missing' }
-        $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
-        if ($target -ne (Join-Path $application 'kanade-ui.exe')) { throw 'The Start menu shortcut does not open the installed settings' }
+        # WScript.Shell opens no link whose name is outside the computer's ANSI
+        # code page and then reports an empty target, so it reads a copy
+        # under a plain name.
+        $link = Join-Path $env:RUNNER_TEMP ('kanade-settings-' + [Guid]::NewGuid().ToString('N') + '.lnk')
+        Copy-Item -LiteralPath $shortcut -Destination $link
+        try { $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath }
+        finally { Remove-Item -LiteralPath $link -Force }
+        if ($target -ne (Join-Path $application 'kanade-ui.exe')) { throw "The Start menu shortcut does not open the installed settings but '$target'" }
         # The shortcut starts a console program. Its manifest keeps Windows from
         # opening a console for it, and must still declare GPUI's DPI awareness.
         $settingsImage = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($target))
