@@ -1423,20 +1423,44 @@ fn a_calendar_year_is_shown_with_the_words_scored_around_it() {
 
 #[test]
 fn a_calendar_year_is_shown_without_a_score_that_is_slow() {
-    let mut config = settings(true);
-    config.calculated_dates = true;
-    let mut f = fixture(config);
-    let initial = f.convert("にせんいちねんのあめ");
-    // No score arrives. The engine waits for it at first.
-    assert!(matches!(
-        preview_poll(&mut f, &initial),
-        response::Body::Candidates(update) if update.pending
-    ));
-    // Past the 600 ms after which decided changes are displayed, the year needs no score.
-    std::thread::sleep(std::time::Duration::from_millis(650));
-    assert_eq!(previewed(&mut f, &initial).as_deref(), Some("2001年の雨"));
-    let waiting = f.llm.jobs() as u64;
-    assert!(f.llm.cancelled().contains(&waiting));
+    use std::time::{Duration, Instant};
+    // Decided changes are displayed once the conversion is older than this.
+    let apply = Duration::from_millis(600);
+    // Nothing is displayed once it is older than this.
+    let expiry = Duration::from_millis(kanade_llm::limits::RESULT_TTL_MS);
+    // The second poll has to reach the engine between the two deadlines. When
+    // the machine is too busy for the times measured here to show that it did,
+    // the conversion is repeated. The reply never decides whether an attempt counts.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "no poll arrived between the deadlines"
+        );
+        let mut config = settings(true);
+        config.calculated_dates = true;
+        let mut f = fixture(config);
+        // The engine starts timing the conversion between these two instants.
+        let before = Instant::now();
+        let initial = f.convert("にせんいちねんのあめ");
+        let after = Instant::now();
+        // No score arrives. The engine waits for it at first.
+        let first = preview_poll(&mut f, &initial);
+        if before.elapsed() > apply {
+            continue;
+        }
+        assert!(matches!(first, response::Body::Candidates(update) if update.pending));
+        // Past the first deadline the year needs no score.
+        std::thread::sleep((apply + Duration::from_millis(1)).saturating_sub(after.elapsed()));
+        let shown = previewed(&mut f, &initial);
+        if before.elapsed() > expiry {
+            continue;
+        }
+        assert_eq!(shown.as_deref(), Some("2001年の雨"));
+        let waiting = f.llm.jobs() as u64;
+        assert!(f.llm.cancelled().contains(&waiting));
+        break;
+    }
 }
 
 #[test]
