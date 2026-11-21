@@ -23,6 +23,8 @@
       <RegistrySearch Id="FindVc32NativeView" Root="HKLM" Key="Software\Microsoft\VisualStudio\14.0\VC\Runtimes\x86" Name="Installed" Type="raw" Bitness="always64" />
     </Property>
     <Launch Condition="Installed OR ((VC_X64_INSTALLED = &quot;#1&quot; OR VC_X64_COMPAT_INSTALLED = &quot;#1&quot;) AND (VC_X86_INSTALLED = &quot;#1&quot; OR VC_X86_NATIVE_INSTALLED = &quot;#1&quot;))" Message="Install the current Microsoft Visual C++ Redistributable for x64 and x86 before installing Kanade. See the included README." />
+    <!-- The file name of an extracted icon is its identifier, so it ends in .ico. -->
+    <Icon Id="Kanade.ico" SourceFile="artifacts/windows/Kanade.ico" />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLDIR" Name="Kanade">
         <Component Id="Startup" Guid="3C1F580E-90DC-4CFA-BB52-562A326C079B" Bitness="always64">
@@ -31,11 +33,21 @@
                restricted. -->
           <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Kanade" Type="string" Value="&quot;[INSTALLDIR]kanade-engine.exe&quot; --supervise" KeyPath="yes" />
         </Component>
+        <!-- Opens the settings from the Start menu. The package is per-machine, so
+             the shortcut is in the menu of every user. Windows Installer
+             validation (ICE43, ICE57) requires a key path under HKCU for a
+             shortcut that is not advertised. -->
+        <Component Id="SettingsShortcut" Guid="EA1C3594-DE96-4EA2-B081-3AF027B26D37" Bitness="always64">
+          <RegistryValue Root="HKCU" Key="Software\Kanade" Name="SettingsShortcut" Type="integer" Value="1" KeyPath="yes" />
+          <Shortcut Id="SettingsShortcut" Directory="ProgramMenuFolder" Name="Kanade の設定" Description="Kanade の設定を開きます" Target="[INSTALLDIR]kanade-ui.exe" WorkingDirectory="INSTALLDIR" Icon="Kanade.ico" />
+        </Component>
       </Directory>
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Main" Title="Kanade" Level="1">
       <ComponentGroupRef Id="Payload" />
       <ComponentRef Id="Startup" />
+      <ComponentRef Id="SettingsShortcut" />
     </Feature>
     <!-- Rollback actions are scheduled before the corresponding registration. -->
     <CustomAction Id="Rollback64" Directory="INSTALLDIR" ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLDIR]kanade_tip.dll&quot;" Execute="rollback" Impersonate="no" Return="ignore" />

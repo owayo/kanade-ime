@@ -23,6 +23,7 @@ try {
     Copy-Item "$env:WINDIR/SysWOW64/cmd.exe" "$payload/x86/kanade_tip.dll"
     foreach ($name in @('manifest.json', 'project-analyzer.json')) { Set-Content "$payload/$name" '{}' }
     Run-Native { python "$source/.github/scripts/windows-payload.py" }
+    & packaging/windows/build-icon.ps1 -Source "$source/assets/icons/app.png" -Destination artifacts/windows/Kanade.ico
     Run-Native { dotnet tool install wix --version 4.0.6 --tool-path artifacts/wix }
     $env:DOTNET_ROLL_FORWARD = 'Major'
     Run-Native { ./artifacts/wix/wix.exe extension add --global WixToolset.Bal.wixext/4.0.6 }
@@ -32,6 +33,25 @@ try {
     foreach ($name in @('Kanade.msi', 'KanadeSetup.exe')) {
         if ((Get-Item "artifacts/windows/$name").Length -eq 0) { throw 'Empty installer fixture' }
     }
+    # The package must carry the Start menu shortcut to the settings application.
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $database = $installer.OpenDatabase((Resolve-Path artifacts/windows/Kanade.msi).Path, 0)
+    $view = $database.OpenView('SELECT `Directory_`, `Name`, `Target`, `Icon_` FROM `Shortcut`')
+    $view.Execute()
+    $row = $view.Fetch()
+    if (-not $row) { throw 'The package has no Start menu shortcut' }
+    $shortcut = @(1..4 | ForEach-Object { $row.StringData($_) })
+    if ($view.Fetch()) { throw 'The package has more than one shortcut' }
+    $view.Close()
+    if ($shortcut[0] -ne 'ProgramMenuFolder' -or $shortcut[1] -notlike '*|Kanade の設定' -or
+        $shortcut[2] -ne '[INSTALLDIR]kanade-ui.exe' -or $shortcut[3] -ne 'Kanade.ico') {
+        throw "Unexpected Start menu shortcut: $($shortcut -join ', ')"
+    }
+    foreach ($object in $row, $view, $database, $installer) {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($object)
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
 } finally {
     $env:DOTNET_ROLL_FORWARD = $previousRollForward
     Pop-Location

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Settings that merge-manifest.ps1 adds to the manifest GPUI embeds in
+  kanade-ui.exe. The program is a console program because of its command
+  line, and Windows opens a console, shown as a terminal window, when the
+  Start menu or Explorer starts one. With this policy Windows 11 24H2 and
+  later open none; a shell that starts the program still shares its own.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>
+    </windowsSettings>
+  </application>
+</assembly>

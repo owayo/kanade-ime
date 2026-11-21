@@ -24,7 +24,10 @@ use windows_core::IUnknownImpl;
 mod attributes;
 mod candidates;
 mod input_mode;
+mod language_bar;
 mod mode_hint;
+mod mode_icon;
+mod programs;
 mod registration;
 mod uiless;
 use candidates::CandidateWindow;
@@ -118,16 +121,8 @@ impl Shared {
             if c.as_mut().is_some_and(|c| !c.needs_transport()) {
                 return;
             }
-            let pipe = module_path().ok().and_then(|p| {
-                let folder = p.parent()?;
-                // The 32-bit TIP ships in x86/ under the engine's directory.
-                let root = if folder.file_name().is_some_and(|name| name == "x86") {
-                    folder.parent()?
-                } else {
-                    folder
-                };
-                Pipe::connect(&root.join("kanade-engine.exe")).ok()
-            });
+            let pipe = programs::installed("kanade-engine.exe")
+                .and_then(|engine| Pipe::connect(&engine).ok());
             match (c.as_mut(), pipe) {
                 (Some(client), Some(pipe)) => {
                     let _ = client.reattach(pipe);
@@ -393,6 +388,7 @@ struct Tip {
     shared: Rc<Shared>,
     sink_cookie: Cell<Option<u32>>,
     mode: RefCell<Option<input_mode::Mode>>,
+    button: RefCell<Option<language_bar::Item>>,
     japanese: Cell<bool>,
     show_mode_hint: Cell<bool>,
     _guard: ModuleGuard,
@@ -403,9 +399,31 @@ impl Tip {
             shared: Shared::new(),
             sink_cookie: Cell::new(None),
             mode: RefCell::new(None),
+            button: RefCell::new(None),
             japanese: Cell::new(false),
             show_mode_hint: Cell::new(true),
             _guard: ModuleGuard::new(),
+        }
+    }
+    /// The taskbar button, when this thread has one. The indicator calls
+    /// back into the button, so the caller holds no borrow of the slot.
+    fn taskbar_button(&self) -> Option<windows_core::ComObject<language_bar::ModeButton>> {
+        self.button
+            .try_borrow()
+            .ok()
+            .and_then(|button| button.as_ref().map(language_bar::Item::button))
+    }
+    /// Lets the taskbar button show the current mode and taskbar colours.
+    fn sync_button(&self) {
+        if let Some(button) = self.taskbar_button() {
+            button.sync();
+        }
+    }
+    /// Lets the button notice a taskbar theme that changed while this thread
+    /// kept the focus. Called for every key, so the button paces itself.
+    fn refresh_button(&self) {
+        if let Some(button) = self.taskbar_button() {
+            button.refresh();
         }
     }
 }
@@ -414,6 +432,12 @@ impl ITfTextInputProcessor_Impl for Tip_Impl {
         self.ActivateEx(manager, tid, 0)
     }
     fn Deactivate(&self) -> Result<()> {
+        let button = self
+            .button
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut button| button.take());
+        drop(button);
         let mode = self.mode.borrow_mut().take();
         drop(mode);
         self.shared.reset();
@@ -458,6 +482,15 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
             *slot = Some(manager.clone());
         }
         let mode = input_mode::Mode::attach(manager, tid, &self.to_interface())?;
+        // Input works without the taskbar button, so a host that refuses the
+        // button still activates the text service.
+        let button = language_bar::Item::add(
+            manager,
+            tid,
+            mode.switch(),
+            language_bar::Settings::of_host(flags & TF_TMAE_SECUREMODE != 0),
+        )
+        .ok();
         let keys = manager.cast::<ITfKeystrokeMgr>()?;
         let sink: ITfKeyEventSink = self.to_interface();
         unsafe {
@@ -472,6 +505,9 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
         self.sink_cookie.set(Some(cookie));
         self.japanese.set(mode.japanese());
         *self.mode.borrow_mut() = Some(mode);
+        if let Ok(mut slot) = self.button.try_borrow_mut() {
+            *slot = button;
+        }
         if self.japanese.get() {
             self.shared.connect();
         }
@@ -486,17 +522,22 @@ impl ITfCompartmentEventSink_Impl for Tip_Impl {
                 self.shared.reset();
             }
         }
+        self.sync_button();
         Ok(())
     }
 }
 impl ITfKeyEventSink_Impl for Tip_Impl {
     fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
-        if !foreground.as_bool() {
+        if foreground.as_bool() {
+            // The taskbar theme can change while another thread has the focus.
+            self.sync_button();
+        } else {
             self.shared.reset();
         }
         Ok(())
     }
     fn OnTestKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        self.refresh_button();
         if input_mode::physical(w.0).is_some() {
             return Ok(true.into());
         }
@@ -539,6 +580,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             .into())
     }
     fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        self.refresh_button();
         if let Some(command) = input_mode::physical(w.0) {
             if l.0 & (1 << 30) == 0 {
                 self.set_input_mode(command, context.as_ref())?;

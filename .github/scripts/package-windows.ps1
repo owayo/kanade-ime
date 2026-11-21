@@ -21,6 +21,8 @@ Run-Native { cargo xtask build-worker }
 Run-Native { cargo xtask stage-windows }
 $payload = (Resolve-Path artifacts/windows/payload).Path
 Copy-Item packaging/windows/WIX-LICENSE.txt (Join-Path $payload WIX-LICENSE.txt)
+# Before signing: the Start menu must open the settings without a console window.
+& packaging/windows/merge-manifest.ps1 -Program (Join-Path $payload kanade-ui.exe) -Manifest packaging/windows/kanade-ui.manifest
 
 function Sign-File([string]$Path) {
     if ($Unsigned) { return }
@@ -37,6 +39,7 @@ foreach ($script in 'start-engine.ps1', 'setup-user.ps1', 'enable-profile.ps1', 
     Copy-Item (Join-Path packaging/windows $script) $payload
 }
 Run-Native { python .github/scripts/windows-payload.py }
+& packaging/windows/build-icon.ps1 -Source assets/icons/app.png -Destination artifacts/windows/Kanade.ico
 Run-Native { dotnet tool install wix --version 4.0.6 --tool-path artifacts/wix }
 Run-Wix { ./artifacts/wix/wix.exe extension add --global WixToolset.Bal.wixext/4.0.6 }
 $version = (Get-Content artifacts/windows/version.txt -Raw).Trim()

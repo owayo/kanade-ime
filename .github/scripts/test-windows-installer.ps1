@@ -16,6 +16,8 @@ function Test-Registered {
     return $false
 }
 if (Test-Registered) { throw 'Runner already has Kanade installed' }
+# The settings application is reachable from the Start menu of every user.
+$shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Kanade の設定.lnk'
 function Invoke-Installer([string]$File, [string[]]$Arguments, [int[]]$Expected) {
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $File
@@ -64,6 +66,7 @@ try {
     Invoke-Msi @('/i', $msi, '/qn', '/norestart', 'KANADE_TEST_ROLLBACK=1', '/l*v', 'artifacts/windows/rollback.log') @(1603)
     if (-not (Select-String -Path artifacts/windows/rollback.log -SimpleMatch 'CustomAction TestRollback returned actual error code 1' -Quiet)) { throw 'The requested failure action did not execute' }
     if (Test-Registered) { throw 'Rollback left a COM registration' }
+    if (Test-Path -LiteralPath $shortcut) { throw 'Rollback left the Start menu shortcut' }
     Write-Output 'MSI failure rollback removed both COM registrations'
     $legacyMsi = New-LegacyMsi
     Invoke-Msi @('/i', $legacyMsi, '/qn', '/norestart', '/l*v', 'artifacts/windows/legacy.log') @(0, 3010)
@@ -103,6 +106,20 @@ try {
     $engine = $null
     try {
         $application = Join-Path $env:ProgramFiles Kanade
+        if (-not (Test-Path -LiteralPath $shortcut)) { throw 'The Start menu shortcut is missing' }
+        # WScript.Shell opens no link whose name is outside the computer's ANSI
+        # code page and then reports an empty target, so it reads a copy
+        # under a plain name.
+        $link = Join-Path $env:RUNNER_TEMP ('kanade-settings-' + [Guid]::NewGuid().ToString('N') + '.lnk')
+        Copy-Item -LiteralPath $shortcut -Destination $link
+        try { $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath }
+        finally { Remove-Item -LiteralPath $link -Force }
+        if ($target -ne (Join-Path $application 'kanade-ui.exe')) { throw "The Start menu shortcut does not open the installed settings but '$target'" }
+        # The shortcut starts a console program. Its manifest keeps Windows from
+        # opening a console for it, and must still declare GPUI's DPI awareness.
+        $settingsImage = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($target))
+        if ($settingsImage -notmatch 'consoleAllocationPolicy[^<>]*>detached<') { throw 'The installed settings would open a console window from the Start menu' }
+        if ($settingsImage -notmatch 'dpiAwareness[^<>]*>PerMonitorV2<') { throw 'The installed settings lost their DPI awareness' }
         $startup = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade
         $supervisor = '"{0}" --supervise' -f (Join-Path $application 'kanade-engine.exe')
         if (-not $startup.Equals($supervisor, [StringComparison]::OrdinalIgnoreCase)) {
@@ -153,4 +170,5 @@ if ($failure) { throw $failure }
 if ($cleanupFailure) { throw $cleanupFailure }
 if (Test-Registered) { throw 'Uninstall left a COM registration' }
 if (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade -ErrorAction SilentlyContinue) { throw 'Uninstall left a startup entry' }
-Write-Output 'EXE uninstallation removed both COM registrations and startup entry'
+if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall left the Start menu shortcut' }
+Write-Output 'EXE uninstallation removed both COM registrations, startup entry and Start menu shortcut'

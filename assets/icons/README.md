@@ -7,3 +7,5 @@
 macOS packaging crops the master to a 1,060-pixel square at offset (97, 112), removing its outer transparent padding while preserving the selected artwork. Every input-source representation is resampled directly from this crop. `KanadeInputMenu.tiff` contains 16-pixel and 32-pixel representations at 72 and 144 DPI, both representing 16 points. The visible mark fills that footprint, matching the bundled macOS Japanese IME icons. `KanadeInputMenu.icns` uses the same crop. The parent source and Japanese mode both declare template rendering so the system can choose the foreground color for its background. Application and settings artwork retain their existing scale.
 
 The earlier `tray-*.png` koto artwork is retained as source history; current macOS input-source packaging uses the selected Mincho mark.
+
+Windows packaging resamples `app.png` into the icon of the Start menu shortcut with `packaging/windows/build-icon.ps1`: bitmaps of 16 to 64 pixels and a 256-pixel PNG. The あ and A of the Windows taskbar are not artwork. The text service draws them when the taskbar asks, in the colour of the taskbar text.
