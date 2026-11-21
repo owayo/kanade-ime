@@ -9,6 +9,7 @@ mod numerals;
 pub(super) mod probe;
 mod search;
 mod spelling_data;
+mod spoken;
 
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits, profile::Preview};
@@ -42,6 +43,26 @@ pub(crate) const TEST_POLICY: Preview = Preview {
 /// A segment whose displayed spelling a candidate replaces.
 type Change = (usize, String);
 
+/// The segments that one window scores, and their dictionary candidates.
+#[derive(Clone)]
+struct Lattice {
+    parts: Vec<Segment>,
+    lists: Vec<Vec<FocusCandidate>>,
+    /// Numbers read across these segments, found in the whole clause.
+    numbers: Vec<spoken::Number>,
+}
+
+/// A number read across segments, and the candidates that write it with
+/// kanji numerals and with ASCII digits.
+struct Spoken {
+    number: spoken::Number,
+    kanji: Option<usize>,
+    digits: Option<usize>,
+    /// The displayed text with the numerals of the number's segments in
+    /// digits, when it shows any: 4級から for 四級から.
+    shown_digits: Option<String>,
+}
+
 struct Proposal {
     job: Job,
     before: String,
@@ -54,8 +75,16 @@ struct Proposal {
     /// For each candidate, the segments it respells. `None` when it moves a
     /// segment boundary or was not built from the window's segments.
     changes: Vec<Option<Vec<Change>>>,
+    /// Numbers read across segments, each offered in two notations.
+    numbers: Vec<Spoken>,
+    /// Candidates that are scored only to compare a number's digits with:
+    /// the display with its own numerals in digits. They are never chosen.
+    references: Vec<usize>,
+    /// Kanji numerals of such numbers accepted in an earlier look at this
+    /// window. Whether to write them with digits is still to be compared.
+    undecided: Vec<String>,
     /// The scored segments and their dictionary candidates.
-    lattice: Option<(Vec<Segment>, Vec<Vec<FocusCandidate>>)>,
+    lattice: Option<Lattice>,
     /// How many spellings of this window have been accepted before.
     round: u8,
     /// Thresholds of the model that scores the candidates.
@@ -70,41 +99,113 @@ impl Proposal {
         )
     }
 
+    // The number that a candidate writes, and how it writes it.
+    fn spoken(&self, index: usize) -> Option<(&spoken::Number, &str)> {
+        self.numbers.iter().find_map(|spoken| {
+            let [kanji, digits] = spoken.number.spellings();
+            if spoken.kanji == Some(index) {
+                Some((&spoken.number, kanji.as_str()))
+            } else if spoken.digits == Some(index) {
+                Some((&spoken.number, digits.as_str()))
+            } else {
+                None
+            }
+        })
+    }
+
+    // The lead that digits need over kanji numerals. Committed text that shows
+    // ASCII digits has settled the style.
+    fn digit_lead(&self, committed: &str) -> f32 {
+        if committed.bytes().any(|b| b.is_ascii_digit()) {
+            self.policy.digits_seen
+        } else {
+            self.policy.digits
+        }
+    }
+
+    // The kanji numerals of numbers read from the kana whose notation is
+    // open once candidate `winner` is accepted.
+    fn open_notation(&self, winner: usize) -> Vec<String> {
+        let mut spoken = self.undecided.clone();
+        if let Some((number, spelling)) = self.spoken(winner)
+            && *spelling == number.spellings()[0]
+        {
+            spoken.push(spelling.to_owned());
+        }
+        spoken
+    }
+
     // A text with one confirmed correction often needs another. Look once
     // more around the accepted spelling, with the same context and reading.
     fn next_round(&self, winner: usize) -> Option<Proposal> {
         if self.numerals || self.round >= self.policy.rounds || winner == 0 {
             return None;
         }
-        let (parts, lists) = self.lattice.as_ref()?;
-        let mut parts = parts.clone();
-        let mut lists = lists.clone();
-        for (pos, value) in self.changes.get(winner)?.as_ref()? {
-            parts[*pos].value.clone_from(value);
-            let list = &mut lists[*pos];
-            let chosen = match list.iter().position(|c| c.value == *value) {
-                Some(index) => list.remove(index),
-                None => FocusCandidate {
-                    reading: String::new(),
-                    annotation: String::new(),
-                    value: value.clone(),
-                    transliteration: false,
-                    history_deletable: false,
-                },
-            };
-            list.insert(0, chosen);
+        let mut lattice = self.lattice.clone()?;
+        if let Some((number, spelling)) = self.spoken(winner) {
+            // The accepted number is one segment from here on. Another reading
+            // of its segments is settled with it; later numbers move along.
+            let range = number.range.clone();
+            let (parts, lists) = number.cut(spelling);
+            let cut = parts.len();
+            lattice.parts.splice(range.clone(), parts);
+            lattice.lists.splice(range.clone(), lists);
+            lattice
+                .numbers
+                .retain(|other| other.range.end <= range.start || range.end <= other.range.start);
+            for other in &mut lattice.numbers {
+                if other.range.start >= range.end {
+                    let moved = |at: usize| at - range.len() + cut;
+                    other.range = moved(other.range.start)..moved(other.range.end);
+                }
+            }
+        } else {
+            let changes = self.changes.get(winner)?.as_ref()?;
+            // A number is read from the spellings that were displayed.
+            lattice
+                .numbers
+                .retain(|number| !changes.iter().any(|(pos, _)| number.range.contains(pos)));
+            for (pos, value) in changes {
+                lattice.parts[*pos].value.clone_from(value);
+                let list = &mut lattice.lists[*pos];
+                let chosen = match list.iter().position(|c| c.value == *value) {
+                    Some(index) => list.remove(index),
+                    None => FocusCandidate {
+                        reading: String::new(),
+                        annotation: String::new(),
+                        value: value.clone(),
+                        transliteration: false,
+                        history_deletable: false,
+                    },
+                };
+                list.insert(0, chosen);
+            }
         }
         let job = Job {
             candidates: Vec::new(),
             ..self.job.clone()
         };
-        let mut item = contextual_proposal(&parts, &lists, job, &self.policy);
-        search::paired(&mut item, &parts, &lists);
+        let Lattice {
+            parts,
+            lists,
+            numbers,
+        } = &lattice;
+        let mut item = contextual_proposal(
+            parts,
+            lists,
+            job,
+            &self.policy,
+            numbers,
+            &self.before,
+            &self.after,
+        );
+        search::paired(&mut item, parts, lists);
         item.before.clone_from(&self.before);
         item.after.clone_from(&self.after);
         item.margin = self.margin;
         item.round = self.round + 1;
-        item.lattice = Some((parts, lists));
+        item.undecided = self.open_notation(winner);
+        item.lattice = Some(lattice);
         item.job.valid_for(true).then_some(item)
     }
 
@@ -116,7 +217,7 @@ impl Proposal {
         }
         let text = &self.job.candidates[winner];
         let mut candidates = vec![text.clone()];
-        for variant in numerals::variants(text, &self.after) {
+        for variant in numerals::variants(text, &self.after, &self.open_notation(winner)) {
             if variant.chars().count() <= limits::CANDIDATE_CHARS && !candidates.contains(&variant)
             {
                 candidates.push(variant);
@@ -127,29 +228,42 @@ impl Proposal {
             candidates,
             ..self.job.clone()
         };
-        let seen = committed.bytes().any(|b| b.is_ascii_digit());
         (count > 1 && job.valid_for(true)).then(|| Proposal {
             job,
             before: self.before.clone(),
             after: self.after.clone(),
             penalties: vec![0.0; count],
-            margin: if seen {
-                self.policy.digits_seen
-            } else {
-                self.policy.digits
-            },
+            margin: self.digit_lead(committed),
             original_count: count,
             numerals: true,
             changes: vec![None; count],
+            numbers: Vec::new(),
+            references: Vec::new(),
+            undecided: Vec::new(),
             lattice: None,
             round: self.round,
             policy: self.policy,
         })
     }
 
+    // Whether candidate `index` may replace the display under the safeguards
+    // for names. A number heeds only the amount of katakana around it.
+    fn admitted(&self, index: usize) -> bool {
+        if self.job.context.is_empty() {
+            return true;
+        }
+        let (shown, chosen) = (self.render(0), self.render(index));
+        if self.spoken(index).is_some() {
+            number_is_trusted(&shown, &chosen, self.policy.katakana)
+        } else {
+            preserves_name_spelling(&shown, &chosen, self.policy.katakana)
+        }
+    }
+
     // Only change the provisional spelling with a clear advantage over
     // both Mozc's default and the other spellings under consideration.
-    fn winner(&self, scores: &[Option<f32>]) -> Option<usize> {
+    // `committed` is the text before the conversion.
+    fn winner(&self, scores: &[Option<f32>], committed: &str) -> Option<usize> {
         let job = &self.job;
         if scores.len() != job.candidates.len()
             || scores[..self.original_count].iter().any(Option::is_none)
@@ -164,11 +278,47 @@ impl Proposal {
             let lead = values[best] - values[0];
             return Some(if lead >= self.margin { best } else { 0 });
         }
-        let scores: Vec<_> = scores
+        let raw = scores;
+        let mut scores: Vec<_> = raw
             .iter()
             .zip(&self.penalties)
             .map(|(s, p)| s.map_or(f32::NEG_INFINITY, |v| v - p))
             .collect();
+        // The two notations of a number are one alternative, not rivals. Its
+        // digits stand for it only with their lead over the kanji numerals.
+        let lead = self.digit_lead(committed);
+        for spoken in &self.numbers {
+            let Some(digits) = spoken.digits else {
+                continue;
+            };
+            // Digits are compared with digits. Where the display shows a
+            // numeral, the model favors any spelling with digits over it, so
+            // 49 has to lead 4級 rather than 四級. Without that spelling of
+            // the display, the kanji numerals are compared instead.
+            let fair = spoken.shown_digits.as_ref().is_none_or(|shown| {
+                job.candidates
+                    .iter()
+                    .position(|c| c == shown)
+                    .and_then(|index| raw[index].zip(raw[digits]))
+                    .is_some_and(|(shown, number)| number - shown >= self.margin)
+            });
+            // The notation that stands for the number has to be one that may
+            // be displayed. Otherwise its kanji numerals would be dropped for
+            // digits that the safeguards then refuse.
+            let stands = fair
+                && self.admitted(digits)
+                && spoken
+                    .kanji
+                    .is_none_or(|kanji| scores[digits] - scores[kanji] >= lead);
+            match spoken.kanji {
+                Some(kanji) if stands => scores[kanji] = f32::NEG_INFINITY,
+                _ if stands => {}
+                _ => scores[digits] = f32::NEG_INFINITY,
+            }
+        }
+        for &reference in &self.references {
+            scores[reference] = f32::NEG_INFINITY;
+        }
         let mut order: Vec<_> = (0..scores.len()).collect();
         order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]));
         let originals: Vec<_> = order
@@ -194,11 +344,18 @@ impl Proposal {
         if best >= self.original_count && scores[best] - scores[order[1]] >= expanded_margin {
             winner = best;
         }
-        if winner != 0
-            && !job.context.is_empty()
-            && !preserves_name_spelling(&self.render(0), &self.render(winner), self.policy.katakana)
-        {
+        if winner != 0 && !self.admitted(winner) {
             winner = 0;
+        }
+        // While the words of the window are looked at again, the number is
+        // written with kanji numerals. Its notation is compared once they are
+        // settled, like that of every other number. So it is where the kanji
+        // numerals were not scored beside the digits.
+        if let Some(spoken) = self.numbers.iter().find(|s| s.digits == Some(winner))
+            && let Some(kanji) = spoken.kanji
+            && (self.round < self.policy.rounds || raw[kanji].is_none())
+        {
+            winner = kanji;
         }
         Some(winner)
     }
@@ -410,6 +567,9 @@ impl<'a> Ending<'a> {
             penalties: vec![0.; job.candidates.len()],
             original_count: job.candidates.len(),
             changes: vec![None; job.candidates.len()],
+            numbers: Vec::new(),
+            references: Vec::new(),
+            undecided: Vec::new(),
             job,
             margin: policy.ending,
             numerals: false,
@@ -428,9 +588,31 @@ impl<'a> Ending<'a> {
 fn preserves_name_spelling(original: &str, candidate: &str, katakana_limit: u8) -> bool {
     let original: Vec<char> = original.chars().collect();
     let candidate: Vec<char> = candidate.chars().collect();
+    let (old, new) = differing(&original, &candidate);
+    let old_kanji = kanji_count(old);
+    let old_katakana = katakana_count(old);
+    !(old.contains(&'・')
+        || new.contains(&'・')
+        || (old_kanji >= 2 && kanji_count(new) < old_kanji)
+        || (old_katakana >= 3 && katakana_count(new) < old_katakana)
+        || beside_katakana(&original, old, katakana_limit))
+}
+
+// A number read across segments replaces words that were never a name, so
+// fewer kanji or katakana are no sign of one. Only the amount of katakana
+// beside which the weights keep kanji applies.
+fn number_is_trusted(original: &str, candidate: &str, katakana_limit: u8) -> bool {
+    let original: Vec<char> = original.chars().collect();
+    let candidate: Vec<char> = candidate.chars().collect();
+    let (old, _) = differing(&original, &candidate);
+    !beside_katakana(&original, old, katakana_limit)
+}
+
+// The characters of two texts between their common beginning and end.
+fn differing<'a>(original: &'a [char], candidate: &'a [char]) -> (&'a [char], &'a [char]) {
     let prefix = original
         .iter()
-        .zip(&candidate)
+        .zip(candidate)
         .take_while(|(a, b)| a == b)
         .count();
     let left = &original[prefix..];
@@ -441,30 +623,35 @@ fn preserves_name_spelling(original: &str, candidate: &str, katakana_limit: u8) 
         .zip(right.iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
-    let old = &left[..left.len() - suffix];
-    let new = &right[..right.len() - suffix];
-    let kanji = |text: &[char]| text.iter().filter(|&&c| ('一'..='鿿').contains(&c)).count();
-    let katakana = |text: &[char]| {
-        text.iter()
-            .filter(|&&c| matches!(c, 'ァ'..='ヺ' | 'ー'))
-            .count()
-    };
-    let old_kanji = kanji(old);
-    let old_katakana = katakana(old);
-    !(old.contains(&'・')
-        || new.contains(&'・')
-        || (old_kanji >= 2 && kanji(new) < old_kanji)
-        || (old_katakana >= 3 && katakana(new) < old_katakana)
-        || (old_kanji > 0
-            && katakana_limit > 0
-            && katakana(&original) >= usize::from(katakana_limit)))
+    (&left[..left.len() - suffix], &right[..right.len() - suffix])
 }
 
+fn kanji_count(text: &[char]) -> usize {
+    text.iter().filter(|&&c| ('一'..='鿿').contains(&c)).count()
+}
+
+fn katakana_count(text: &[char]) -> usize {
+    text.iter()
+        .filter(|&&c| matches!(c, 'ァ'..='ヺ' | 'ー'))
+        .count()
+}
+
+// Whether `old`, a part of `original`, has kanji that the weights keep
+// because the text holds `limit` or more katakana characters.
+fn beside_katakana(original: &[char], old: &[char], limit: u8) -> bool {
+    kanji_count(old) > 0 && limit > 0 && katakana_count(original) >= usize::from(limit)
+}
+
+// `spoken` are the numbers read across `parts`, as found in their whole
+// clause. `before` and `after` are the texts displayed around `parts`.
 fn contextual_proposal(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
     mut job: Job,
     policy: &Preview,
+    spoken: &[spoken::Number],
+    before: &str,
+    after: &str,
 ) -> Proposal {
     job.candidates
         .push(parts.iter().map(|s| s.value.as_str()).collect());
@@ -488,7 +675,54 @@ fn contextual_proposal(
             }
         }
     }
+    // A number that the converter read as separate words takes the next
+    // slots, with kanji numerals and with digits, so that both are scored.
+    let mut numbers = Vec::new();
+    // The two spellings of each of them, and whether the kanji numerals took
+    // a slot of their own. Their places are known once every slot is taken.
+    let mut twins: Vec<([Option<String>; 2], bool)> = Vec::new();
+    for number in spoken.iter().take(2) {
+        let mut texts = [None, None];
+        let mut own = false;
+        for (slot, spelling) in number.spellings().iter().enumerate() {
+            let value: String = parts[..number.range.start]
+                .iter()
+                .map(|s| s.value.clone())
+                .chain([number.written(spelling)])
+                .chain(parts[number.range.end..].iter().map(|s| s.value.clone()))
+                .collect();
+            let offered = match job.candidates.iter().position(|c| *c == value) {
+                Some(index) => index > 0,
+                None => {
+                    let added = value.chars().count() <= limits::CANDIDATE_CHARS
+                        && number_is_trusted(&job.candidates[0], &value, policy.katakana);
+                    if added {
+                        job.candidates.push(value.clone());
+                        penalties.push(policy.rank);
+                        changes.push(None);
+                        own |= slot == 0;
+                    }
+                    added
+                }
+            };
+            texts[slot] = offered.then_some(value);
+        }
+        if texts.iter().any(Option::is_some) {
+            let width =
+                |segments: &[Segment]| -> usize { segments.iter().map(|s| s.value.len()).sum() };
+            let from = width(&parts[..number.range.start]);
+            let to = from + width(&parts[number.range.clone()]);
+            numbers.push(Spoken {
+                number: number.clone(),
+                kanji: None,
+                digits: None,
+                shown_digits: numerals::digits_within(&job.candidates[0], after, from..to),
+            });
+            twins.push((texts, own));
+        }
+    }
     // Take the next distinct alternative at each position before exploring lower ranks.
+    let mut later = 0;
     for rank in 1..=3 {
         for (pos, list) in lists.iter().enumerate() {
             if let Some(c) = list.get(rank)
@@ -511,6 +745,7 @@ fn contextual_proposal(
                     job.candidates.push(value);
                     penalties.push(rank as f32 * policy.rank);
                     changes.push(Some(vec![(pos, c.value.clone())]));
+                    later += usize::from(rank > 1);
                     if job.candidates.len() == limits::CANDIDATES {
                         break;
                     }
@@ -521,7 +756,72 @@ fn contextual_proposal(
             break;
         }
     }
-    let original_count = job.candidates.len();
+    // What the digits of a number are compared with has to be scored: the
+    // display with its own numerals in digits. Unless it is a candidate
+    // already, it takes one of the nine places that are always scored: a
+    // free one, or that of a second or third alternative, which moves back.
+    // The first alternative of every segment keeps its place. Where no other
+    // place is left, the number's kanji numerals give theirs. The number is
+    // then compared in digits, and its notation afterwards. Digits that the
+    // safeguards refuse are not worth the place.
+    let whole = |text: &str| format!("{before}{}{text}{after}", job.prefix);
+    let mut room = limits::CANDIDATES - job.candidates.len() + later;
+    let mut shown: Vec<String> = Vec::new();
+    let mut behind: Vec<String> = Vec::new();
+    for (spoken, (texts, own)) in numbers.iter().zip(&twins) {
+        let (Some(digits), Some(text)) = (&texts[1], &spoken.shown_digits) else {
+            continue;
+        };
+        if text.chars().count() > limits::CANDIDATE_CHARS
+            || job.candidates.contains(text)
+            || shown.contains(text)
+        {
+            continue;
+        }
+        if room > 0 {
+            room -= 1;
+        } else if *own
+            && (job.context.is_empty()
+                || number_is_trusted(&whole(&job.candidates[0]), &whole(digits), policy.katakana))
+        {
+            behind.extend(texts[0].clone());
+        } else {
+            continue;
+        }
+        shown.push(text.clone());
+    }
+    let mut moved = Vec::new();
+    for text in &behind {
+        if let Some(at) = job.candidates.iter().position(|c| c == text) {
+            moved.push((
+                job.candidates.remove(at),
+                penalties.remove(at),
+                changes.remove(at),
+            ));
+        }
+    }
+    let at = job
+        .candidates
+        .len()
+        .min(limits::CANDIDATES.saturating_sub(shown.len()));
+    for (offset, text) in shown.iter().enumerate() {
+        job.candidates.insert(at + offset, text.clone());
+        penalties.insert(at + offset, 0.0);
+        changes.insert(at + offset, None);
+    }
+    let at = job.candidates.len().min(limits::CANDIDATES);
+    for (offset, (text, penalty, change)) in moved.into_iter().enumerate() {
+        job.candidates.insert(at + offset, text);
+        penalties.insert(at + offset, penalty);
+        changes.insert(at + offset, change);
+    }
+    let place = |text: &String| job.candidates.iter().position(|c| c == text);
+    let references: Vec<_> = shown.iter().filter_map(place).collect();
+    for (spoken, (texts, _)) in numbers.iter_mut().zip(&twins) {
+        spoken.kanji = texts[0].as_ref().and_then(place);
+        spoken.digits = texts[1].as_ref().and_then(place);
+    }
+    let original_count = job.candidates.len().min(limits::CANDIDATES);
     let mut p = Proposal {
         job,
         before: String::new(),
@@ -531,6 +831,9 @@ fn contextual_proposal(
         original_count,
         numerals: false,
         changes,
+        numbers,
+        references,
+        undecided: Vec::new(),
         lattice: None,
         round: 1,
         policy: *policy,
@@ -552,6 +855,9 @@ fn scored_windows(
 ) -> Vec<Proposal> {
     let mut found = Vec::new();
     let mut explore = Some(explore);
+    // Numbers that the converter read as separate words. The whole clause is
+    // read for them, and each is scored whole.
+    let numbers = spoken::numbers(parts, lists);
     // Without preceding text, the first segment has nothing to its left.
     let first = usize::from(job.context.is_empty());
     let mut end = parts.len();
@@ -571,6 +877,14 @@ fn scored_windows(
             end -= 1;
             continue;
         }
+        // A window does not begin inside a number: the next window takes it.
+        let cut = |number: &&spoken::Number| {
+            let range = &number.range;
+            range.start < start && start < range.end && range.end < end
+        };
+        if let Some(number) = numbers.iter().find(cut) {
+            start = number.range.end;
+        }
         let window = &parts[start..end];
         let choices = &lists[start..end];
         let before: String = parts[..start].iter().map(|s| s.value.as_str()).collect();
@@ -587,15 +901,29 @@ fn scored_windows(
             };
             job.context = context;
         }
-        let mut item = contextual_proposal(window, choices, job, policy);
+        let inside: Vec<_> = numbers
+            .iter()
+            .filter(|number| start <= number.range.start && number.range.end <= end)
+            .map(|number| {
+                let mut number = number.clone();
+                number.range = number.range.start - start..number.range.end - start;
+                number
+            })
+            .collect();
+        let after: String = parts[end..].iter().map(|s| s.value.as_str()).collect();
+        let mut item = contextual_proposal(window, choices, job, policy, &inside, &before, &after);
         let splits = explore
             .take()
             .map_or_else(Vec::new, |probe| probe(window, &mut item));
         search::paired(&mut item, window, choices);
         search::extend_splits(&mut item, window, choices, &splits);
         item.before = before;
-        item.after = parts[end..].iter().map(|s| s.value.as_str()).collect();
-        item.lattice = Some((window.to_vec(), choices.to_vec()));
+        item.after = after;
+        item.lattice = Some(Lattice {
+            parts: window.to_vec(),
+            lists: choices.to_vec(),
+            numbers: inside,
+        });
         if item.job.valid_for(true) {
             found.push(item);
         }
@@ -888,7 +1216,7 @@ impl<C: ConversionEngine> Engine<C> {
                 }
                 Poll::Gone => break,
                 Poll::Ready(scores) => {
-                    let Some(winner) = proposal.winner(&scores) else {
+                    let Some(winner) = proposal.winner(&scores, &pending.context) else {
                         continue;
                     };
                     pending.evaluated = true;
@@ -1056,25 +1384,20 @@ mod tests {
             original_count: 3,
             numerals: false,
             changes: vec![None; 3],
+            numbers: Vec::new(),
+            references: Vec::new(),
+            undecided: Vec::new(),
             lattice: None,
             round: 1,
             policy: super::TEST_POLICY,
         };
+        let winner = |scores: &[Option<f32>]| proposal.winner(scores, "委員の");
         // A lead of five over the display and 3.75 over the runner-up, after penalties.
-        assert_eq!(
-            proposal.winner(&[Some(-20.0), Some(-14.0), Some(-30.0)]),
-            Some(1)
-        );
-        assert_eq!(
-            proposal.winner(&[Some(-20.0), Some(-14.5), Some(-30.0)]),
-            Some(0)
-        );
-        assert_eq!(
-            proposal.winner(&[Some(-20.0), Some(-14.0), Some(-16.0)]),
-            Some(0)
-        );
-        assert_eq!(proposal.winner(&[Some(-20.0), None, Some(-30.0)]), None);
-        assert_eq!(proposal.winner(&[Some(-20.0), Some(-14.0)]), None);
+        assert_eq!(winner(&[Some(-20.0), Some(-14.0), Some(-30.0)]), Some(1));
+        assert_eq!(winner(&[Some(-20.0), Some(-14.5), Some(-30.0)]), Some(0));
+        assert_eq!(winner(&[Some(-20.0), Some(-14.0), Some(-16.0)]), Some(0));
+        assert_eq!(winner(&[Some(-20.0), None, Some(-30.0)]), None);
+        assert_eq!(winner(&[Some(-20.0), Some(-14.0)]), None);
     }
 
     #[test]
@@ -1116,6 +1439,9 @@ mod tests {
             original_count: 2,
             numerals: false,
             changes: vec![None; 2],
+            numbers: Vec::new(),
+            references: Vec::new(),
+            undecided: Vec::new(),
             lattice: None,
             round: 1,
             policy,
@@ -1129,17 +1455,17 @@ mod tests {
         );
         // Committed digits settle a tie; the kanji numeral stays when it scores higher.
         assert_eq!(choice.margin, policy.digits_seen);
-        assert_eq!(choice.winner(&[Some(-8.0), Some(-8.0)]), Some(1));
-        assert_eq!(choice.winner(&[Some(-8.0), Some(-8.5)]), Some(0));
+        assert_eq!(choice.winner(&[Some(-8.0), Some(-8.0)], ""), Some(1));
+        assert_eq!(choice.winner(&[Some(-8.0), Some(-8.5)], ""), Some(0));
         // Without them the digits need a clear lead.
         let plain = words.numeral_choice(0, "前の文。").unwrap();
         assert_eq!(plain.margin, policy.digits);
         assert_eq!(
-            plain.winner(&[Some(-8.0), Some(-8.0 + policy.digits - 0.5)]),
+            plain.winner(&[Some(-8.0), Some(-8.0 + policy.digits - 0.5)], ""),
             Some(0)
         );
         assert_eq!(
-            plain.winner(&[Some(-8.0), Some(-8.0 + policy.digits)]),
+            plain.winner(&[Some(-8.0), Some(-8.0 + policy.digits)], ""),
             Some(1)
         );
         // A word without a number, and a choice that is already about numbers.
@@ -1206,6 +1532,531 @@ mod tests {
         // No further look after two accepted spellings, or when nothing changed.
         assert!(second.next_round(1).is_none());
         assert!(first.next_round(0).is_none());
+    }
+
+    #[test]
+    fn a_spoken_number_is_one_alternative_in_two_notations() {
+        use super::{FocusCandidate, Job, MAX_WINDOWS, Preview, Segment, scored_windows};
+        let policy = &super::TEST_POLICY;
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        let segments = |words: &[(&str, &str)]| -> Vec<Segment> {
+            words
+                .iter()
+                .map(|(reading, value)| Segment {
+                    reading: (*reading).into(),
+                    value: (*value).into(),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        let parts = segments(&[
+            ("せんしゅは", "選手は"),
+            ("はち", "八"),
+            ("いち", "市"),
+            ("しあい", "試合"),
+        ]);
+        let lists = [
+            vec![option("選手は")],
+            vec![option("八"), option("鉢")],
+            vec![option("市"), option("一"), option("位置")],
+            vec![option("試合"), option("仕合")],
+        ];
+        let job = Job {
+            context: "昨季の".into(),
+            reading: "センシュハハチイチシアイ".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+        let windows = |policy: &Preview| {
+            scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new())
+        };
+        let found = windows(policy);
+        let first = &found[0];
+        // After the displayed text come the number's kanji numerals and its digits.
+        assert_eq!(
+            first.job.candidates[..3],
+            ["選手は八市試合", "選手は八一試合", "選手は81試合"]
+        );
+        assert!(first.original_count > 2);
+        let scores = |kanji: f32, digits: f32| {
+            let mut scores = vec![Some(-60.0); first.job.candidates.len()];
+            scores[..3].copy_from_slice(&[Some(-40.0), Some(kanji), Some(digits)]);
+            scores
+        };
+        // Close scores of the two notations do not hold the number back. The
+        // digits stand for it with their lead over the kanji numerals.
+        let led = scores(-10.0 - policy.digits, -10.0);
+        assert_eq!(first.winner(&scores(-12.0, -10.0), ""), Some(1));
+        assert_eq!(first.winner(&led, ""), Some(2));
+        // Committed digits settle a tie.
+        assert_eq!(
+            first.winner(&scores(-10.0, -10.0), "昨季は30試合。"),
+            Some(2)
+        );
+        // The better notation still needs the lead over the displayed words.
+        assert_eq!(first.winner(&scores(-37.0, -36.0), ""), Some(0));
+        // Two kanji become digits here, which would keep the display of a name.
+        assert!(!preserves_name_spelling(
+            &first.render(0),
+            &first.render(2),
+            policy.katakana
+        ));
+
+        // Weights that look at a window again settle its words around the
+        // kanji numerals, although the digits lead.
+        let again = Preview {
+            rounds: 2,
+            ..*policy
+        };
+        let found = windows(&again);
+        let first = &found[0];
+        assert_eq!(first.winner(&led, ""), Some(1));
+        let second = first.next_round(1).unwrap();
+        assert_eq!(second.job.candidates[0], "選手は八一試合");
+        let lattice = second.lattice.as_ref().unwrap();
+        let cut: Vec<_> = lattice
+            .parts
+            .iter()
+            .map(|s| (s.reading.as_str(), s.value.as_str()))
+            .collect();
+        // The number is one segment with one spelling from here on.
+        assert_eq!(
+            cut,
+            [
+                ("せんしゅは", "選手は"),
+                ("はちいち", "八一"),
+                ("しあい", "試合")
+            ]
+        );
+        assert!(second.numbers.is_empty());
+        assert!(second.job.candidates.contains(&"選手は八一仕合".to_owned()));
+        assert!(second.job.candidates.iter().all(|c| !c.contains("81")));
+        // With the words settled, its notation is compared like that of every
+        // number, although no counter follows it.
+        assert_eq!(second.undecided, ["八一"]);
+        let notation = second.numeral_choice(0, "").unwrap();
+        assert_eq!(notation.job.candidates, ["選手は八一試合", "選手は81試合"]);
+
+        // Weights that keep kanji beside a long katakana name keep these too.
+        let parts = segments(&[
+            ("ぶるーさんだーすの", "ブルーサンダースの"),
+            ("はち", "八"),
+            ("いち", "市"),
+            ("しあい", "試合"),
+        ]);
+        let lists: Vec<_> = parts.iter().map(|p| vec![option(&p.value)]).collect();
+        let job = Job {
+            reading: "ブルーサンダースノハチイチシアイ".into(),
+            ..job
+        };
+        let offered = |policy: &Preview| {
+            let found =
+                scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new());
+            found.first().map_or(0, |item| item.numbers.len())
+        };
+        assert_eq!(offered(policy), 0);
+        assert_eq!(
+            offered(&Preview {
+                katakana: 0,
+                ..*policy
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn the_digits_of_a_number_are_compared_with_the_display_in_digits() {
+        use super::{FocusCandidate, Job, MAX_WINDOWS, Segment, scored_windows};
+        let policy = &super::TEST_POLICY;
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        // 四級, the fourth grade, reads like forty-nine.
+        let parts: Vec<_> = [
+            ("よん", "四"),
+            ("きゅうから", "級から"),
+            ("しょだんまで", "初段まで"),
+        ]
+        .iter()
+        .map(|(reading, value)| Segment {
+            reading: (*reading).into(),
+            value: (*value).into(),
+            ..Default::default()
+        })
+        .collect();
+        let job = Job {
+            context: "検定は".into(),
+            reading: "ヨンキュウカラショダンマデ".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+        // `digit` adds the converter's own candidate that writes 四 as 4.
+        let windows = |digit: bool| {
+            let mut grade = vec![option("四")];
+            grade.extend(digit.then(|| option("4")));
+            let lists = [
+                grade,
+                vec![option("級から"), option("球から")],
+                vec![option("初段まで")],
+            ];
+            scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new())
+        };
+        let found = windows(true);
+        let first = &found[0];
+        let index = |text: &str| first.job.candidates.iter().position(|c| c == text).unwrap();
+        let (kanji, digits) = (index("四九から初段まで"), index("49から初段まで"));
+        let shown = index("4級から初段まで");
+        assert_eq!(
+            first.numbers[0].shown_digits.as_deref(),
+            Some("4級から初段まで")
+        );
+        let scores = |number: f32, display: f32| {
+            let mut scores = vec![Some(-60.0); first.job.candidates.len()];
+            scores[0] = Some(-30.0);
+            scores[kanji] = Some(-50.0);
+            scores[digits] = Some(number);
+            scores[shown] = Some(display);
+            scores
+        };
+        // 49 leads 四級 by far, only because it has digits. It does not lead
+        // 4級, the converter's own candidate, which is accepted as it was
+        // without the number.
+        assert!(first.references.is_empty());
+        assert_eq!(first.winner(&scores(-10.0, -11.0), ""), Some(shown));
+        // With the lead over 4級 as well, the number is read.
+        assert_eq!(
+            first.winner(&scores(-10.0, -10.0 - policy.sentence), ""),
+            Some(digits)
+        );
+
+        // Where the converter does not offer 4級, it is scored all the same,
+        // only to compare the digits with. It is never chosen itself.
+        let found = windows(false);
+        let first = &found[0];
+        let index = |text: &str| first.job.candidates.iter().position(|c| c == text).unwrap();
+        let (kanji, digits) = (index("四九から初段まで"), index("49から初段まで"));
+        let shown = index("4級から初段まで");
+        assert_eq!(first.references, [shown]);
+        assert!(shown < first.original_count);
+        let scores = |kanji_score: f32, display: f32| {
+            let mut scores = vec![Some(-60.0); first.job.candidates.len()];
+            scores[0] = Some(-30.0);
+            scores[kanji] = Some(kanji_score);
+            scores[digits] = Some(-10.0);
+            scores[shown] = Some(display);
+            scores
+        };
+        assert_eq!(first.winner(&scores(-50.0, -11.0), ""), Some(0));
+        assert_eq!(
+            first.winner(&scores(-50.0, -10.0 - policy.sentence), ""),
+            Some(digits)
+        );
+        // The kanji numerals are compared with the kanji display.
+        assert_eq!(first.winner(&scores(-20.0, -11.0), ""), Some(kanji));
+    }
+
+    #[test]
+    fn a_comparison_spelling_leaves_the_first_alternatives_their_places() {
+        use super::{FocusCandidate, Job, Segment, contextual_proposal, spoken};
+        let policy = &super::TEST_POLICY;
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        // Seven segments, each with one alternative. `more` adds a second
+        // alternative of the first segment.
+        let words = [
+            ("よん", "四", "読ん"),
+            ("きゅうから", "級から", "球から"),
+            ("しょだんまで", "初段まで", "書壇まで"),
+            ("ぜんぶ", "全部", "ぜんぶ"),
+            ("おなじ", "同じ", "おなじ"),
+            ("きじゅんで", "基準で", "規準で"),
+            ("はかる", "測る", "計る"),
+        ];
+        let window = |count: usize, more: bool, after: &str| {
+            let parts: Vec<_> = words[..count]
+                .iter()
+                .map(|(reading, value, _)| Segment {
+                    reading: (*reading).into(),
+                    value: (*value).into(),
+                    ..Default::default()
+                })
+                .collect();
+            let mut lists: Vec<_> = words[..count]
+                .iter()
+                .map(|(_, value, other)| vec![option(value), option(other)])
+                .collect();
+            lists[0].extend(more.then(|| option("詠ん")));
+            let job = Job {
+                context: "検定は".into(),
+                reading: "ヨンキュウカラショダンマデゼンブオナジキジュンデハカル".into(),
+                prefix: String::new(),
+                suffix: String::new(),
+                candidates: vec![],
+            };
+            let numbers = spoken::numbers(&parts, &lists);
+            contextual_proposal(&parts, &lists, job, policy, &numbers, "", after)
+        };
+        let places = |item: &super::Proposal| {
+            let index = |text: &str| item.job.candidates.iter().position(|c| c == text);
+            let tail = &item.job.candidates[0]["四級から".len()..];
+            (
+                index(&format!("四九から{tail}")),
+                index(&format!("49から{tail}")),
+                index(&format!("4級から{tail}")),
+            )
+        };
+
+        // With room among the nine, 4級から… is scored behind the alternatives.
+        let item = window(5, false, "");
+        assert_eq!(places(&item), (Some(1), Some(2), Some(8)));
+        assert_eq!(item.references, [8]);
+        // It takes the place of a second alternative, not of a first one.
+        let item = window(5, true, "");
+        assert_eq!(places(&item), (Some(1), Some(2), Some(8)));
+        assert_eq!(item.job.candidates[7], "四級から初段まで全部おなじ");
+        assert_eq!(item.job.candidates[9], "詠ん級から初段まで全部同じ");
+
+        // The displayed text, the number twice and six first alternatives
+        // fill the nine places. The kanji numerals give theirs to 4級から….
+        let item = window(7, false, "");
+        assert_eq!(places(&item), (Some(9), Some(1), Some(8)));
+        assert_eq!(item.references, [8]);
+        assert_eq!(item.original_count, 9);
+        assert_eq!(item.job.candidates[7], "四級から初段まで全部同じ規準で測る");
+        let (kanji, digits, shown) = (9, 1, 8);
+        let scores = |kanji_score: Option<f32>, display: f32| {
+            let mut scores = vec![Some(-60.0); item.job.candidates.len()];
+            scores[0] = Some(-30.0);
+            scores[kanji] = kanji_score;
+            scores[digits] = Some(-10.0);
+            scores[shown] = Some(display);
+            scores
+        };
+        // The digits are not weighed against the kanji display.
+        assert_eq!(item.winner(&scores(None, -11.0), ""), Some(0));
+        // With their lead over 4級から…, the number is read. Its notation is
+        // still to be compared: the kanji numerals were not scored.
+        assert_eq!(item.winner(&scores(None, -40.0), ""), Some(kanji));
+        let notation = item.numeral_choice(kanji, "").unwrap();
+        assert_eq!(
+            notation.job.candidates,
+            [
+                "四九から初段まで全部同じ基準で測る",
+                "49から初段まで全部同じ基準で測る"
+            ]
+        );
+        // Shortlisted kanji numerals are compared at once.
+        assert_eq!(item.winner(&scores(Some(-50.0), -40.0), ""), Some(digits));
+
+        // Digits that the safeguards refuse are not worth the place: a
+        // transliterated name follows, and the weights keep 四級 beside it.
+        let item = window(7, false, "、アレクサンダー・ミラー、");
+        assert_eq!(places(&item), (Some(1), Some(2), None));
+        assert!(item.references.is_empty());
+    }
+
+    #[test]
+    fn digits_that_the_safeguards_refuse_leave_the_kanji_numerals_to_speak() {
+        use super::{FocusCandidate, Job, MAX_WINDOWS, Segment, scored_windows};
+        // Weights that keep kanji as displayed beside eight katakana characters.
+        let policy = &super::TEST_POLICY;
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        let parts: Vec<_> = [("ろく", "ロク"), ("なな", "七"), ("しーずん", "シーズン")]
+            .iter()
+            .map(|(reading, value)| Segment {
+                reading: (*reading).into(),
+                value: (*value).into(),
+                ..Default::default()
+            })
+            .collect();
+        let lists = [
+            vec![option("ロク"), option("六")],
+            vec![option("七")],
+            vec![option("シーズン")],
+        ];
+        let job = Job {
+            context: "加入2年目の".into(),
+            reading: "ロクナナシーズン".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+        let mut found =
+            scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new());
+        let index = |text: &str| {
+            let candidates = &found[0].job.candidates;
+            candidates.iter().position(|c| c == text).unwrap()
+        };
+        let (kanji, digits) = (index("六七シーズン"), index("67シーズン"));
+        let mut scores = vec![Some(-90.0); found[0].job.candidates.len()];
+        scores[0] = Some(-60.0);
+        scores[kanji] = Some(-50.0);
+        scores[digits] = Some(-20.0);
+        assert_eq!(found[0].winner(&scores, "2015年の"), Some(digits));
+        // A transliterated name follows. With that much katakana the 七 of the
+        // display is kept, so the digits cannot replace ロク七. The kanji
+        // numerals replace only ロク and still stand for the number; the
+        // comparison of notations writes 67 afterwards.
+        found[0].after = "、アレクサンダー・ミラー、".into();
+        assert_eq!(found[0].winner(&scores, "2015年の"), Some(kanji));
+    }
+
+    #[test]
+    fn the_numbers_of_a_clause_are_scored_whole_and_carried_into_the_next_look() {
+        use super::{FocusCandidate, Job, MAX_WINDOWS, Preview, Segment, scored_windows};
+        let policy = &Preview {
+            rounds: 2,
+            ..super::TEST_POLICY
+        };
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        let segments = |words: &[(&str, &str)]| -> Vec<Segment> {
+            words
+                .iter()
+                .map(|(reading, value)| Segment {
+                    reading: (*reading).into(),
+                    value: (*value).into(),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        let job = |reading: &str| Job {
+            context: "昨季の".into(),
+            reading: reading.into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+
+        // Eleven segments. The last eight would begin at the last word of 三十三.
+        let mut words = vec![
+            ("まえは", "前は"),
+            ("さん", "三"),
+            ("じゅう", "重"),
+            ("さん", "三"),
+        ];
+        words.extend([("かきく", "書き区"); 7]);
+        let parts = segments(&words);
+        let lists: Vec<_> = parts
+            .iter()
+            .map(|p| vec![option(&p.value), option("柿苦")])
+            .collect();
+        let reading = format!("マエハサンジュウサン{}", "カキク".repeat(7));
+        let found = scored_windows(
+            &parts,
+            &lists,
+            &job(&reading),
+            MAX_WINDOWS,
+            policy,
+            |_, _| Vec::new(),
+        );
+        // That window ends up one segment shorter, and the next one has the number.
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].before, "前は三重三");
+        assert_eq!(found[0].lattice.as_ref().unwrap().parts.len(), 7);
+        assert!(found[0].numbers.is_empty());
+        assert_eq!(found[1].after, "書き区".repeat(7));
+        assert_eq!(
+            found[1].job.candidates[..3],
+            ["前は三重三", "前は三十三", "前は33"]
+        );
+
+        // Two numbers in one window.
+        let parts = segments(&[
+            ("せんしゅは", "選手は"),
+            ("はち", "八"),
+            ("いち", "市"),
+            ("しあいで", "試合で"),
+            ("に", "二"),
+            ("ご", "語"),
+            ("てん", "点"),
+        ]);
+        let lists = [
+            vec![option("選手は")],
+            vec![option("八"), option("鉢")],
+            vec![option("市")],
+            vec![option("試合で")],
+            vec![option("二")],
+            vec![option("語"), option("後")],
+            vec![option("点")],
+        ];
+        let found = scored_windows(
+            &parts,
+            &lists,
+            &job("センシュハハチイチシアイデニゴテン"),
+            MAX_WINDOWS,
+            policy,
+            |_, _| Vec::new(),
+        );
+        let first = &found[0];
+        assert_eq!(
+            first.job.candidates[..5],
+            [
+                "選手は八市試合で二語点",
+                "選手は八一試合で二語点",
+                "選手は81試合で二語点",
+                "選手は八市試合で二五点",
+                "選手は八市試合で25点"
+            ]
+        );
+        // With the first number accepted, the second is still offered, now
+        // one segment earlier.
+        let second = first.next_round(1).unwrap();
+        assert_eq!(
+            second.job.candidates[..3],
+            [
+                "選手は八一試合で二語点",
+                "選手は八一試合で二五点",
+                "選手は八一試合で25点"
+            ]
+        );
+        // A segment that was respelled is no longer the display in which a
+        // number was read. The other number stays.
+        let respelled = "選手は八市試合で二後点".to_owned();
+        let index = first
+            .job
+            .candidates
+            .iter()
+            .position(|c| *c == respelled)
+            .unwrap();
+        let second = first.next_round(index).unwrap();
+        assert_eq!(second.numbers.len(), 1);
+        assert_eq!(
+            second.job.candidates[..3],
+            [
+                "選手は八市試合で二後点",
+                "選手は八一試合で二後点",
+                "選手は81試合で二後点"
+            ]
+        );
     }
 
     #[test]

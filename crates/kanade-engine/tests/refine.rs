@@ -51,6 +51,14 @@ fn table(reading: &str) -> Vec<(String, Vec<&'static str>, usize)> {
             ("あめ。".into(), vec!["雨。", "飴。"], 0),
         ],
         "にいだ" => one(reading, vec!["二位だ", "二医だ"]),
+        // A number that the converter reads as two unrelated words.
+        "はちいちせたい" => vec![
+            ("はち".into(), vec!["八", "鉢"], 0),
+            ("いち".into(), vec!["市", "一", "位置"], 0),
+            ("せたい".into(), vec!["世帯", "世態"], 0),
+        ],
+        // One word that only reads like twenty-two.
+        "にじゅうに" => one(reading, vec!["二重に", "二十に"]),
         // A key event carries at most 32 bytes of text.
         "にせんいちねんのあめ" => vec![
             ("にせん".into(), vec!["二千"], 0),
@@ -1417,6 +1425,74 @@ fn numbers_follow_committed_digits_after_the_words_are_kept() {
         let last = script.jobs.last().unwrap();
         assert_eq!(last.candidates, ["二位だ", "2位だ"]);
     }
+}
+
+#[test]
+fn a_number_read_as_separate_words_is_offered_as_one_in_two_notations() {
+    for (wanted, shown) in [
+        ("81世帯", Some("81世帯")),
+        ("八一世帯", Some("八一世帯")),
+        ("どれでもない", None),
+    ] {
+        let mut f = fixture(settings(true));
+        let initial = f.convert("はちいちせたい");
+        assert_eq!(surface(initial.preedit.as_ref().unwrap()), "八市世帯");
+        f.llm.want(&[wanted]);
+        assert_eq!(previewed(&mut f, &initial).as_deref(), shown);
+        let script = f.llm.0.lock().unwrap();
+        // Right after the displayed words: the range cut again as one number,
+        // with kanji numerals and with digits.
+        let job = script
+            .jobs
+            .iter()
+            .find(|job| job.candidates[0] == "八市世帯")
+            .unwrap();
+        assert_eq!(job.candidates[1..3], ["八一世帯", "81世帯"]);
+        assert_eq!(job.reading, "ハチイチセタイ");
+    }
+}
+
+#[test]
+fn a_number_keeps_kanji_numerals_until_the_words_of_its_window_are_settled() {
+    let mut f = fixture(settings(true));
+    // A model registered with a second look at each window.
+    f.engine.set_preview(kanade_llm::profile::Preview {
+        rounds: 2,
+        ..POLICY
+    });
+    let initial = f.convert("はちいちせたい");
+    f.llm.want(&["81世帯"]);
+    assert_eq!(previewed(&mut f, &initial).as_deref(), Some("81世帯"));
+    let script = f.llm.0.lock().unwrap();
+    // The focused segment's own job, then three looks at the whole text.
+    assert_eq!(script.jobs.len(), 4);
+    assert_eq!(
+        script.jobs[1].candidates[..3],
+        ["八市世帯", "八一世帯", "81世帯"]
+    );
+    // The second look compares the other words around the number, which is
+    // one segment with one spelling.
+    assert_eq!(script.jobs[2].candidates, ["八一世帯", "八一世態"]);
+    // Then the notation is compared, as for every number.
+    assert_eq!(script.jobs[3].candidates, ["八一世帯", "81世帯"]);
+}
+
+#[test]
+fn a_word_that_reads_like_a_number_is_not_cut_again() {
+    let mut f = fixture(settings(true));
+    let initial = f.convert("にじゅうに");
+    assert_eq!(surface(initial.preedit.as_ref().unwrap()), "二重に");
+    f.llm.want(&["22", "二十二"]);
+    assert_eq!(previewed(&mut f, &initial), None);
+    let script = f.llm.0.lock().unwrap();
+    assert!(script.jobs.len() > 1);
+    assert!(
+        script
+            .jobs
+            .iter()
+            .flat_map(|job| &job.candidates)
+            .all(|c| c != "22" && c != "二十二")
+    );
 }
 
 #[test]
