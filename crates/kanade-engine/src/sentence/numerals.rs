@@ -4,6 +4,7 @@
 //! The reading of 二位 and 2位 is the same, so the spelling follows the style
 //! of the text. This module only offers the alternatives; the model compares
 //! them after the committed context.
+use std::ops::Range;
 
 const DIGITS: &str = "〇一二三四五六七八九";
 /// Words counted with a preceding number.
@@ -157,6 +158,17 @@ fn rewrite(text: &str, runs: &[&Run]) -> String {
     result
 }
 
+/// `text` with the numbers that lie in `range` written with digits, when it
+/// has one there. `following` is the text displayed after it.
+pub(super) fn digits_within(text: &str, following: &str, range: Range<usize>) -> Option<String> {
+    let found = runs(text, following, &[]);
+    let inside: Vec<&Run> = found
+        .iter()
+        .filter(|run| range.start <= run.start && run.end <= range.end)
+        .collect();
+    (!inside.is_empty()).then(|| rewrite(text, &inside))
+}
+
 /// Spellings of `text` with digits: every number at once, then each of the
 /// first two numbers alone when there are several. `following` is the text
 /// displayed after it, which decides whether a final numeral is counted.
@@ -222,6 +234,19 @@ mod tests {
         assert_eq!(variants("樹高約二五", "", &spoken), ["樹高約25"]);
         assert!(variants("樹高約二五", "", &[]).is_empty());
         assert!(variants("三二五試合", "", &spoken).is_empty());
+        // Only the numbers of one part of the text.
+        let text = "四級から三段まで";
+        let part = 0.."四級から".len();
+        assert_eq!(
+            digits_within(text, "", part.clone()).as_deref(),
+            Some("4級から三段まで")
+        );
+        assert_eq!(
+            digits_within(text, "", 0..text.len()).as_deref(),
+            Some("4級から3段まで")
+        );
+        assert_eq!(digits_within("四季から三段まで", "", part), None);
+        assert_eq!(digits_within("約二語", "", 0.."約二語".len()), None);
     }
 
     #[test]

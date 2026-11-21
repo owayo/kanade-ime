@@ -58,6 +58,9 @@ struct Spoken {
     number: spoken::Number,
     kanji: Option<usize>,
     digits: Option<usize>,
+    /// The displayed text with the numerals of the number's segments in
+    /// digits, when it shows any: 4級から for 四級から.
+    shown_digits: Option<String>,
 }
 
 struct Proposal {
@@ -74,6 +77,9 @@ struct Proposal {
     changes: Vec<Option<Vec<Change>>>,
     /// Numbers read across segments, each offered in two notations.
     numbers: Vec<Spoken>,
+    /// Candidates that are scored only to compare a number's digits with:
+    /// the display with its own numerals in digits. They are never chosen.
+    references: Vec<usize>,
     /// Kanji numerals of such numbers accepted in an earlier look at this
     /// window. Whether to write them with digits is still to be compared.
     undecided: Vec<String>,
@@ -121,8 +127,7 @@ impl Proposal {
     // open once candidate `winner` is accepted.
     fn open_notation(&self, winner: usize) -> Vec<String> {
         let mut spoken = self.undecided.clone();
-        if self.round < self.policy.rounds
-            && let Some((number, spelling)) = self.spoken(winner)
+        if let Some((number, spelling)) = self.spoken(winner)
             && *spelling == number.spellings()[0]
         {
             spoken.push(spelling.to_owned());
@@ -185,7 +190,7 @@ impl Proposal {
             lists,
             numbers,
         } = &lattice;
-        let mut item = contextual_proposal(parts, lists, job, &self.policy, numbers);
+        let mut item = contextual_proposal(parts, lists, job, &self.policy, numbers, &self.after);
         search::paired(&mut item, parts, lists);
         item.before.clone_from(&self.before);
         item.after.clone_from(&self.after);
@@ -225,6 +230,7 @@ impl Proposal {
             numerals: true,
             changes: vec![None; count],
             numbers: Vec::new(),
+            references: Vec::new(),
             undecided: Vec::new(),
             lattice: None,
             round: self.round,
@@ -250,7 +256,8 @@ impl Proposal {
             let lead = values[best] - values[0];
             return Some(if lead >= self.margin { best } else { 0 });
         }
-        let mut scores: Vec<_> = scores
+        let raw = scores;
+        let mut scores: Vec<_> = raw
             .iter()
             .zip(&self.penalties)
             .map(|(s, p)| s.map_or(f32::NEG_INFINITY, |v| v - p))
@@ -259,14 +266,32 @@ impl Proposal {
         // digits stand for it only with their lead over the kanji numerals.
         let lead = self.digit_lead(committed);
         for spoken in &self.numbers {
-            if let (Some(kanji), Some(digits)) = (spoken.kanji, spoken.digits) {
-                let other = if scores[digits] - scores[kanji] >= lead {
-                    kanji
-                } else {
-                    digits
-                };
-                scores[other] = f32::NEG_INFINITY;
+            let Some(digits) = spoken.digits else {
+                continue;
+            };
+            // Digits are compared with digits. Where the display shows a
+            // numeral, the model favors any spelling with digits over it, so
+            // 49 has to lead 4級 rather than 四級. Without that spelling of
+            // the display, the kanji numerals are compared instead.
+            let fair = spoken.shown_digits.as_ref().is_none_or(|shown| {
+                job.candidates
+                    .iter()
+                    .position(|c| c == shown)
+                    .and_then(|index| raw[index].zip(raw[digits]))
+                    .is_some_and(|(shown, number)| number - shown >= self.margin)
+            });
+            let stands = fair
+                && spoken
+                    .kanji
+                    .is_none_or(|kanji| scores[digits] - scores[kanji] >= lead);
+            match spoken.kanji {
+                Some(kanji) if stands => scores[kanji] = f32::NEG_INFINITY,
+                _ if stands => {}
+                _ => scores[digits] = f32::NEG_INFINITY,
             }
+        }
+        for &reference in &self.references {
+            scores[reference] = f32::NEG_INFINITY;
         }
         let mut order: Vec<_> = (0..scores.len()).collect();
         order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]));
@@ -524,6 +549,7 @@ impl<'a> Ending<'a> {
             original_count: job.candidates.len(),
             changes: vec![None; job.candidates.len()],
             numbers: Vec::new(),
+            references: Vec::new(),
             undecided: Vec::new(),
             job,
             margin: policy.ending,
@@ -597,13 +623,15 @@ fn beside_katakana(original: &[char], old: &[char], limit: u8) -> bool {
     kanji_count(old) > 0 && limit > 0 && katakana_count(original) >= usize::from(limit)
 }
 
-// `spoken` are the numbers read across `parts`, as found in their whole clause.
+// `spoken` are the numbers read across `parts`, as found in their whole
+// clause. `after` is the text displayed after `parts`.
 fn contextual_proposal(
     parts: &[Segment],
     lists: &[Vec<FocusCandidate>],
     mut job: Job,
     policy: &Preview,
     spoken: &[spoken::Number],
+    after: &str,
 ) -> Proposal {
     job.candidates
         .push(parts.iter().map(|s| s.value.as_str()).collect());
@@ -653,10 +681,15 @@ fn contextual_proposal(
             };
         }
         if slots.iter().any(Option::is_some) {
+            let width =
+                |segments: &[Segment]| -> usize { segments.iter().map(|s| s.value.len()).sum() };
+            let from = width(&parts[..number.range.start]);
+            let to = from + width(&parts[number.range.clone()]);
             numbers.push(Spoken {
                 number: number.clone(),
                 kanji: slots[0],
                 digits: slots[1],
+                shown_digits: numerals::digits_within(&job.candidates[0], after, from..to),
             });
         }
     }
@@ -693,7 +726,32 @@ fn contextual_proposal(
             break;
         }
     }
-    let original_count = job.candidates.len();
+    // What the digits of a number are compared with has to be scored: the
+    // display with its own numerals in digits. Unless it is a candidate
+    // already, it takes one of the nine places that are always scored, and
+    // the candidates behind it move back.
+    let mut references = Vec::new();
+    let mut shown: Vec<&String> = Vec::new();
+    for spoken in &numbers {
+        if let Some(text) = &spoken.shown_digits
+            && text.chars().count() <= limits::CANDIDATE_CHARS
+            && !job.candidates.contains(text)
+            && !shown.contains(&text)
+        {
+            shown.push(text);
+        }
+    }
+    let at = job
+        .candidates
+        .len()
+        .min(limits::CANDIDATES.saturating_sub(shown.len()));
+    for (offset, text) in shown.into_iter().enumerate() {
+        job.candidates.insert(at + offset, text.clone());
+        penalties.insert(at + offset, 0.0);
+        changes.insert(at + offset, None);
+        references.push(at + offset);
+    }
+    let original_count = job.candidates.len().min(limits::CANDIDATES);
     let mut p = Proposal {
         job,
         before: String::new(),
@@ -704,6 +762,7 @@ fn contextual_proposal(
         numerals: false,
         changes,
         numbers,
+        references,
         undecided: Vec::new(),
         lattice: None,
         round: 1,
@@ -781,14 +840,15 @@ fn scored_windows(
                 number
             })
             .collect();
-        let mut item = contextual_proposal(window, choices, job, policy, &inside);
+        let after: String = parts[end..].iter().map(|s| s.value.as_str()).collect();
+        let mut item = contextual_proposal(window, choices, job, policy, &inside, &after);
         let splits = explore
             .take()
             .map_or_else(Vec::new, |probe| probe(window, &mut item));
         search::paired(&mut item, window, choices);
         search::extend_splits(&mut item, window, choices, &splits);
         item.before = before;
-        item.after = parts[end..].iter().map(|s| s.value.as_str()).collect();
+        item.after = after;
         item.lattice = Some(Lattice {
             parts: window.to_vec(),
             lists: choices.to_vec(),
@@ -1255,6 +1315,7 @@ mod tests {
             numerals: false,
             changes: vec![None; 3],
             numbers: Vec::new(),
+            references: Vec::new(),
             undecided: Vec::new(),
             lattice: None,
             round: 1,
@@ -1309,6 +1370,7 @@ mod tests {
             numerals: false,
             changes: vec![None; 2],
             numbers: Vec::new(),
+            references: Vec::new(),
             undecided: Vec::new(),
             lattice: None,
             round: 1,
@@ -1537,6 +1599,102 @@ mod tests {
             }),
             1
         );
+    }
+
+    #[test]
+    fn the_digits_of_a_number_are_compared_with_the_display_in_digits() {
+        use super::{FocusCandidate, Job, MAX_WINDOWS, Segment, scored_windows};
+        let policy = &super::TEST_POLICY;
+        let option = |value: &str| FocusCandidate {
+            reading: String::new(),
+            annotation: String::new(),
+            value: value.into(),
+            transliteration: false,
+            history_deletable: false,
+        };
+        // 四級, the fourth grade, reads like forty-nine.
+        let parts: Vec<_> = [
+            ("よん", "四"),
+            ("きゅうから", "級から"),
+            ("しょだんまで", "初段まで"),
+        ]
+        .iter()
+        .map(|(reading, value)| Segment {
+            reading: (*reading).into(),
+            value: (*value).into(),
+            ..Default::default()
+        })
+        .collect();
+        let job = Job {
+            context: "減点基準は".into(),
+            reading: "ヨンキュウカラショダンマデ".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            candidates: vec![],
+        };
+        // `digit` adds the converter's own candidate that writes 四 as 4.
+        let windows = |digit: bool| {
+            let mut grade = vec![option("四")];
+            grade.extend(digit.then(|| option("4")));
+            let lists = [
+                grade,
+                vec![option("級から"), option("球から")],
+                vec![option("初段まで")],
+            ];
+            scored_windows(&parts, &lists, &job, MAX_WINDOWS, policy, |_, _| Vec::new())
+        };
+        let found = windows(true);
+        let first = &found[0];
+        let index = |text: &str| first.job.candidates.iter().position(|c| c == text).unwrap();
+        let (kanji, digits) = (index("四九から初段まで"), index("49から初段まで"));
+        let shown = index("4級から初段まで");
+        assert_eq!(
+            first.numbers[0].shown_digits.as_deref(),
+            Some("4級から初段まで")
+        );
+        let scores = |number: f32, display: f32| {
+            let mut scores = vec![Some(-60.0); first.job.candidates.len()];
+            scores[0] = Some(-30.0);
+            scores[kanji] = Some(-50.0);
+            scores[digits] = Some(number);
+            scores[shown] = Some(display);
+            scores
+        };
+        // 49 leads 四級 by far, only because it has digits. It does not lead
+        // 4級, the converter's own candidate, which is accepted as it was
+        // without the number.
+        assert!(first.references.is_empty());
+        assert_eq!(first.winner(&scores(-10.0, -11.0), ""), Some(shown));
+        // With the lead over 4級 as well, the number is read.
+        assert_eq!(
+            first.winner(&scores(-10.0, -10.0 - policy.sentence), ""),
+            Some(digits)
+        );
+
+        // Where the converter does not offer 4級, it is scored all the same,
+        // only to compare the digits with. It is never chosen itself.
+        let found = windows(false);
+        let first = &found[0];
+        let index = |text: &str| first.job.candidates.iter().position(|c| c == text).unwrap();
+        let (kanji, digits) = (index("四九から初段まで"), index("49から初段まで"));
+        let shown = index("4級から初段まで");
+        assert_eq!(first.references, [shown]);
+        assert!(shown < first.original_count);
+        let scores = |kanji_score: f32, display: f32| {
+            let mut scores = vec![Some(-60.0); first.job.candidates.len()];
+            scores[0] = Some(-30.0);
+            scores[kanji] = Some(kanji_score);
+            scores[digits] = Some(-10.0);
+            scores[shown] = Some(display);
+            scores
+        };
+        assert_eq!(first.winner(&scores(-50.0, -11.0), ""), Some(0));
+        assert_eq!(
+            first.winner(&scores(-50.0, -10.0 - policy.sentence), ""),
+            Some(digits)
+        );
+        // The kanji numerals are compared with the kanji display.
+        assert_eq!(first.winner(&scores(-20.0, -11.0), ""), Some(kanji));
     }
 
     #[test]
