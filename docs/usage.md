@@ -130,7 +130,23 @@ KANADE_ALLOW_UNSIGNED=1 mise run ui
 
 起動診断のログは `~/Library/Logs/Kanade/settings-imk.log` と `settings-ui.log` に保存します。時刻・プロセスIDと、メニュー操作の配送・起動・再表示・設定取得の状態、ウインドウが見えているかどうかだけを記録し、入力文字やキーは記録しません。各ファイルは64 KiBに達すると古い記録を消去します。
 
-接続切断・変換ワーカーの再起動・エンジンの終了理由は、データディレクトリの `logs/engine-events.log` に保存します。標準のmacOSインストールでは `~/Library/Application Support/kanade-ime/logs/engine-events.log` です。入力側の復旧とライフサイクルは `~/Library/Logs/Kanade/input-events.log` に記録します。いずれも時刻・プロセスID・あらかじめ決めた出来事の名前・同じ出来事が続いた回数だけで、入力文字、キー、アプリや文書の名前は記録しません。64 KiBで古い記録を消去します。
+接続切断・変換ワーカーの再起動・エンジンの終了理由は、データディレクトリの `logs/engine-events.log` に保存します。標準のmacOSインストールでは `~/Library/Application Support/kanade-ime/logs/engine-events.log`、Windowsでは `%LOCALAPPDATA%\kanade-ime\logs\engine-events.log` です。入力側の復旧とライフサイクルは `~/Library/Logs/Kanade/input-events.log` に記録します。いずれも時刻・プロセスID・あらかじめ決めた出来事の名前・同じ出来事が続いた回数だけで、入力文字、キー、アプリや文書の名前は記録しません。出来事によっては、終了コード、再起動の回数、panic が起きたスレッドの種類とソース上の位置が付きます。panic のメッセージは入力中の文字を含むことがあるので記録しません。64 KiBで古い記録を消去します。
+
+Windowsでエンジンが止まったときは、このファイルの次の記録を見ます。各行の先頭は UNIX 時刻（秒）と、書いたプロセスのIDです。
+
+| 記録 | 意味 |
+|---|---|
+| `watch-started` | サインイン後に監視が始まった |
+| `engine-started` | エンジンが入力を受け付け始めた |
+| `engine-exited code=…` | エンジンのプロセスが終了した。`code=1` は直前の `fatal-` で始まる記録が理由、`code=2` は別のエンジンが動作中、`code=101` は panic による終了。それ以外の値（`0xc000013a` など）は外部から終了させられた |
+| `engine-restarted count=…` | 監視がエンジンを起動し直した。値はサインイン後の通算回数 |
+| `panicked thread=… at=…` | panic が起きたスレッドの種類と、ソースのファイル名・行番号 |
+| `recovered-from-panic` | panic の後、全セッションを破棄し変換ワーカーを入れ替えて続行した |
+| `connection-refused-at-capacity` | 同時に接続できるアプリの上限（32）に達し、新しい接続を断った |
+| `connection-rejected` | 接続直後に相手が終了した、または同じユーザー・セッションのプロセスではなかった |
+| `listener-failed`・`fatal-listener-lost` | 接続を受け付けるパイプを用意できなかった。続いた場合はエンジンを終了し、監視が起動し直す |
+
+`engine-started` が2回続き、その間に `engine-exited` も `watch-started` も無い場合は、監視なしで起動したエンジンが記録を残さずに終了しています。
 
 署名済みバンドルへ接続する場合は、同梱の CLI を使ってください。
 

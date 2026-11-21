@@ -14,6 +14,20 @@ mod refine;
 mod sentence;
 #[cfg(any(unix, windows))]
 pub mod server;
+#[cfg(windows)]
+pub mod supervisor;
+
+/// Exit codes of the engine process. Its supervisor records them, so each
+/// has one meaning. A panic that ends the process leaves the runtime's 101;
+/// anything else was imposed from outside.
+pub mod exit {
+    pub const STOPPED: u8 = 0;
+    /// The reason is in the event log as a `fatal-` record.
+    pub const FAILED: u8 = 1;
+    /// Another engine serves this endpoint or uses this data directory.
+    pub const ALREADY_RUNNING: u8 = 2;
+    pub const USAGE: u8 = 64;
+}
 
 type Code = failure::Code;
 impl Engine<kanade_mozc::Mozc> {

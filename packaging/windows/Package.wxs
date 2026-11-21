@@ -26,7 +26,10 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLDIR" Name="Kanade">
         <Component Id="Startup" Guid="3C1F580E-90DC-4CFA-BB52-562A326C079B" Bitness="always64">
-          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Kanade" Type="string" Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy RemoteSigned -File &quot;[INSTALLDIR]start-engine.ps1&quot; -Watch" KeyPath="yes" />
+          <!-- The engine's own executable supervises it. It has no console
+               window that could be closed, and it runs where scripts are
+               restricted. -->
+          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Kanade" Type="string" Value="&quot;[INSTALLDIR]kanade-engine.exe&quot; --supervise" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>

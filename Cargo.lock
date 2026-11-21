@@ -2672,6 +2672,7 @@ dependencies = [
  "anyhow",
  "hasami",
  "kanade-emoji",
+ "kanade-engine",
  "kanade-indexer",
  "kanade-ipc",
  "kanade-learn",

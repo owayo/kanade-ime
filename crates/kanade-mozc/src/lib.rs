@@ -146,17 +146,26 @@ impl Process {
             .open(profile.join("kanade-worker.lock"))?;
         lock.try_lock()
             .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .arg(profile)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW. The engine has no console to share, and a
+            // console window opened for the worker could be closed, which
+            // would end the worker.
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command.spawn()?;
         let mut input = child.stdin.take().ok_or(Error::Protocol)?;
         let mut output = child.stdout.take().ok_or(Error::Protocol)?;
         let (tx, rx) = mpsc::sync_channel::<Job>(1);
         let thread = std::thread::Builder::new()
-            .name("mozc-transport".into())
+            .name(ipc::diagnostics::Thread::WORKER_TRANSPORT.into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     let result = ipc::write_frame(&mut input, &job.input)
