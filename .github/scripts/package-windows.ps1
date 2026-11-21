@@ -37,6 +37,7 @@ foreach ($script in 'start-engine.ps1', 'setup-user.ps1', 'enable-profile.ps1', 
     Copy-Item (Join-Path packaging/windows $script) $payload
 }
 Run-Native { python .github/scripts/windows-payload.py }
+& packaging/windows/build-icon.ps1 -Source assets/icons/app.png -Destination artifacts/windows/Kanade.ico
 Run-Native { dotnet tool install wix --version 4.0.6 --tool-path artifacts/wix }
 Run-Wix { ./artifacts/wix/wix.exe extension add --global WixToolset.Bal.wixext/4.0.6 }
 $version = (Get-Content artifacts/windows/version.txt -Raw).Trim()

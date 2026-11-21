@@ -16,6 +16,8 @@ function Test-Registered {
     return $false
 }
 if (Test-Registered) { throw 'Runner already has Kanade installed' }
+# The settings application is reachable from the Start menu of every user.
+$shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Kanade の設定.lnk'
 function Invoke-Installer([string]$File, [string[]]$Arguments, [int[]]$Expected) {
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $File
@@ -64,6 +66,7 @@ try {
     Invoke-Msi @('/i', $msi, '/qn', '/norestart', 'KANADE_TEST_ROLLBACK=1', '/l*v', 'artifacts/windows/rollback.log') @(1603)
     if (-not (Select-String -Path artifacts/windows/rollback.log -SimpleMatch 'CustomAction TestRollback returned actual error code 1' -Quiet)) { throw 'The requested failure action did not execute' }
     if (Test-Registered) { throw 'Rollback left a COM registration' }
+    if (Test-Path -LiteralPath $shortcut) { throw 'Rollback left the Start menu shortcut' }
     Write-Output 'MSI failure rollback removed both COM registrations'
     $legacyMsi = New-LegacyMsi
     Invoke-Msi @('/i', $legacyMsi, '/qn', '/norestart', '/l*v', 'artifacts/windows/legacy.log') @(0, 3010)
@@ -103,6 +106,9 @@ try {
     $engine = $null
     try {
         $application = Join-Path $env:ProgramFiles Kanade
+        if (-not (Test-Path -LiteralPath $shortcut)) { throw 'The Start menu shortcut is missing' }
+        $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
+        if ($target -ne (Join-Path $application 'kanade-ui.exe')) { throw 'The Start menu shortcut does not open the installed settings' }
         $startup = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade
         $launcher = Join-Path $application 'start-engine.ps1'
         if (-not (Test-Path -LiteralPath $launcher) -or -not $startup.EndsWith(('"{0}" -Watch' -f $launcher), [StringComparison]::OrdinalIgnoreCase)) {
@@ -150,4 +156,5 @@ if ($failure) { throw $failure }
 if ($cleanupFailure) { throw $cleanupFailure }
 if (Test-Registered) { throw 'Uninstall left a COM registration' }
 if (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade -ErrorAction SilentlyContinue) { throw 'Uninstall left a startup entry' }
-Write-Output 'EXE uninstallation removed both COM registrations and startup entry'
+if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall left the Start menu shortcut' }
+Write-Output 'EXE uninstallation removed both COM registrations, startup entry and Start menu shortcut'

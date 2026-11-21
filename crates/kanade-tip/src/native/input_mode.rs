@@ -53,9 +53,16 @@ pub(super) fn preserved(id: &GUID) -> Option<Command> {
     KEYS.iter().find(|b| b.id == *id).map(|b| b.command)
 }
 
-pub(super) struct Mode {
+/// The two thread compartments that hold the input mode. Keys and the taskbar
+/// button both read and write the mode through a copy of this.
+#[derive(Clone)]
+pub(super) struct Switch {
     open: ITfCompartment,
     conversion: ITfCompartment,
+}
+
+pub(super) struct Mode {
+    switch: Switch,
     changes: Vec<(ITfSource, u32)>,
     keys: ITfKeystrokeMgr,
     registered: Vec<&'static Binding>,
@@ -70,39 +77,7 @@ fn value(slot: &ITfCompartment) -> Option<i32> {
     }
 }
 
-impl Mode {
-    pub(super) fn attach(
-        manager: &ITfThreadMgr,
-        tid: u32,
-        sink: &ITfCompartmentEventSink,
-    ) -> Result<Self> {
-        let compartments = manager.cast::<ITfCompartmentMgr>()?;
-        let mut mode = Self {
-            open: unsafe { compartments.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)? },
-            conversion: unsafe {
-                compartments.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)?
-            },
-            changes: Vec::new(),
-            keys: manager.cast()?,
-            registered: Vec::new(),
-        };
-        for (slot, default) in [(&mode.conversion, JAPANESE as i32), (&mode.open, 1)] {
-            if value(slot).is_none() {
-                unsafe { slot.SetValue(tid, &VARIANT::from(default))? };
-            }
-            let source = slot.cast::<ITfSource>()?;
-            let cookie = unsafe { source.AdviseSink(&ITfCompartmentEventSink::IID, sink)? };
-            mode.changes.push((source, cookie));
-        }
-        let name: Vec<_> = "Kanade 入力切替".encode_utf16().collect();
-        for binding in KEYS {
-            if unsafe { mode.keys.PreserveKey(tid, &binding.id, &binding.key, &name) }.is_ok() {
-                mode.registered.push(binding);
-            }
-        }
-        Ok(mode)
-    }
-
+impl Switch {
     pub(super) fn japanese(&self) -> bool {
         value(&self.open).is_some_and(|v| v != 0)
             && value(&self.conversion).is_some_and(|v| v as u32 & TF_CONVERSIONMODE_NATIVE != 0)
@@ -122,6 +97,57 @@ impl Mode {
             };
         }
         unsafe { self.open.SetValue(tid, &VARIANT::from(i32::from(on))) }
+    }
+}
+
+impl Mode {
+    pub(super) fn attach(
+        manager: &ITfThreadMgr,
+        tid: u32,
+        sink: &ITfCompartmentEventSink,
+    ) -> Result<Self> {
+        let compartments = manager.cast::<ITfCompartmentMgr>()?;
+        let mut mode = Self {
+            switch: Switch {
+                open: unsafe { compartments.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)? },
+                conversion: unsafe {
+                    compartments.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)?
+                },
+            },
+            changes: Vec::new(),
+            keys: manager.cast()?,
+            registered: Vec::new(),
+        };
+        for (slot, default) in [
+            (&mode.switch.conversion, JAPANESE as i32),
+            (&mode.switch.open, 1),
+        ] {
+            if value(slot).is_none() {
+                unsafe { slot.SetValue(tid, &VARIANT::from(default))? };
+            }
+            let source = slot.cast::<ITfSource>()?;
+            let cookie = unsafe { source.AdviseSink(&ITfCompartmentEventSink::IID, sink)? };
+            mode.changes.push((source, cookie));
+        }
+        let name: Vec<_> = "Kanade 入力切替".encode_utf16().collect();
+        for binding in KEYS {
+            if unsafe { mode.keys.PreserveKey(tid, &binding.id, &binding.key, &name) }.is_ok() {
+                mode.registered.push(binding);
+            }
+        }
+        Ok(mode)
+    }
+
+    pub(super) fn switch(&self) -> Switch {
+        self.switch.clone()
+    }
+
+    pub(super) fn japanese(&self) -> bool {
+        self.switch.japanese()
+    }
+
+    pub(super) fn apply(&self, tid: u32, command: Command) -> Result<()> {
+        self.switch.apply(tid, command)
     }
 }
 

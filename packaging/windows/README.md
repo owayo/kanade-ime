@@ -6,6 +6,8 @@ EXE contains the signed `Kanade.msi`; native ARM64 is not a release target.
 TSF architectures, stages the engine, settings, optional CPU model worker, pinned
 project analyzer and notices, signs the binaries, then builds and signs the MSI and EXE.
 `Package.wxs` installs adjacent executables and pairs registration with rollback.
+It also adds a Start menu shortcut to the settings application; `build-icon.ps1`
+generates the shortcut's icon from `assets/icons/app.png` while packaging.
 Current Microsoft Visual C++ Redistributables for x64 and x86 are prerequisites.
 
 The disposable-runner rehearsal forces an error after registration, checks its

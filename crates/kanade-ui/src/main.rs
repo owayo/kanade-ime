@@ -1,6 +1,23 @@
 use anyhow::{Result, bail};
 use kanade_ipc::{Manage, manage::Action};
 mod dictionary;
+/// Windows opens a console for this program when it is started from the Start
+/// menu or Explorer. Releasing a console that no other process uses closes
+/// it; a shell that started the program keeps its own.
+#[cfg(all(feature = "native", windows))]
+fn release_own_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleProcessList(processes: *mut u32, count: u32) -> u32;
+        fn FreeConsole() -> i32;
+    }
+    let mut processes = [0u32; 2];
+    unsafe {
+        if GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) == 1 {
+            FreeConsole();
+        }
+    }
+}
 fn main() -> Result<()> {
     std::panic::set_hook(Box::new(|_| eprintln!("kanade-ui: interface failure")));
     let args: Vec<String> = std::env::args().collect();
@@ -93,6 +110,8 @@ fn main() -> Result<()> {
         None => {
             #[cfg(all(feature = "native", any(windows, target_os = "macos")))]
             {
+                #[cfg(windows)]
+                release_own_console();
                 kanade_ui::native::run()
             }
             #[cfg(not(all(feature = "native", any(windows, target_os = "macos"))))]
