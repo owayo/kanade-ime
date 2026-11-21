@@ -65,7 +65,7 @@ Tsumugi はインストーラーに同梱する形で配布します。モデル
 python3 .github/scripts/bundled_model.py --attach <GGUF>
 ```
 
-Release のページでは、この添付は「次の版に同梱するモデル」と表示されます。添付した直後は、API の一覧に出るまで数秒かかることがあります。次の Release を公開すると、モデルは `tsumugi.gguf` として新しい Release に付きます。前の Release に添付した写しは、公開のジョブが削除します。手で削除するときは次のコマンドを使います。
+モデルを添付すると、重みが公開されます。取り消せないので、添付するのは同梱すると決めたモデルだけにします。Release のページでは、この添付は「次の版に同梱するモデル」と表示されます。添付した直後は、API の一覧に出るまで数秒かかることがあります。次の Release を公開すると、モデルは `tsumugi.gguf` として新しい Release に付きます。前の Release に添付した写しは、公開のジョブが削除します。手で削除するときは次のコマンドを使います。
 
 ```sh
 gh release delete-asset <前の Release のタグ> tsumugi-<モデルの版>.gguf
