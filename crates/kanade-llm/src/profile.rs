@@ -535,14 +535,14 @@ mod tests {
                 .strip_prefix("Tsumugi ")
                 .expect("versioned model name");
             entry(&lines, "version", version);
-            entry(
-                &lines,
-                "download_url",
-                &format!(
-                    "https://github.com/owayo/kanade-ime/releases/download/tsumugi-{version}/{}",
-                    model.file_name
-                ),
-            );
+            // Builds find the file among the releases of the repository that
+            // documents the model.
+            let repository = model
+                .source_url
+                .strip_prefix("https://github.com/")
+                .and_then(|path| path.split("/blob/").next())
+                .expect("source on GitHub");
+            entry(&lines, "release_repository", repository);
             entry(&lines, "file", model.file_name);
             entry(&lines, "size", &model.size.to_string());
             entry(&lines, "sha256", model.sha256);

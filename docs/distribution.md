@@ -13,6 +13,8 @@
 | Apple Silicon Mac | `kanade-ime-aarch64-apple-darwin.dmg` | 日本語のGUIインストーラー、Kanade本体、Tsumugi |
 | Windows x64 | `kanade-ime-x86_64-pc-windows-msvc.exe` | 日本語のセットアップ画面、Tsumugi を含むMSI |
 
+同じ Release にある `tsumugi.gguf` は、インストーラーが同梱しているモデルの写しです。インストーラーのビルドが取得するために添付しています。利用するときにダウンロードする必要はありません。
+
 Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。Windows では Tsumugi をインストール先の `models/` に、macOS では Kanade 内の設定アプリに配置します。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。
 
 ## macOS
@@ -55,6 +57,20 @@ EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエン�
 
 `preview` は、既定ブランチの同じコミットで CI に合格した Windows x64 の未署名 EXE と、Apple Silicon Mac の一時署名・未公証 DMG を GitHub Releases のプレリリースとして公開します。両方に同じ Tsumugi を1個同梱します。Release 本文にモデルの版、バイト数、SHA-256、インストーラーを検査した CI のリンクが載ります。`dry_run` では両インストーラーを取得してチェックサムの照合まで行います。
 
+Tsumugi はインストーラーに同梱する形で配布します。モデルだけの Release は作りません。各 Release には、インストーラーが同梱しているモデルの写しを `tsumugi.gguf` として添付します。`locks/llm.lock.toml` が記録するのはモデルの版・バイト数・SHA-256 で、URL は持ちません。インストーラーを作るときは、`.github/scripts/bundled_model.py` が Release の添付ファイルから SHA-256 の一致するものを探して取得し、ロックと照合してから同梱します。
+
+モデルを更新するときは、`crates/kanade-llm/src/profile.rs` の登録と `locks/llm.lock.toml` を同じコミットで書き換えます。そのモデルを同梱した Release はまだないので、次のコマンドで GGUF を最新の Release に添付します。添付できるのはロックと一致するファイルだけで、ファイル名は `tsumugi-<モデルの版>.gguf` になります。
+
+```sh
+python3 .github/scripts/bundled_model.py --attach <GGUF>
+```
+
+Release のページでは、この添付は「次の版に同梱するモデル」と表示されます。添付した直後は、API の一覧に出るまで数秒かかることがあります。次の Release を公開すると、モデルは `tsumugi.gguf` として新しい Release に付きます。前の Release に添付した写しは、公開のジョブが削除します。手で削除するときは次のコマンドを使います。
+
+```sh
+gh release delete-asset <前の Release のタグ> tsumugi-<モデルの版>.gguf
+```
+
 本番実行には、既定ブランチの対象コミットでCIが成功していることと、配布用の署名・公証情報が必要です。公開前に[ネイティブ検証項目](https://github.com/owayo/kanade-ime/blob/main/docs/status.md#native-release-gates)も確認してください。署名情報がなければ採番やタグ作成より前に止まります。情報の名前はworkflowの事前検査と署名ステップで確認できます。
 
 採番は`cargo xtask bump-version`を使います。日本時間の`yy.m.counter`で、ワークスペースと両方のmacOSアプリを一括更新します。インストーラーの版は本体から生成します。同じタグがある場合は止めます。ブランチとタグは`git push --atomic`で一度に送信します。
@@ -63,6 +79,6 @@ EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエン�
 
 WindowsはMSIの登録失敗の取り消しと、EXE経由の新規インストール・削除を使い捨てのCIランナーで確認します。Burnの内部エンジン、MSIと各実行ファイルを署名した後、EXE全体を署名します。実際のアプリでのキー入力とAppContainer対応には、別途ネイティブ検証が必要です。
 
-DMGとEXEは変形せずジョブ間で受け渡します。公開前に対象名・件数・通常ファイルであることを確認し、`SHA256SUMS`を作成します。公開後の照合対象は、名前、サイズ、状態とGitHubが返すSHA-256です。既存のRelease添付を差し替える運用はしません。
+DMGとEXEは変形せずジョブ間で受け渡します。公開前に、インストーラーと同梱モデルの対象名・件数・通常ファイルであることを確認し、`SHA256SUMS`を作成します。公開後の照合対象は、名前、サイズ、状態とGitHubが返すSHA-256です。公開したインストーラーと`SHA256SUMS`は差し替えません。Release に後から足すのは、次の版で同梱するモデルの写しだけです。
 
 Homebrewとwingetの更新ジョブはありません。

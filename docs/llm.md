@@ -113,6 +113,12 @@ kanade-ui models import /path/to/tsumugi.gguf --accept-license --accept-local-pr
 kanade-ui models status
 ```
 
+Each Kanade release carries the model its installers bundle. The command below finds that file among the release assets by its SHA-256, checks it against `locks/llm.lock.toml`, keeps the copy in `artifacts/models/` and prints its path. Packaging runs the same step when no copy is there.
+
+```sh
+python3 .github/scripts/bundled_model.py --fetch
+```
+
 ## Qualification
 
 The worker must reproduce 373 independent tokenizer examples. On the 85 context-dependent ranking fixtures it must score every candidate, produce deterministic results, respect request bounds, choose at least 77 expected spellings and finish 95 percent of requests within 300 ms.

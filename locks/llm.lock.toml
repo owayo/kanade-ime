@@ -1,7 +1,9 @@
 # Identities registered in crates/kanade-llm/src/profile.rs. A test keeps this
 # file, the source constants and Cargo.lock in step: every registered model and
 # profile has one table here, and no table exists without a registration.
-# Both installers stage the release asset at build time. Import requires user consent.
+# Both installers bundle the model. Each release of release_repository carries
+# the file its installers bundle, and a build finds it among the release assets
+# by size and SHA-256. Import requires user consent.
 
 [runtime]
 crate = "llama-cpp-sys-2"
@@ -21,7 +23,7 @@ profile = "tsumugi-s"
 source = "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md"
 revision = "a7196909485ef2978ad7c9f0275d8f0be3f4782692428a27fe58e480c56e32cd"
 file = "tsumugi.gguf"
-download_url = "https://github.com/owayo/kanade-ime/releases/download/tsumugi-26.11.102/tsumugi.gguf"
+release_repository = "owayo/kanade-ime"
 size = 66507360
 sha256 = "62568f68fb2a549f0fa61ff62db38892ac7245d1bce0fa9ea8928ae70bbe3af7"
 license = "LicenseRef-Kanade-Model-1.0"
