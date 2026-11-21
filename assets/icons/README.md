@@ -26,4 +26,4 @@ cargo run -p kanade-winres --example brand-icon-preview -- <output directory>
 
 It writes `kanade-brand.ico`, with the same bitmaps as the DLL, and `kanade-brand-preview.png`, which shows every size on the light and the dark taskbar colour.
 
-Horizontal strokes of the Mincho glyph are thinner than one pixel at 16 and 20 pixels, so the character is soft at those sizes, as it is in the macOS menu bar. A sharper small size would need separately drawn artwork.
+The horizontal strokes of the Mincho glyph are about 3% of the box, which is less than a pixel up to 24 pixels. Sampled as they are, they turn into grey bands two pixels high. Two adjustments keep them dark. A size that would draw the thin strokes narrower than three quarters of a pixel widens them to that. Every size also moves the glyph by less than half a pixel, to where its strokes fall on whole pixels. Both are derived from the template, not tuned by hand: the thin stroke is the most common run of glyph pixels, and the move is the one that leaves the fewest half-covered pixels. At 16 pixels the character is still dense. A cleaner small size would need separately drawn artwork.

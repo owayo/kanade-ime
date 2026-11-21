@@ -7,13 +7,24 @@
 //! source uses: an opaque silhouette with the glyph cut out of it. The
 //! silhouette becomes the white box, the cutout becomes the black glyph, and
 //! the stroke is added around the silhouette.
+//!
+//! Every size is sampled from the template by area. Two adjustments keep the
+//! glyph readable where its thin strokes are narrower than a pixel: those
+//! strokes are widened to [`MIN_STROKE`], and the glyph is moved by less than
+//! half a pixel to where its strokes fall on whole pixels.
 use crate::{Error, icon::Image};
+use std::cmp::Reverse;
 
 /// The pixel sizes Windows asks an input method to provide.
 pub const SIZES: [u32; 6] = [16, 20, 24, 32, 40, 48];
 
 /// Samples along each axis of an output pixel.
 const SAMPLES: usize = 16;
+
+/// The width, in output pixels, that the glyph's thin strokes are widened to
+/// when a size would draw them narrower. A narrower stroke stays grey however
+/// it lies on the pixel grid.
+const MIN_STROKE: f64 = 0.75;
 
 /// The generated template carries faint noise where it is clear and stops just
 /// short of full opacity where it is solid. Alpha is stretched between these
@@ -36,6 +47,8 @@ struct Template {
     inside: Vec<bool>,
     /// The silhouette's box: left, top, width, height.
     bounds: [usize; 4],
+    /// Width of the glyph's thin strokes, in template pixels.
+    thin: usize,
 }
 
 impl Template {
@@ -89,23 +102,28 @@ impl Template {
         if glyph * 100 < boxed * 255 || glyph * 5 > boxed * 255 * 4 {
             return Err(Error::Template("has no glyph enclosed by its silhouette"));
         }
+        let thin = thin_stroke(wide, high, |x, y| {
+            let pixel = (top + y) * width + left + x;
+            inside[pixel] && body[pixel] < 128
+        });
         Ok(Self {
             width,
             body,
             inside,
             bounds,
+            thin,
         })
     }
 
     /// Resamples the silhouette's box to `side * side` cells by area.
-    /// Returns, per cell, the weight inside the silhouette and that weight
-    /// times the body coverage, followed by the weight of a whole cell.
+    /// Returns, per cell, the weight inside the silhouette and the weight of
+    /// the glyph in 255ths, followed by the weight of a whole cell.
     fn resample(&self, side: usize) -> (Vec<u64>, Vec<u64>, u64) {
         let [left, top, wide, high] = self.bounds;
         let columns = overlaps(wide, side);
         let rows = overlaps(high, side);
         let mut inside = vec![0u64; side * side];
-        let mut white = vec![0u64; side * side];
+        let mut glyph = vec![0u64; side * side];
         for &(source_y, y, tall) in &rows {
             let source_row = (top + source_y) * self.width + left;
             for &(source_x, x, broad) in &columns {
@@ -113,11 +131,11 @@ impl Template {
                 if self.inside[pixel] {
                     let weight = tall * broad;
                     inside[y * side + x] += weight;
-                    white[y * side + x] += weight * u64::from(self.body[pixel]);
+                    glyph[y * side + x] += weight * u64::from(255 - self.body[pixel]);
                 }
             }
         }
-        (inside, white, (wide * high) as u64)
+        (inside, glyph, (wide * high) as u64)
     }
 
     fn render(&self, size: u32) -> Result<Image, Error> {
@@ -128,7 +146,25 @@ impl Template {
         // The box fills the icon except for the stroke around it.
         let art = (pixels - 2) * SAMPLES;
         let side = pixels * SAMPLES;
-        let (inside, white, whole) = self.resample(art);
+        let (inside, mut glyph, whole) = self.resample(art);
+        let [_, _, wide, high] = self.bounds;
+        let thin = (self.thin * 2 * (pixels - 2)) as f64 / (wide + high) as f64;
+        if thin < MIN_STROKE {
+            let grow = (MIN_STROKE - thin) / 2.0 * SAMPLES as f64;
+            thicken(&mut glyph, &inside, whole, art, grow);
+        }
+        let (right, down) = settle(&glyph, art);
+        // The glyph's weight in a cell of the box, after it has been moved.
+        let moved = |cell: usize| {
+            let (x, y) = ((cell % art) as i64 - right, (cell / art) as i64 - down);
+            let within = (0..art as i64).contains(&x) && (0..art as i64).contains(&y);
+            let weight = if within {
+                glyph[y as usize * art + x as usize]
+            } else {
+                0
+            };
+            weight.min(inside[cell] * 255)
+        };
         let cell = |x: usize, y: usize| {
             let range = SAMPLES..SAMPLES + art;
             (range.contains(&x) && range.contains(&y)).then(|| (y - SAMPLES) * art + (x - SAMPLES))
@@ -141,8 +177,9 @@ impl Template {
         }
         let distance = distance_to(&marked, side);
         // Per output pixel: the weight of the box, the weight of its white
-        // part, and the opacity the stroke adds outside the box. The first two
-        // stay whole numbers so that a plain box and a plain stroke are exact.
+        // part in 255ths, and the opacity the stroke adds outside the box. The
+        // first two stay whole numbers so that a plain box and a plain stroke
+        // are exact.
         let mut boxed = vec![0u64; pixels * pixels];
         let mut lit = vec![0u64; pixels * pixels];
         let mut stroked = vec![0.0f64; pixels * pixels];
@@ -151,7 +188,7 @@ impl Template {
                 let pixel = (y / SAMPLES) * pixels + x / SAMPLES;
                 let covered = cell(x, y).map_or(0, |cell| {
                     boxed[pixel] += inside[cell];
-                    lit[pixel] += white[cell];
+                    lit[pixel] += inside[cell] * 255 - moved(cell);
                     inside[cell]
                 });
                 // The stroke is everything within one output pixel of the box.
@@ -258,6 +295,120 @@ fn overlaps(from: usize, to: usize) -> Vec<(usize, usize, u64)> {
         target += usize::from(end == target_end);
     }
     shared
+}
+
+/// The width of the glyph's thin strokes: the most common length of a run of
+/// glyph pixels along a column or a row of a `wide * high` area. Strokes of
+/// one weight give many runs of nearly one length; ends and joins do not.
+fn thin_stroke(wide: usize, high: usize, glyph: impl Fn(usize, usize) -> bool) -> usize {
+    // `runs[n]` counts the runs of `n` glyph pixels; `runs[0]` the gaps.
+    let mut runs = vec![0usize; wide.max(high) + 2];
+    let mut count = |length: usize, filled: &dyn Fn(usize) -> bool| {
+        let mut run = 0;
+        for at in 0..=length {
+            if at < length && filled(at) {
+                run += 1;
+            } else {
+                runs[run] += 1;
+                run = 0;
+            }
+        }
+    };
+    for x in 0..wide {
+        count(high, &|y| glyph(x, y));
+    }
+    for y in 0..high {
+        count(wide, &|x| glyph(x, y));
+    }
+    runs[0] = 0;
+    // A stroke's width varies by a pixel along its length, so neighbouring
+    // lengths count half. Of equally common widths, the narrower is the thin
+    // stroke.
+    (1..runs.len() - 1)
+        .max_by_key(|&length| {
+            (
+                runs[length - 1] + 2 * runs[length] + runs[length + 1],
+                Reverse(length),
+            )
+        })
+        .unwrap_or(1)
+}
+
+/// Grows the glyph by `radius` cells on every side without leaving the box.
+/// `glyph` and `inside` hold a weight per cell of a `side * side` grid.
+fn thicken(glyph: &mut [u64], inside: &[u64], whole: u64, side: usize, radius: f64) {
+    let solid: Vec<bool> = glyph
+        .iter()
+        .map(|&weight| weight * 2 >= whole * 255)
+        .collect();
+    let distance = distance_to(&solid, side);
+    for ((glyph, &inside), distance) in glyph.iter_mut().zip(inside).zip(distance) {
+        let grown = (radius + 1.0 - distance).clamp(0.0, 1.0);
+        *glyph = (*glyph).max((grown * (inside * 255) as f64).round() as u64);
+    }
+}
+
+/// How far to move the glyph, in cells to the right and down, so that its
+/// strokes fall on whole output pixels: the move of less than half a pixel
+/// each way that makes the most pixels fully glyph or fully clear. A thin
+/// stroke then darkens one row of pixels instead of greying two.
+///
+/// The measure is the sum over output pixels of the squared glyph weight.
+/// Among equal moves the shortest wins, and it never pushes the glyph out of
+/// the grid.
+fn settle(glyph: &[u64], side: usize) -> (i64, i64) {
+    // Sums of the glyph over every rectangle from the top-left corner.
+    let stride = side + 1;
+    let mut sums = vec![0u64; stride * stride];
+    let (mut left, mut top, mut right, mut bottom) = (side, side, 0, 0);
+    for y in 0..side {
+        let mut row = 0;
+        for x in 0..side {
+            let weight = glyph[y * side + x];
+            if weight > 0 {
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x);
+                bottom = bottom.max(y);
+            }
+            row += weight;
+            sums[(y + 1) * stride + x + 1] = sums[y * stride + x + 1] + row;
+        }
+    }
+    let within = |from: i64, to: i64| {
+        let clamp = |at: i64| at.clamp(0, side as i64) as usize;
+        (clamp(from), clamp(to))
+    };
+    let half = (SAMPLES / 2) as i64;
+    let step = SAMPLES as i64;
+    let mut best = (0u128, i64::MAX, (0, 0));
+    for down in -half..half {
+        for across in -half..half {
+            let leaves = left as i64 + across < 0
+                || top as i64 + down < 0
+                || right as i64 + across >= side as i64
+                || bottom as i64 + down >= side as i64;
+            if leaves {
+                continue;
+            }
+            let mut measure = 0u128;
+            for y in (0..side as i64).step_by(SAMPLES) {
+                let (y0, y1) = within(y - down, y + step - down);
+                for x in (0..side as i64).step_by(SAMPLES) {
+                    let (x0, x1) = within(x - across, x + step - across);
+                    let weight = sums[y1 * stride + x1] + sums[y0 * stride + x0]
+                        - sums[y0 * stride + x1]
+                        - sums[y1 * stride + x0];
+                    measure += u128::from(weight) * u128::from(weight);
+                }
+            }
+            let length = across * across + down * down;
+            if measure > best.0 || (measure == best.0 && length < best.1) {
+                best = (measure, length, (across, down));
+            }
+        }
+    }
+    best.2
 }
 
 /// The distance from every cell of a `side * side` grid to the nearest marked
@@ -553,5 +704,140 @@ mod tests {
             assert!(share(&|level| level >= 224) >= 30, "{size}: white share");
             assert!(share(&|level| level < 128) >= 10, "{size}: glyph share");
         }
+    }
+
+    #[test]
+    fn the_shipped_glyph_stays_dark_at_every_size() {
+        let template = Template::decode(&std::fs::read(TEMPLATE).unwrap()).unwrap();
+        // The horizontal strokes of the Mincho glyph: about 3% of the box.
+        let [_, _, wide, high] = template.bounds;
+        let thin = template.thin * 2000 / (wide + high);
+        assert!((25..=35).contains(&thin), "thin stroke {thin} per mille");
+        for size in SIZES {
+            let image = template.render(size).unwrap();
+            let levels: Vec<u8> = image
+                .rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] == 255)
+                .map(|pixel| pixel[0])
+                .collect();
+            let dark = levels.iter().filter(|&&level| level < 64).count();
+            let grey = levels
+                .iter()
+                .filter(|level| (64..192).contains(*level))
+                .count();
+            assert!(dark > grey, "{size}: {dark} dark and {grey} grey pixels");
+        }
+    }
+
+    #[test]
+    fn the_thin_stroke_is_the_most_common_run_of_glyph_pixels() {
+        // Two bars 3 pixels high crossed by a stem 8 pixels wide, as in a
+        // Mincho glyph, and a short tick 2 pixels wide.
+        let glyph = |x: usize, y: usize| {
+            let bars = (5..45).contains(&x) && ((10..13).contains(&y) || (30..33).contains(&y));
+            let stem = (20..28).contains(&x) && (5..45).contains(&y);
+            let tick = (40..42).contains(&x) && (36..40).contains(&y);
+            bars || stem || tick
+        };
+        assert_eq!(thin_stroke(50, 50, glyph), 3);
+        assert_eq!(thin_stroke(50, 50, |_, _| false), 1);
+        // The bar of the square template is 60 by 20.
+        let template = Template::decode(&png(180, 200, boxed_bar)).unwrap();
+        assert_eq!(template.thin, 20);
+    }
+
+    #[test]
+    fn thickening_grows_the_glyph_evenly_inside_the_box() {
+        // A 2-cell column in a 12-cell grid whose last two rows lie outside the box.
+        let side = 12;
+        let whole = 4;
+        let inside: Vec<u64> = (0..side * side)
+            .map(|cell| if cell / side < 10 { whole } else { 0 })
+            .collect();
+        let mut glyph: Vec<u64> = (0..side * side)
+            .map(|cell| {
+                if (5..7).contains(&(cell % side)) && cell / side < 10 {
+                    whole * 255
+                } else {
+                    0
+                }
+            })
+            .collect();
+        thicken(&mut glyph, &inside, whole, side, 1.5);
+        for y in 0..side {
+            let row: Vec<u64> = (0..side).map(|x| glyph[y * side + x]).collect();
+            let expected: [u64; 12] = if y < 10 {
+                // One whole cell and half a cell on either side of the column.
+                [0, 0, 0, 510, 1020, 1020, 1020, 1020, 510, 0, 0, 0]
+            } else {
+                [0; 12]
+            };
+            assert_eq!(row, expected, "row {y}");
+        }
+    }
+
+    /// A grid of `pixels` output pixels a side with a glyph of whole cells.
+    fn cells(pixels: usize, glyph: impl Fn(usize, usize) -> bool) -> (Vec<u64>, usize) {
+        let side = pixels * SAMPLES;
+        let weights = (0..side * side)
+            .map(|cell| u64::from(glyph(cell % side, cell / side)))
+            .collect();
+        (weights, side)
+    }
+
+    #[test]
+    fn settling_moves_strokes_onto_whole_pixels() {
+        let row = SAMPLES;
+        let wide = |x: usize| (row..5 * row).contains(&x);
+        // On the grid already: one pixel row and one pixel column.
+        let (glyph, side) = cells(6, |x, y| {
+            (wide(x) && (2 * row..3 * row).contains(&y))
+                || (wide(y) && (4 * row..5 * row).contains(&x))
+        });
+        assert_eq!(settle(&glyph, side), (0, 0));
+        // A row that straddles two pixel rows moves the shorter way.
+        let low = |x: usize, y: usize| wide(x) && (3 * row + 3..4 * row + 3).contains(&y);
+        let (glyph, side) = cells(6, low);
+        assert_eq!(settle(&glyph, side), (0, -3));
+        let (glyph, side) = cells(6, |x, y| wide(x) && (3 * row - 5..4 * row - 5).contains(&y));
+        assert_eq!(settle(&glyph, side), (0, 5));
+        // Both ways at once.
+        let (glyph, side) = cells(6, |x, y| {
+            (row + 6..2 * row + 6).contains(&x) && (2 * row - 2..3 * row - 2).contains(&y)
+        });
+        assert_eq!(settle(&glyph, side), (-6, 2));
+        // A speck at the top edge would leave the grid if the row moved up.
+        let (glyph, side) = cells(6, |x, y| low(x, y) || ((40..42).contains(&x) && y < 2));
+        assert_eq!(settle(&glyph, side), (0, 0));
+        assert_eq!(settle(&vec![0; side * side], side), (0, 0));
+    }
+
+    #[test]
+    fn a_thin_stroke_off_the_grid_becomes_one_dark_row() {
+        // A bar 4 template pixels high, centred on the boundary between two
+        // output rows of the 16-pixel icon: 0.4 pixels, split evenly.
+        let thin = |x, y| {
+            let mark = (20..160).contains(&x) && (30..170).contains(&y);
+            let bar = (60..120).contains(&x) && (78..82).contains(&y);
+            if mark && !bar { 255 } else { 0 }
+        };
+        let images = render(&png(180, 200, thin)).unwrap();
+        // How much of each pixel down one column of the box the glyph covers.
+        let ink = |image: &Image, x: u32| -> Vec<f64> {
+            (1..image.size() - 1)
+                .map(|y| f64::from(255 - pixel(image, x, y)[0]) / 255.0)
+                .collect()
+        };
+        // 16 pixels: widened to about three quarters of a pixel, all on one row.
+        let rows = ink(&images[0], 7);
+        let total: f64 = rows.iter().sum();
+        assert!((0.70..=0.76).contains(&total), "widened to {total}");
+        assert_eq!(rows.iter().filter(|&&row| row > 0.0).count(), 1, "{rows:?}");
+        // 48 pixels: the bar is 1.3 pixels high there and keeps that height.
+        let total: f64 = ink(&images[5], 24).iter().sum();
+        assert!((1.29..=1.34).contains(&total), "sampled as {total}");
     }
 }
