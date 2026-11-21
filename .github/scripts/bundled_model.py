@@ -15,6 +15,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 # A verified copy that later builds reuse.
 CACHE = ROOT / "artifacts/models"
+# The installers that bundle the model. A release of the app carries both.
+INSTALLERS = (
+    "kanade-ime-aarch64-apple-darwin.dmg",
+    "kanade-ime-x86_64-pc-windows-msvc.exe",
+)
 
 
 def locked_model():
@@ -144,9 +149,11 @@ def fetch(model):
     with tempfile.TemporaryDirectory(dir=CACHE) as temporary:
         staged = Path(temporary) / model["file"]
         url = found[1]["browser_download_url"]
-        with urllib.request.urlopen(url, timeout=90) as response:
-            with staged.open("wb") as output:
-                shutil.copyfileobj(response, output)
+        with (
+            urllib.request.urlopen(url, timeout=90) as response,
+            staged.open("wb") as output,
+        ):
+            shutil.copyfileobj(response, output)
         verify_model(staged, model)
         staged.replace(cached)
     return cached
