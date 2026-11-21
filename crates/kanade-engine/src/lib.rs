@@ -105,8 +105,16 @@ pub struct Engine<C> {
     learning: Option<LearningService>,
     date: Option<dates::Calendar>,
     llm: Option<Box<dyn kanade_llm::Rerank>>,
+    /// Score leads that change a displayed conversion, registered with the model.
+    preview: kanade_llm::profile::Preview,
 }
 impl<C: ConversionEngine> Engine<C> {
+    /// Uses the thresholds of another model file. A new engine starts with
+    /// those of the registered model.
+    pub fn set_preview(&mut self, preview: kanade_llm::profile::Preview) {
+        self.preview = preview;
+    }
+
     /// Installs the background reranker. It is used only while `llm` is enabled.
     pub fn set_reranker(&mut self, llm: Option<Box<dyn kanade_llm::Rerank>>) {
         for session in self.sessions.values_mut() {
@@ -169,6 +177,7 @@ impl<C: ConversionEngine> Engine<C> {
             learning,
             date: None,
             llm: None,
+            preview: kanade_llm::profile::CATALOG[0].preview,
         }
     }
     pub fn open(&mut self, hello: &Hello) -> Result<Welcome, Code> {

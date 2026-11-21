@@ -38,17 +38,19 @@ pub(super) fn teacher_spelling(reading: &str, shown: &str) -> Option<(String, u1
 }
 
 impl Proposal {
-    fn offer(&mut self, value: String, penalty: f32, limit: usize) {
+    // `change` names the segments that `value` respells, when it keeps their boundaries.
+    fn offer(&mut self, value: String, penalty: f32, limit: usize, change: Option<Vec<Change>>) {
         if self.job.candidates.len() < limit
             && !value.is_empty()
             && value.chars().count() <= limits::CANDIDATE_CHARS
             && !value.chars().any(char::is_control)
             && !kanade_llm::profile::TSUMUGI.prompt.reserves(&value)
             && !self.job.candidates.contains(&value)
-            && preserves_name_spelling(&self.job.candidates[0], &value)
+            && preserves_name_spelling(&self.job.candidates[0], &value, self.policy.katakana)
         {
             self.job.candidates.push(value);
             self.penalties.push(penalty);
+            self.changes.push(change);
         }
     }
 }
@@ -59,11 +61,12 @@ pub(super) fn widen(p: &mut Proposal, parts: &[Segment], lists: &[Vec<FocusCandi
             if let Some(c) = list.get(rank)
                 && !c.transliteration
             {
-                let penalty = RANK_PENALTY * rank as f32;
+                let penalty = p.policy.rank * rank as f32;
                 p.offer(
                     substitute(parts, pos, &c.value),
                     penalty,
                     limits::SENTENCE_POOL - SPLIT_RESERVE,
+                    Some(vec![(pos, c.value.clone())]),
                 );
             }
         }
@@ -160,7 +163,7 @@ pub(super) fn extend_splits(
             if let Some(c) = lists[pos].get(1).filter(|c| !c.transliteration) {
                 let mut text = split.clone();
                 text.replace_range(range, &c.value);
-                p.offer(text, p.penalties[span.index] + 2.0, limit);
+                p.offer(text, p.penalties[span.index] + 2.0, limit, None);
             }
         }
     }
@@ -198,8 +201,9 @@ pub(super) fn paired(p: &mut Proposal, parts: &[Segment], lists: &[Vec<FocusCand
                     .collect();
                 p.offer(
                     value,
-                    1.5 + (first_rank + second_rank) as f32 * RANK_PENALTY,
+                    1.5 + (first_rank + second_rank) as f32 * p.policy.rank,
                     limit,
+                    Some(vec![(first, a.value.clone()), (second, b.value.clone())]),
                 );
             }
         }
@@ -287,8 +291,9 @@ pub(super) fn resegment<C: ConversionEngine>(
                 let index = p.job.candidates.len();
                 p.offer(
                     value,
-                    4.0 + (i + j) as f32 * RANK_PENALTY,
+                    4.0 + (i + j) as f32 * p.policy.rank,
                     limits::SENTENCE_POOL,
+                    None,
                 );
                 if p.job.candidates.len() > index {
                     splits.push(Split {

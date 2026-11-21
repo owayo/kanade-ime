@@ -36,6 +36,64 @@ pub struct Model {
     pub attribution: &'static str,
     /// The only profile this file may be used with.
     pub profile: &'static Profile,
+    /// When a score of these weights changes the displayed conversion.
+    pub preview: Preview,
+}
+
+/// Leads, in nats of the scores one model file produces, that a spelling needs
+/// before it replaces the displayed conversion. They describe how sharply
+/// those weights separate spellings, so they are registered with the file and
+/// change only together with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Preview {
+    /// Over the displayed text, for a text without punctuation.
+    pub sentence: f32,
+    /// The same for one clause of a punctuated text.
+    pub clause: f32,
+    /// Over the next best spelling, as a share of the lead over the displayed text.
+    pub runner_up: f32,
+    /// Further lead for a spelling outside the first nine candidates.
+    pub added: f32,
+    /// For the final inflected word of a text without preceding context.
+    pub ending: f32,
+    /// Cost of each step down a segment's dictionary order.
+    pub rank: f32,
+    /// For digits over kanji numerals when the committed text shows ASCII digits.
+    pub digits_seen: f32,
+    /// The same when it shows no number.
+    pub digits: f32,
+    /// Later candidates scored besides the first nine.
+    pub shortlist: u8,
+    /// How far their character cost may exceed the best of those nine, in
+    /// eighths of a nat.
+    pub shortlist_cost: u16,
+    /// Spellings accepted in one window, each scored around the previous one.
+    pub rounds: u8,
+    /// Katakana characters in a window from which the weights are not trusted
+    /// to respell its kanji, as beside a transliterated name. Zero trusts them
+    /// in every window.
+    pub katakana: u8,
+}
+impl Preview {
+    /// The form recorded in `locks/llm.lock.toml`.
+    pub fn spec(&self) -> String {
+        format!(
+            "sentence={} clause={} runner_up={} added={} ending={} rank={} digits_seen={} \
+             digits={} shortlist={} shortlist_cost={} rounds={} katakana={}",
+            self.sentence,
+            self.clause,
+            self.runner_up,
+            self.added,
+            self.ending,
+            self.rank,
+            self.digits_seen,
+            self.digits,
+            self.shortlist,
+            self.shortlist_cost,
+            self.rounds,
+            self.katakana,
+        )
+    }
 }
 
 /// Load-time tokenizer settings of a profile.
@@ -229,6 +287,20 @@ pub static CATALOG: &[Model] = &[Model {
     revision: "a7196909485ef2978ad7c9f0275d8f0be3f4782692428a27fe58e480c56e32cd",
     attribution: "Kanade",
     profile: &TSUMUGI,
+    preview: Preview {
+        sentence: 5.0,
+        clause: 7.0,
+        runner_up: 0.75,
+        added: 2.0,
+        ending: 1.5,
+        rank: 0.75,
+        digits_seen: 0.0,
+        digits: 3.0,
+        shortlist: 6,
+        shortlist_cost: 32,
+        rounds: 1,
+        katakana: 8,
+    },
 }];
 
 /// Every model this build accepts: the catalogue, plus the fixtures in a test
@@ -399,6 +471,7 @@ pub mod fixture {
             revision: model.revision,
             attribution: model.attribution,
             profile: model.profile,
+            preview: model.preview,
         }
     }
     pub fn alt() -> &'static Model {
@@ -476,6 +549,7 @@ mod tests {
             entry(&lines, "license", model.license);
             entry(&lines, "attribution", model.attribution);
             entry(&lines, "terms_sha256", &terms_sha256(model));
+            entry(&lines, "preview", &model.preview.spec());
             if !profiles.iter().any(|known| known.id == model.profile.id) {
                 profiles.push(model.profile);
             }

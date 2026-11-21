@@ -2,7 +2,7 @@
 //! Quantized character probabilities stored in Tsumugi's GGUF metadata.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::read::ZlibDecoder;
-use kanade_llm::{Job, frame::Fault};
+use kanade_llm::{Job, frame::Fault, profile::Preview};
 use std::{collections::HashMap, io::Read};
 
 pub(super) const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -55,6 +55,10 @@ pub(super) struct Prior {
     levels: Vec<(Table, Table)>,
     radix: u64,
     history_modulus: u64,
+    /// Later candidates scored besides the first nine, and how far their
+    /// cost may exceed the best of those nine.
+    extras: usize,
+    cutoff: i32,
 }
 
 // The four numbers in KNG2 are unsigned quarter-nat units (quarter units for multipliers).
@@ -91,7 +95,7 @@ impl Policy {
 }
 
 impl Prior {
-    pub(super) fn decode(encoded: &[u8]) -> Result<Self, Fault> {
+    pub(super) fn decode(encoded: &[u8], preview: &Preview) -> Result<Self, Fault> {
         if encoded.len() > MAX_BYTES {
             return Err(Fault::ModelRejected);
         }
@@ -104,7 +108,10 @@ impl Prior {
         if bytes.len() > MAX_BYTES {
             return Err(Fault::ModelRejected);
         }
-        Self::parse(&bytes).ok_or(Fault::ModelRejected)
+        let mut prior = Self::parse(&bytes).ok_or(Fault::ModelRejected)?;
+        prior.extras = usize::from(preview.shortlist);
+        prior.cutoff = i32::from(preview.shortlist_cost);
+        Ok(prior)
     }
 
     fn parse(mut data: &[u8]) -> Option<Self> {
@@ -133,6 +140,8 @@ impl Prior {
             levels,
             radix: radix as u64,
             history_modulus: (radix as u64).pow(order as u32 - 2),
+            extras: 0,
+            cutoff: 0,
         })
     }
 
@@ -174,12 +183,14 @@ impl Prior {
             .iter()
             .map(|s| self.cost(history, s))
             .collect();
-        let cutoff = costs[..keep].iter().min().copied().unwrap_or_default() + 32;
+        let cutoff = costs[..keep].iter().min().copied().unwrap_or_default() + self.cutoff;
         let mut extra: Vec<_> = (keep..costs.len())
             .filter(|&i| costs[i] <= cutoff)
             .collect();
         extra.sort_by_key(|&i| costs[i]);
-        (0..keep).chain(extra.into_iter().take(6)).collect()
+        (0..keep)
+            .chain(extra.into_iter().take(self.extras))
+            .collect()
     }
 
     pub(super) fn combine(&self, job: &Job, scores: &mut [Option<f32>]) {

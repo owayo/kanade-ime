@@ -232,7 +232,7 @@ fn load(
         return Err(Fault::ProfileMismatch);
     }
     let threads = threads.clamp(1, limits::THREADS);
-    let runtime = llama::Runtime::load(path, threads, profile)?;
+    let runtime = llama::Runtime::load(path, threads, profile, &model.preview)?;
     // The runtime reads the same path again. Refuse a file replaced meanwhile.
     let after = identity(&File::open(path).map_err(|_| Fault::ModelUnreadable)?)?;
     if before != after || before.0 != size {
@@ -378,7 +378,12 @@ mod llama {
     impl Runtime {
         /// Loads the file with the tokenizer overrides and the end token of
         /// `profile`.
-        pub fn load(path: &str, threads: u8, profile: &Profile) -> Result<Self, Fault> {
+        pub fn load(
+            path: &str,
+            threads: u8,
+            profile: &Profile,
+            preview: &profile::Preview,
+        ) -> Result<Self, Fault> {
             let path = CString::new(path).map_err(|_| Fault::ModelUnreadable)?;
             // SAFETY: plain C calls with valid, NUL-terminated arguments. The
             // override array ends with an empty key as the API requires.
@@ -474,7 +479,10 @@ mod llama {
                     if written != size {
                         return Err(Fault::ModelRejected);
                     }
-                    runtime.prior = Some(char_prior::Prior::decode(&encoded[..size as usize])?);
+                    runtime.prior = Some(char_prior::Prior::decode(
+                        &encoded[..size as usize],
+                        preview,
+                    )?);
                 }
                 Ok(runtime)
             }
