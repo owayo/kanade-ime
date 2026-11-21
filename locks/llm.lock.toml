@@ -18,19 +18,19 @@ backend = "cpu"
 build_env = "GGML_METAL=OFF"
 
 [model."tsumugi-s-f16"]
-version = "26.11.102"
+version = "26.11.105"
 profile = "tsumugi-s"
 source = "https://github.com/owayo/kanade-ime/blob/main/docs/llm.md"
-revision = "a7196909485ef2978ad7c9f0275d8f0be3f4782692428a27fe58e480c56e32cd"
+revision = "b17f795384600ae00355adb06a51c9e892566de4da996b3d1cbcf2b56d36f3b1"
 file = "tsumugi.gguf"
 release_repository = "owayo/kanade-ime"
 size = 66507360
-sha256 = "62568f68fb2a549f0fa61ff62db38892ac7245d1bce0fa9ea8928ae70bbe3af7"
+sha256 = "208aaf03f9264dd69d4e84165467514e1061a489a8097153f1aa41c6edca911a"
 license = "LicenseRef-Kanade-Model-1.0"
 attribution = "Kanade"
-terms_sha256 = "b4002897e8d631a4b5030d954b78834f1796167113ba911ec2d0db3d89300e58"
+terms_sha256 = "d70678531f2e6004795287330037d83727679b87a8ab43f10381ec64af5fc203"
 # Score leads that change the displayed conversion, fitted to these weights.
-preview = "sentence=5 clause=7 runner_up=0.75 added=2 ending=1.5 rank=0.75 digits_seen=0 digits=3 shortlist=6 shortlist_cost=32 rounds=1 katakana=8"
+preview = "sentence=3 clause=3 runner_up=0.75 added=2 ending=1.5 rank=0.75 digits_seen=0 digits=4 shortlist=6 shortlist_cost=32 rounds=2 katakana=0"
 
 [profile."tsumugi-s"]
 version = 1

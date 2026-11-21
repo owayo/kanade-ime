@@ -19,10 +19,23 @@ The build copies Mozc's license/credits, hasami's code/data notices and collecte
 
 The optional IPAdic `.hsd` dictionary is acquired separately from hasami release v26.11.103. Its artifact pin in `locks/dictionary.lock.toml` is independent of the library commit; both use dictionary format v6. Preserve its IPAdic copyright and license notices with the dictionary.
 
-The Windows and macOS installers include Tsumugi for local use under LicenseRef-Kanade-Model-1.0. The import dialog displays the file identity, model license identifier and local-processing terms. [Tsumugi model](llm.md#tsumugi-model)
+The Windows and macOS installers include Tsumugi for local use under LicenseRef-Kanade-Model-1.0. The import dialog displays the file identity, model license identifier and local-processing terms. [Tsumugi model](llm.md#tsumugi-model) · [Training data](#tsumugi-training-data)
 
 To regenerate the spelling index, save both pinned archives in the same directory and run `python tools/english_spellings.py <archive-directory>` with Python 3.11 or later. The generator checks both archive digests before writing the index. [Small lexicon](https://sudachi.s3.ap-northeast-1.amazonaws.com/sudachidict-raw/v1/20261015/small_lex.zip) · [Core lexicon](https://sudachi.s3.ap-northeast-1.amazonaws.com/sudachidict-raw/v1/20261015/core_lex.zip)
 
 ## Windows installer
 
 The Windows EXE includes WiX Burn from WiX 4.0.6, licensed under the Microsoft Reciprocal License (MS-RL). Its Japanese bootstrapper localization is adapted from the same version under that license. [WIX-LICENSE.txt](../packaging/windows/WIX-LICENSE.txt) contains the notice and terms and is installed with the Windows payload. WiX source: https://github.com/wixtoolset/wix4/tree/v4.0.6.
+
+## Tsumugi training data
+
+The installers contain the Tsumugi weights and none of the text the weights were trained on. The training text came from these sources. Readings were added to it, and passages were cut into conversion examples.
+
+| Source | Credit and terms |
+|---|---|
+| Japanese Wikipedia | Text by the contributors of Japanese Wikipedia, licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). Tsumugi 26.11.105 took its examples from 1,260,029 articles of the `20231101.ja` snapshot in the [wikimedia/wikipedia dataset](https://huggingface.co/datasets/wikimedia/wikipedia). The articles and sentences used for measurement were left out. An article and its authors are found at `https://ja.wikipedia.org/?curid=<page ID>` |
+| Aozora Bunko | Works whose term of copyright has ended, entered and proofread by the volunteers of [Aozora Bunko](https://www.aozora.gr.jp/) |
+| e-Gov 法令検索 | Statutes published by [e-Gov 法令検索](https://laws.e-gov.go.jp/) |
+| Generated sentences | Sentences written for training with language models |
+
+hasami and its dictionaries supplied the readings, and the Mozc dictionary supplied the candidate spellings that the weights learned to compare. Both are listed above with their notices.
