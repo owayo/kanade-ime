@@ -7,6 +7,7 @@ mod cut_data;
 mod edit_data;
 pub(super) mod probe;
 mod search;
+mod spelling_data;
 
 use super::*;
 use kanade_llm::{Job, Poll, Rerank, limits};
@@ -33,6 +34,30 @@ impl Proposal {
             self.before, self.job.prefix, self.job.candidates[index], self.after
         )
     }
+}
+
+// Keep the numerical value chosen by the converter. Use the width of digits
+// already typed in committed text only when that text uses ASCII digits consistently.
+fn contextual_digits(surface: &str, committed: &str) -> Option<String> {
+    let wide = |c: char| ('０'..='９').contains(&c);
+    if !surface.contains(wide)
+        || !committed.bytes().any(|b| b.is_ascii_digit())
+        || committed.contains(wide)
+    {
+        return None;
+    }
+    Some(
+        surface
+            .chars()
+            .map(|c| {
+                if wide(c) {
+                    char::from(b'0' + (u32::from(c) - u32::from('０')) as u8)
+                } else {
+                    c
+                }
+            })
+            .collect(),
+    )
 }
 
 pub(super) struct Pending {
@@ -222,6 +247,23 @@ fn contextual_proposal(parts: &[Segment], lists: &[Vec<FocusCandidate>], mut job
     job.candidates
         .push(parts.iter().map(|s| s.value.as_str()).collect());
     let mut penalties = vec![0.0];
+    // Reserve at most two slots for source-confirmed alternatives. They still
+    // need a positive model score lead and pass the normal preview checks.
+    for (pos, part) in parts.iter().enumerate() {
+        if let Some((spelling, support)) = search::teacher_spelling(&part.reading, &part.value) {
+            let value = search::substitute(parts, pos, &spelling);
+            if value.chars().count() <= limits::CANDIDATE_CHARS
+                && preserves_name_spelling(&job.candidates[0], &value)
+                && !job.candidates.contains(&value)
+            {
+                job.candidates.push(value);
+                penalties.push(if support >= 5 { -3.5 } else { -2.5 });
+                if job.candidates.len() == 3 {
+                    break;
+                }
+            }
+        }
+    }
     // Take the next distinct alternative at each position before exploring lower ranks.
     for rank in 1..=3 {
         for (pos, list) in lists.iter().enumerate() {
@@ -521,19 +563,22 @@ impl<C: ConversionEngine> Engine<C> {
         if best >= proposal.original_count && scores[best] - scores[order[1]] >= expanded_margin {
             winner = best;
         }
-        if winner == 0
-            || (!job.context.is_empty()
-                && !preserves_name_spelling(&proposal.render(0), &proposal.render(winner)))
+        if winner == 0 && !pending.context.bytes().any(|b| b.is_ascii_digit()) {
+            return status(false, RefinementOutcome::Evaluated);
+        }
+        let surface = proposal.render(winner);
+        if winner != 0
+            && !job.context.is_empty()
+            && !preserves_name_spelling(&proposal.render(0), &surface)
         {
             return status(false, RefinementOutcome::Evaluated);
         }
-        self.apply_sentence(
-            session,
-            seq,
-            poll,
-            proposal.render(winner),
-            CandidateSource::Llm,
-        )
+        let surface = match contextual_digits(&surface, &pending.context) {
+            Some(adjusted) => adjusted,
+            None if winner == 0 => return status(false, RefinementOutcome::Evaluated),
+            None => surface,
+        };
+        self.apply_sentence(session, seq, poll, surface, CandidateSource::Llm)
     }
 
     fn apply_sentence(
@@ -577,6 +622,20 @@ impl<C: ConversionEngine> Engine<C> {
 #[cfg(test)]
 mod tests {
     use super::preserves_name_spelling;
+
+    #[test]
+    fn decimal_width_follows_unambiguous_committed_digits() {
+        use super::contextual_digits;
+        let surface = "第１２回の３日目、二人でＡ組へ";
+        assert_eq!(
+            contextual_digits(surface, "前回は9日間。").as_deref(),
+            Some("第12回の3日目、二人でＡ組へ")
+        );
+        for context in ["", "第九回。", "第９回。", "9月１０日。"] {
+            assert_eq!(contextual_digits(surface, context), None);
+        }
+        assert_eq!(contextual_digits("三人で12回", "9月に"), None);
+    }
 
     #[test]
     fn ending_keeps_exactly_one_terminal_mark() {

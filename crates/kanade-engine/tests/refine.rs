@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 const APP: &str = "com.apple.TextEdit";
 const CONTEXT: &str = "明日は市民ホールで";
+const DIGIT_CONTEXT: &str = "昨日は2匹。";
 
 #[derive(Default)]
 struct Calls {
@@ -39,6 +40,7 @@ fn table(reading: &str) -> Vec<(String, Vec<&'static str>, usize)> {
             ),
         ],
         "こうえん" => one(reading, vec!["公園", "講演", "公演", "後援"]),
+        "さんびき" => one(reading, vec!["３匹", "三匹"]),
         "こんげつまつ" => one(reading, vec!["今月末", "今月松", "根月末"]),
         "こうえんをきく" => vec![
             ("こうえんを".into(), vec!["公園を", "講演を", "公演を"], 0),
@@ -162,7 +164,7 @@ impl ConversionEngine for Backend {
     }
     fn key(&mut self, id: SessionId, key: &Key, preceding: &str) -> Result<Snapshot> {
         if id == SessionId::scripted(2) {
-            assert!(preceding.is_empty() || preceding == CONTEXT);
+            assert!(matches!(preceding, "" | CONTEXT | DIGIT_CONTEXT));
             return self
                 .probe
                 .as_mut()
@@ -1231,4 +1233,31 @@ fn nearby_joint_spellings_keep_the_displayed_default() {
             assert!(matches!(response.body, Some(response::Body::Candidates(_))));
         }
     }
+}
+
+#[test]
+fn width_only_preview_keeps_the_models_default_and_commits_the_displayed_digits() {
+    let mut f = fixture(settings(true));
+    f.context.preceding_text = DIGIT_CONTEXT.into();
+    let initial = f.convert("さんびき");
+    assert_eq!(surface(initial.preedit.as_ref().unwrap()), "３匹");
+    f.llm.answer(&[Some(0.0), Some(0.0)]);
+    let request = Request {
+        body: Some(request::Body::Poll(CandidatePoll {
+            revision: Some(f.revision),
+            candidate_revision: page(&initial).candidate_revision,
+            preview_event_seq: Some(f.seq + 1),
+        })),
+    };
+    let response = f.engine.handle(f.connection, request).unwrap().unwrap();
+    let Some(response::Body::Key(preview)) = response.body else {
+        panic!("expected a width-only preview");
+    };
+    assert_eq!(surface(preview.preedit.as_ref().unwrap()), "3匹");
+    assert!(preview.commit.is_none());
+    f.seq = preview.event_seq;
+    f.revision = preview.revision.unwrap();
+    f.ack(&preview);
+    let confirmed = f.special(SpecialKey::Enter);
+    assert_eq!(confirmed.commit.as_ref().unwrap().value, "3匹");
 }
