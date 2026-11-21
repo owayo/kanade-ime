@@ -2,6 +2,7 @@
 //! Starts isolated engines and inspects their processes. Shared by the
 //! Windows integration tests; nothing here touches an installed engine.
 #![allow(dead_code)]
+pub mod sandbox;
 use kanade_ipc::{frontend::Client, windows::Pipe};
 use std::{
     ffi::c_void,
@@ -182,6 +183,12 @@ pub fn label(name: &str) -> String {
 }
 pub fn engine_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_kanade-engine"))
+}
+/// The program that stands in for a frontend in another process. See
+/// `stand_in.rs`.
+#[cfg(feature = "fault-injection")]
+pub fn stand_in_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_kanade-stand-in"))
 }
 /// An engine command on a private endpoint with its own data directory.
 pub fn engine_command(label: &str, data: &Path) -> Command {

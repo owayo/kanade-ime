@@ -153,10 +153,12 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/package-windows.ps1 -Unsigned
       # The packaging step built the pinned worker these tests need. Each one
-      # starts its own engine on a private pipe with a temporary profile.
+      # starts its own engine on a private pipe with a temporary profile. The
+      # sandbox tests run a frontend in an AppContainer made without a
+      # registered profile.
       - name: Test the Windows engine process with the pinned worker
         if: runner.os == 'Windows'
-        run: cargo test --locked -p kanade-engine --test windows_pipe --test windows_supervisor -- --ignored --test-threads 1
+        run: cargo test --locked -p kanade-engine --test windows_pipe --test windows_supervisor --test windows_sandbox -- --ignored --test-threads 1
       - name: Test Windows installation and rollback
         if: runner.os == 'Windows'
         shell: pwsh

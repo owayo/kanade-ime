@@ -357,6 +357,14 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
         Event::FatalListener,
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)),
     )?;
+    // The pipe admits packaged applications, and a frontend connects only
+    // after it has checked which program serves the pipe. Without this a
+    // text service inside such an application could open the pipe and
+    // still never convert. Failing here costs those hosts only.
+    #[cfg(windows)]
+    if kanade_ipc::windows::identify_to_packages().is_err() {
+        record(Event::SandboxedHostsUnreachable);
+    }
     #[cfg(windows)]
     let mut listener = match path
         .to_str()

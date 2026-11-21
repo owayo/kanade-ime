@@ -4,11 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+# The package has a second binary for its tests; `cargo run` means the engine.
+default-run = "kanade-engine"
 
 [features]
 # Lets a test make the engine fail on purpose. The tests of this package turn
 # it on through the development dependency below; no shipped build has it.
 fault-injection = []
+
+# Stands in for a frontend in a process of its own, in the tests of this
+# package. Built only with the test feature.
+[[bin]]
+name = "kanade-stand-in"
+path = "tests/windows_support/stand_in.rs"
+required-features = ["fault-injection"]
 
 [dependencies]
 anyhow.workspace = true
