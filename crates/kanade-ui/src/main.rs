@@ -2,8 +2,9 @@ use anyhow::{Result, bail};
 use kanade_ipc::{Manage, manage::Action};
 mod dictionary;
 /// Windows opens a console for this program when it is started from the Start
-/// menu or Explorer. Releasing a console that no other process uses closes
-/// it; a shell that started the program keeps its own.
+/// menu or Explorer, unless the packaged manifest tells Windows 11 24H2 or
+/// later not to. Releasing a console that no other process uses closes it; a
+/// shell that started the program keeps its own.
 #[cfg(all(feature = "native", windows))]
 fn release_own_console() {
     #[link(name = "kernel32")]

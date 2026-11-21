@@ -109,6 +109,11 @@ try {
         if (-not (Test-Path -LiteralPath $shortcut)) { throw 'The Start menu shortcut is missing' }
         $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
         if ($target -ne (Join-Path $application 'kanade-ui.exe')) { throw 'The Start menu shortcut does not open the installed settings' }
+        # The shortcut starts a console program. Its manifest keeps Windows from
+        # opening a console for it, and must still declare GPUI's DPI awareness.
+        $settingsImage = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($target))
+        if ($settingsImage -notmatch 'consoleAllocationPolicy[^<>]*>detached<') { throw 'The installed settings would open a console window from the Start menu' }
+        if ($settingsImage -notmatch 'dpiAwareness[^<>]*>PerMonitorV2<') { throw 'The installed settings lost their DPI awareness' }
         $startup = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade
         $launcher = Join-Path $application 'start-engine.ps1'
         if (-not (Test-Path -LiteralPath $launcher) -or -not $startup.EndsWith(('"{0}" -Watch' -f $launcher), [StringComparison]::OrdinalIgnoreCase)) {

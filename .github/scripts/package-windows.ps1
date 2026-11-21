@@ -21,6 +21,8 @@ Run-Native { cargo xtask build-worker }
 Run-Native { cargo xtask stage-windows }
 $payload = (Resolve-Path artifacts/windows/payload).Path
 Copy-Item packaging/windows/WIX-LICENSE.txt (Join-Path $payload WIX-LICENSE.txt)
+# Before signing: the Start menu must open the settings without a console window.
+& packaging/windows/merge-manifest.ps1 -Program (Join-Path $payload kanade-ui.exe) -Manifest packaging/windows/kanade-ui.manifest
 
 function Sign-File([string]$Path) {
     if ($Unsigned) { return }
