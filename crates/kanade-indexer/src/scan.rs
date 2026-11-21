@@ -34,6 +34,13 @@ fn rpc(
             });
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW. The engine has no console to share, and a console
+        // window opened for a helper could be closed, which would end it.
+        command.creation_flags(0x0800_0000);
+    }
     let mut child = command
         .arg("--config")
         .arg(config.path())

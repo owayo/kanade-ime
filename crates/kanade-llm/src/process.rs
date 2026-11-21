@@ -91,6 +91,14 @@ impl Worker {
         if let Some(root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", root);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW. The engine has no console to share, and a
+            // console window opened for a worker could be closed, which
+            // would end the worker.
+            command.creation_flags(0x0800_0000);
+        }
         let mut child = command.spawn().map_err(|_| Failure::Spawn)?;
         let input = child.stdin.take();
         let Some(output) = child.stdout.take() else {

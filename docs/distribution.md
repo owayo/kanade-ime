@@ -36,7 +36,7 @@ Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。
 
 ## Windows
 
-Windows へのサインイン時に Kanade の入力エンジンを起動します。使用中にエンジンが終了すると、同じユーザーのセッション内で自動的に再起動します。入力中のアプリを開き直す必要はありません。短時間に終了が続いた場合は、次の起動までの間隔を最大30秒まで延ばします。
+Windows へのサインイン時に、Kanade の入力エンジンを監視つきで起動します（`kanade-engine.exe --supervise`）。監視はエンジン自身の実行ファイルで、コンソール窓を持ちません。スクリプトの実行が制限された環境でも動きます。使用中にエンジンが終了すると、同じユーザーのセッション内で自動的に再起動します。入力中のアプリを開き直す必要はありません。短時間に終了が続いた場合は、次の起動までの間隔を最大30秒まで延ばします。終了コードと再起動の回数は `%LOCALAPPDATA%\kanade-ime\logs\engine-events.log` に残ります。読み方は[利用方法](usage.md)にあります。
 
 Microsoft Visual C++ Redistributableのx64版とx86版が必要です。[Microsoftの配布ページ](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)から最新の対応版を導入してください。ランタイムの登録がなければ、MSIは入力DLLを登録せずに停止します。Microsoftのランタイムは再配布しません。
 
