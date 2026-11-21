@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from bundled_model import carriers, locked_model, releases, staging_name, verify_model
@@ -95,8 +96,23 @@ def staged_copies(listing: list, tag: str, model: dict) -> list:
 
 
 def prune(tag: str, repo: str) -> None:
-    """Remove the model's staging copies now that its own release carries it."""
-    for asset in staged_copies(list(releases(repo)), tag, locked_model()):
+    """Remove the model's staging copies now that its own release carries it.
+
+    Raises:
+        ValueError: The release does not list the model, also after waiting.
+
+    """
+    model = locked_model()
+    # A new asset can take a few seconds to appear in the listing.
+    for remaining in (2, 1, 0):
+        try:
+            copies = staged_copies(list(releases(repo)), tag, model)
+            break
+        except ValueError:
+            if not remaining:
+                raise
+            time.sleep(10)
+    for asset in copies:
         path = f"repos/{repo}/releases/assets/{asset['id']}"
         subprocess.run(["gh", "api", "--method", "DELETE", path], check=True)
         print(f"Removed {asset['name']} ({asset['id']})")

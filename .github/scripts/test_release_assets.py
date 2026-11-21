@@ -160,20 +160,38 @@ class StagedCopyTests(unittest.TestCase):
             with self.subTest(tag=tag), self.assertRaises(ValueError):
                 assets.staged_copies(self.listing, tag, MODEL)
 
-    def test_prune_deletes_exactly_the_selected_assets(self):
+    def prune(self, tag, listings):
         with (
-            patch.object(assets, "releases", return_value=iter(self.listing)),
+            patch.object(assets, "releases", side_effect=listings) as api,
             patch.object(assets.subprocess, "run") as run,
+            patch.object(assets.time, "sleep") as sleep,
         ):
-            assets.prune("v2", "example/ime")
-        (call,) = run.call_args_list
-        self.assertEqual(
-            call.args[0],
-            ["gh", "api", "--method", "DELETE", "repos/example/ime/releases/assets/2"],
-        )
+            try:
+                assets.prune(tag, "example/ime")
+            finally:
+                self.calls = (api.call_count, sleep.call_count)
+        return [call.args[0] for call in run.call_args_list]
+
+    def test_prune_deletes_exactly_the_selected_assets(self):
+        delete = ["gh", "api", "--method", "DELETE"]
+        commands = self.prune("v2", lambda repo: iter(self.listing))
+        self.assertEqual(commands, [[*delete, "repos/example/ime/releases/assets/2"]])
+        self.assertEqual(self.calls, (1, 0))
+
+    def test_prune_waits_for_a_listing_that_shows_the_new_asset(self):
+        late = [self.listing[1:], self.listing]
+        commands = self.prune("v2", lambda repo: iter(late.pop(0)))
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(self.calls, (2, 1))
+
+    def test_prune_deletes_nothing_for_a_release_without_the_model(self):
+        with self.assertRaises(ValueError):
+            self.prune("v1", lambda repo: iter(self.listing))
+        self.assertEqual(self.calls, (3, 2))
         with (
-            patch.object(assets, "releases", return_value=iter(self.listing)),
+            patch.object(assets, "releases", side_effect=lambda r: iter(self.listing)),
             patch.object(assets.subprocess, "run") as run,
+            patch.object(assets.time, "sleep"),
             self.assertRaises(ValueError),
         ):
             assets.prune("v1", "example/ime")
