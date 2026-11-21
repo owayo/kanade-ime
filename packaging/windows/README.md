@@ -25,7 +25,9 @@ Build `kanade-tip` for `x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`, and `aa
 
 For ARM64 Windows, place the x64 and ARM64 implementations beside the forwarder as `kanade_tip_x64.dll` and `kanade_tip_arm64.dll`. Run `build-forwarder.cmd` from the repository root in an ARM64 Developer Command Prompt. The script follows Microsoft's [pure forwarder procedure](https://learn.microsoft.com/en-us/windows/arm/arm64x-build#building-an-arm64x-pure-forwarder-dll). It has not been executed on Windows yet.
 
-`DllRegisterServer` writes HKLM and needs elevation. An installer must install the architecture-specific files, register each required view, create the per-user engine startup entry, and roll back registrations if installation fails. Keep the engine and settings executables beside each other for named-pipe server path validation. Rename loaded DLLs before replacing them during updates.
+`DllRegisterServer` writes HKLM and needs elevation. An installer must install the architecture-specific files, register each required view, create the engine startup entry, and roll back registrations if installation fails. Keep the engine and settings executables beside each other for named-pipe server path validation. Rename loaded DLLs before replacing them during updates.
+
+The startup entry runs `kanade-engine.exe --supervise`. The engine is a windowed-subsystem executable: it has no console window that could be closed, and its supervisor is the same file in another mode, so the entry depends on neither a script host nor an execution policy. `start-engine.ps1` is the setup-time launcher only. It stops processes older than the installed image and starts the supervisor; nothing of it stays running.
 
 Signed MSI generation and installer custom-action validation remain release gates. Do not distribute a folder of DLLs as an installed IME. Run the application and AppContainer test matrix in `docs/status.md` before distribution.
 

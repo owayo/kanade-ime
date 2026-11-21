@@ -7,18 +7,20 @@ use kanade_ipc::unix::{secure_directory, verify_peer};
 use kanade_ipc::windows::Pipe as NativeStream;
 use kanade_ipc::{
     self as ipc,
-    diagnostics::{Event, record},
+    diagnostics::{Event, Thread, record},
     *,
 };
 use kanade_mozc::Mozc;
 #[cfg(unix)]
-use std::fs::{self, File};
+use std::fs;
+use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::{
     fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     net::{UnixListener, UnixStream as NativeStream},
 };
 use std::{
+    collections::VecDeque,
     io,
     path::Path,
     sync::{
@@ -28,6 +30,35 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+/// Another engine already serves this endpoint or uses this data directory.
+/// The process exits with its own code, so a supervisor can tell this from a
+/// failure.
+#[derive(Debug)]
+pub struct AlreadyRunning;
+impl std::fmt::Display for AlreadyRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("another engine is already running")
+    }
+}
+impl std::error::Error for AlreadyRunning {}
+
+/// Deliberate failures for the tests of the process's own survival. Compiled
+/// only with the `fault-injection` feature, which no shipped build enables.
+#[cfg(feature = "fault-injection")]
+pub mod fault {
+    /// A key with this text panics on the thread that handles every request.
+    pub const PANIC_KEY: &str = "\u{1}panic";
+    /// Stands for text a real panic could quote. It must never be recorded.
+    pub const PANIC_MESSAGE: &str = "injected fault quoting ひみつのよみ";
+    pub(super) fn check(request: &kanade_ipc::Request) {
+        if let Some(kanade_ipc::request::Body::Key(key)) = &request.body
+            && key.key.as_ref().is_some_and(|key| key.text == PANIC_KEY)
+        {
+            panic!("{PANIC_MESSAGE}");
+        }
+    }
+}
 
 enum Work {
     Date(Option<crate::dates::Calendar>),
@@ -47,6 +78,9 @@ enum Work {
         SyncSender<Result<Option<Response>, failure::Code>>,
     ),
     Close(u64),
+    /// The listener gave up; nobody can connect to this process any more.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    ListenerLost,
 }
 /// Records why the process is about to exit. The error itself may name a
 /// path, so only the stage reaches the log.
@@ -119,6 +153,114 @@ impl Connections {
 fn recover(engine: &mut Engine<Mozc>) -> anyhow::Result<()> {
     restart(|| engine.recover_worker(), Duration::from_millis(200))
 }
+/// One admitted connection. The slot is returned when its thread ends,
+/// however it ends: a panic there must not use up the limit for good.
+struct Slot(Arc<AtomicUsize>);
+impl Slot {
+    const LIMIT: usize = 32;
+    fn take(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |taken| {
+                (taken < Self::LIMIT).then_some(taken + 1)
+            })
+            .ok()
+            .map(|_| Self(active.clone()))
+    }
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+/// The engine session of one connection. It is closed when the connection's
+/// thread ends, however it ends, so the session cannot outlive its frontend.
+struct Leaving<'a>(&'a SyncSender<Work>, u64);
+impl Drop for Leaving<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.send(Work::Close(self.1));
+    }
+}
+/// A connection's entry in the table, removed when its thread ends.
+struct Admitted<'a>(&'a Mutex<Connections>, Option<u64>);
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        if let (Some(token), Ok(mut connections)) = (self.1, self.0.lock()) {
+            connections.closed(token);
+        }
+    }
+}
+/// Hands one accepted peer to its own thread, or turns it away.
+fn admit(
+    stream: NativeStream,
+    active: &Arc<AtomicUsize>,
+    tx: &SyncSender<Work>,
+    administration: &Arc<admin::Administration>,
+    connections: &Arc<Mutex<Connections>>,
+) {
+    let Some(slot) = Slot::take(active) else {
+        // Dropping the stream closes it; the frontend tries again later.
+        record(Event::ConnectionRefusedAtCapacity);
+        return;
+    };
+    let tx = tx.clone();
+    let administration = administration.clone();
+    let connections = connections.clone();
+    let spawned = std::thread::Builder::new()
+        .name(Thread::CONNECTION.into())
+        .spawn(move || {
+            let _slot = slot;
+            let _ = connection(stream, &tx, &administration, &connections);
+        });
+    if spawned.is_err() {
+        // This peer is lost, with its slot returned. Later ones may fare better.
+        record(Event::ConnectionThreadFailed);
+    }
+}
+/// Panics close together mean that the state of this process cannot be
+/// trusted any more, and that a new process is the better recovery.
+#[derive(Default)]
+struct Storm(VecDeque<Instant>);
+impl Storm {
+    const WINDOW: Duration = Duration::from_secs(60);
+    const TOLERATED: usize = 4;
+    /// Notes one panic. True once more than the tolerated number fell into
+    /// one window.
+    fn note(&mut self, now: Instant) -> bool {
+        self.0.push_back(now);
+        while self
+            .0
+            .front()
+            .is_some_and(|first| now.duration_since(*first) > Self::WINDOW)
+        {
+            self.0.pop_front();
+        }
+        self.0.len() > Self::TOLERATED
+    }
+}
+enum Flow {
+    Continue,
+    Stop,
+}
+/// Runs one turn of the main loop. A panic inside it ends that turn, not the
+/// engine: `None` tells the caller to discard what the turn may have left
+/// half done. The panic hook has already recorded where it started. Its
+/// message can quote the text that was being handled, so it is dropped unread.
+fn contain(
+    turn: impl FnOnce() -> anyhow::Result<Flow>,
+    storm: &mut Storm,
+) -> anyhow::Result<Option<Flow>> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(turn)) {
+        Ok(flow) => flow.map(Some),
+        Err(message) => {
+            drop(message);
+            if storm.note(Instant::now()) {
+                record(Event::FatalRepeatedPanic);
+                anyhow::bail!("panics kept recurring");
+            }
+            Ok(None)
+        }
+    }
+}
 pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     let _lock = {
@@ -138,8 +280,7 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
         )?;
         fatal(
             Event::FatalAlreadyRunning,
-            lock.try_lock()
-                .map_err(|_| io::Error::from(io::ErrorKind::AddrInUse)),
+            lock.try_lock().map_err(|_| AlreadyRunning),
         )?;
         fatal(
             Event::FatalSocketDirectory,
@@ -149,6 +290,27 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(e),
             },
+        )?;
+        lock
+    };
+    // Two engines must not share a learning store and a conversion profile.
+    // The pipe name cannot tell: an isolated instance has its own.
+    #[cfg(windows)]
+    let _lock = {
+        let lock = fatal(
+            Event::FatalConfiguration,
+            std::fs::create_dir_all(data).and_then(|()| {
+                File::options()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(data.join("engine.lock"))
+            }),
+        )?;
+        fatal(
+            Event::FatalAlreadyRunning,
+            lock.try_lock().map_err(|_| AlreadyRunning),
         )?;
         lock
     };
@@ -195,10 +357,28 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
         Event::FatalListener,
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)),
     )?;
+    // The pipe admits packaged applications, and a frontend connects only
+    // after it has checked which program serves the pipe. Without this a
+    // text service inside such an application could open the pipe and
+    // still never convert. Failing here costs those hosts only.
     #[cfg(windows)]
-    let mut listener = fatal(Event::FatalListener, kanade_ipc::windows::Listener::bind())?;
+    if kanade_ipc::windows::identify_to_packages().is_err() {
+        record(Event::SandboxedHostsUnreachable);
+    }
     #[cfg(windows)]
-    let _ = path;
+    let mut listener = match path
+        .to_str()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
+        .and_then(kanade_ipc::windows::Listener::bind_to)
+    {
+        Ok(listener) => listener,
+        // ERROR_ACCESS_DENIED: the name already has its first instance, which
+        // belongs to an engine with another data directory.
+        Err(error) if error.raw_os_error() == Some(5) => {
+            return fatal(Event::FatalAlreadyRunning, Err(AlreadyRunning));
+        }
+        Err(error) => return fatal(Event::FatalListener, Err(error)),
+    };
     let (tx, rx) = mpsc::sync_channel::<Work>(64);
     {
         let administration = administration.clone();
@@ -261,109 +441,149 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     let connections = Arc::new(Mutex::new(Connections::default()));
     std::thread::Builder::new()
-        .name("kanade-listener".into())
+        .name(Thread::LISTENER.into())
         .spawn(move || {
             #[cfg(unix)]
-            let incoming = listener.incoming().flatten();
+            for stream in listener.incoming().flatten() {
+                admit(stream, &active, &tx, &administration, &connections);
+            }
+            // One peer that cannot be accepted says nothing about the next.
+            // Only a listener that stays unable to offer a pipe instance ends
+            // the engine, so that a new process can take the endpoint: a
+            // process nobody can connect to is worse than none.
             #[cfg(windows)]
-            let incoming = std::iter::from_fn(move || listener.accept().ok());
-            for stream in incoming {
-                if active
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                        (n < 32).then_some(n + 1)
-                    })
-                    .is_err()
-                {
-                    continue;
-                }
-                let active = active.clone();
-                let tx = tx.clone();
-                let administration = administration.clone();
-                let connections = connections.clone();
-                let result = std::thread::Builder::new()
-                    .name("kanade-connection".into())
-                    .spawn(move || {
-                        let _ = connection(stream, &tx, &administration, &connections);
-                        active.fetch_sub(1, Ordering::AcqRel);
-                    });
-                if result.is_err() {
-                    break;
+            {
+                use kanade_ipc::windows::Refusal;
+                const ATTEMPTS: u32 = 10;
+                let mut failures = 0;
+                loop {
+                    match listener.accept() {
+                        Ok(stream) => {
+                            failures = 0;
+                            admit(stream, &active, &tx, &administration, &connections);
+                        }
+                        Err(Refusal::Peer(_)) => {
+                            failures = 0;
+                            record(Event::ConnectionRejected);
+                        }
+                        Err(Refusal::Listener(_)) => {
+                            record(Event::ListenerFailed);
+                            failures += 1;
+                            if failures == ATTEMPTS {
+                                let _ = tx.send(Work::ListenerLost);
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100) * failures);
+                        }
+                    }
                 }
             }
         })
         .inspect_err(|_| record(Event::FatalThread))?;
     record(Event::EngineStarted);
     let mut last_sync = Instant::now();
+    let mut storm = Storm::default();
     loop {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Work::Date(date)) => engine.set_calendar(date),
-            Ok(Work::Dictionary(command)) => {
-                if command.execute(&mut engine) {
-                    recover(&mut engine)?;
-                }
-            }
-            Ok(Work::ClearMozcLearning(kind, deadline, reply)) => {
-                if Instant::now() > deadline {
-                    let _ = reply.send(Err(failure::Code::Unavailable));
-                    continue;
-                }
-                let result = engine.clear_mozc_learning(kind);
-                let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
-                let _ = reply.send(result);
-                if failed {
-                    recover(&mut engine)?;
-                }
-            }
-            Ok(Work::Projects(projects, ack)) => {
-                engine.set_projects(projects);
-                let _ = ack.send(());
-            }
-            Ok(Work::Configure(settings, ack)) => {
-                engine.configure(settings);
-                let _ = ack.send(());
-            }
-            Ok(Work::Open(hello, reply)) => {
-                let result = engine.open(&hello);
-                let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
-                let _ = reply.send(result);
-                if failed {
-                    recover(&mut engine)?;
-                }
-            }
-            Ok(Work::Request(id, request, deadline, reply)) => {
-                if Instant::now() > deadline {
-                    // Refused before any of it ran; the session is unchanged.
-                    record(Event::RequestExpiredInQueue);
-                    let _ = reply.send(Err(failure::Code::Unavailable));
-                    continue;
-                }
-                let result = engine.handle(id, request);
-                // Only a worker that stopped answering is replaced. Replacing
-                // it ends every composition, so a failure confined to one
-                // session must not do that to the others.
-                let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
-                let _ = reply.send(result);
-                if failed {
-                    recover(&mut engine)?;
-                }
-            }
-            Ok(Work::Close(id)) => engine.close(id),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if sync_due(last_sync.elapsed(), engine.composing()) {
-                    if engine.sync().is_err() {
-                        record(Event::SyncFailed);
-                        recover(&mut engine)?;
-                    }
-                    last_sync = Instant::now();
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = engine.sync();
-                fatal(Event::FatalLearningFlush, engine.flush_learning())?;
-                return Ok(());
+        let work = rx.recv_timeout(Duration::from_secs(5));
+        match contain(|| turn(&mut engine, work, &mut last_sync), &mut storm)? {
+            Some(Flow::Continue) => {}
+            Some(Flow::Stop) => return Ok(()),
+            None => {
+                // Any session may hold state from the interrupted turn.
+                // Dropping them all and replacing the worker is the recovery
+                // every frontend already handles: it holds its composition
+                // and restores it on a new connection.
+                recover(&mut engine)?;
+                record(Event::RecoveredFromPanic);
             }
         }
     }
+}
+/// One item of work on the thread that owns the engine.
+fn turn(
+    engine: &mut Engine<Mozc>,
+    work: Result<Work, mpsc::RecvTimeoutError>,
+    last_sync: &mut Instant,
+) -> anyhow::Result<Flow> {
+    match work {
+        Ok(Work::Date(date)) => engine.set_calendar(date),
+        Ok(Work::Dictionary(command)) => {
+            if command.execute(engine) {
+                recover(engine)?;
+            }
+        }
+        Ok(Work::ClearMozcLearning(kind, deadline, reply)) => {
+            if Instant::now() > deadline {
+                let _ = reply.send(Err(failure::Code::Unavailable));
+                return Ok(Flow::Continue);
+            }
+            let result = engine.clear_mozc_learning(kind);
+            let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
+            let _ = reply.send(result);
+            if failed {
+                recover(engine)?;
+            }
+        }
+        Ok(Work::Projects(projects, ack)) => {
+            engine.set_projects(projects);
+            let _ = ack.send(());
+        }
+        Ok(Work::Configure(settings, ack)) => {
+            engine.configure(settings);
+            let _ = ack.send(());
+        }
+        Ok(Work::Open(hello, reply)) => {
+            let result = engine.open(&hello);
+            let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
+            let _ = reply.send(result);
+            if failed {
+                recover(engine)?;
+            }
+        }
+        Ok(Work::Request(id, request, deadline, reply)) => {
+            if Instant::now() > deadline {
+                // Refused before any of it ran; the session is unchanged.
+                record(Event::RequestExpiredInQueue);
+                let _ = reply.send(Err(failure::Code::Unavailable));
+                return Ok(Flow::Continue);
+            }
+            #[cfg(feature = "fault-injection")]
+            fault::check(&request);
+            let result = engine.handle(id, request);
+            // Only a worker that stopped answering is replaced. Replacing
+            // it ends every composition, so a failure confined to one
+            // session must not do that to the others.
+            let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
+            let _ = reply.send(result);
+            if failed {
+                recover(engine)?;
+            }
+        }
+        Ok(Work::Close(id)) => engine.close(id),
+        Ok(Work::ListenerLost) => {
+            let _ = engine.sync();
+            let _ = engine.flush_learning();
+            return fatal(
+                Event::FatalListenerLost,
+                Err(io::Error::from(io::ErrorKind::BrokenPipe)),
+            );
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if sync_due(last_sync.elapsed(), engine.composing()) {
+                if engine.sync().is_err() {
+                    record(Event::SyncFailed);
+                    recover(engine)?;
+                }
+                *last_sync = Instant::now();
+            }
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = engine.sync();
+            fatal(Event::FatalLearningFlush, engine.flush_learning())?;
+            return Ok(Flow::Stop);
+        }
+    }
+    Ok(Flow::Continue)
 }
 fn connection(
     mut stream: NativeStream,
@@ -391,21 +611,18 @@ fn connection(
         .map_err(|_| io::ErrorKind::TimedOut)?
         .map_err(|_| io::ErrorKind::InvalidData)?;
     let id = welcome.connection;
+    let _leaving = Leaving(tx, id);
     #[cfg(unix)]
-    let token = match connections
-        .lock()
-        .map_err(|_| io::Error::from(io::ErrorKind::Other))
-        .and_then(|mut c| c.admit(&stream))
-    {
-        Ok(token) => Some(token),
-        Err(error) => {
-            let _ = tx.send(Work::Close(id));
-            return Err(error);
-        }
-    };
+    let token = Some(
+        connections
+            .lock()
+            .map_err(|_| io::Error::from(io::ErrorKind::Other))
+            .and_then(|mut c| c.admit(&stream))?,
+    );
     #[cfg(windows)]
     let token: Option<u64> = None;
-    let result = (|| {
+    let _admitted = Admitted(connections, token);
+    {
         #[cfg(windows)]
         stream.begin(ipc::KEY_TIMEOUT);
         ipc::send(
@@ -460,11 +677,20 @@ fn connection(
             ))
             .map_err(|_| io::ErrorKind::WouldBlock)?;
             // Longer than the queue limit plus the request's worker budget, so
-            // an answer or a refusal normally arrives first.
+            // an answer or a refusal normally arrives first. A reply that was
+            // dropped unsent means the turn handling it was interrupted;
+            // that is recorded where it happened, and the frontend learns of
+            // it at once from its closed connection.
             let answer = response
                 .recv_timeout(ipc::REQUEST_TIMEOUT)
-                .inspect_err(|_| record(Event::RequestAbandonedByConnection))
-                .map_err(|_| io::ErrorKind::TimedOut)?;
+                .map_err(|error| {
+                    if error == mpsc::RecvTimeoutError::Timeout {
+                        record(Event::RequestAbandonedByConnection);
+                        io::ErrorKind::TimedOut
+                    } else {
+                        io::ErrorKind::ConnectionAborted
+                    }
+                })?;
             #[cfg(windows)]
             stream.begin(ipc::KEY_TIMEOUT);
             match answer {
@@ -485,12 +711,7 @@ fn connection(
             }
         }
         Ok(())
-    })();
-    if let (Some(token), Ok(mut connections)) = (token, connections.lock()) {
-        connections.closed(token);
     }
-    let _ = tx.send(Work::Close(id));
-    result
 }
 
 #[cfg(test)]
@@ -567,5 +788,78 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(calls, 3);
+    }
+    #[test]
+    fn a_panic_ends_its_turn_and_the_waiting_connection_learns_at_once() {
+        let mut storm = Storm::default();
+        let (reply, response) = mpsc::sync_channel::<Result<Welcome, failure::Code>>(1);
+        let interrupted = contain(
+            move || {
+                // The reply belongs to the turn and is dropped with it.
+                let _reply = reply;
+                panic!("a defect met while handling a request");
+            },
+            &mut storm,
+        );
+        assert!(matches!(interrupted, Ok(None)));
+        let started = Instant::now();
+        assert_eq!(
+            response.recv_timeout(ipc::REQUEST_TIMEOUT),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert!(started.elapsed() < ipc::REQUEST_TIMEOUT / 2);
+        // Turns without a panic pass through, including one that ends the
+        // engine for a recorded reason.
+        assert!(matches!(
+            contain(|| Ok(Flow::Continue), &mut storm),
+            Ok(Some(Flow::Continue))
+        ));
+        assert!(matches!(
+            contain(|| Ok(Flow::Stop), &mut storm),
+            Ok(Some(Flow::Stop))
+        ));
+        assert!(contain(|| anyhow::bail!("the worker cannot start"), &mut storm).is_err());
+    }
+    #[test]
+    fn panics_that_keep_recurring_end_the_engine() {
+        let start = Instant::now();
+        let seconds = Duration::from_secs;
+        // A defect met now and then is survived every time.
+        let mut storm = Storm::default();
+        for occurrence in 0..20 {
+            assert!(!storm.note(start + seconds(61) * occurrence));
+        }
+        // More than the tolerated number inside one window is not.
+        let mut storm = Storm::default();
+        for occurrence in 0..Storm::TOLERATED as u32 {
+            assert!(!storm.note(start + seconds(10) * occurrence));
+        }
+        assert!(storm.note(start + seconds(45)));
+        let mut storm = Storm::default();
+        let mut tolerated = 0;
+        while matches!(contain(|| panic!("again"), &mut storm), Ok(None)) {
+            tolerated += 1;
+        }
+        assert_eq!(tolerated, Storm::TOLERATED);
+    }
+    #[test]
+    fn a_connection_that_panics_returns_its_slot_and_closes_its_session() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut slots: Vec<_> = (0..Slot::LIMIT)
+            .map(|_| Slot::take(&active).unwrap())
+            .collect();
+        assert!(Slot::take(&active).is_none());
+        let (tx, rx) = mpsc::sync_channel::<Work>(4);
+        let slot = slots.pop().unwrap();
+        let thread = std::thread::spawn(move || {
+            let _slot = slot;
+            let _leaving = Leaving(&tx, 7);
+            panic!("a defect met on a connection thread");
+        });
+        assert!(thread.join().is_err());
+        assert!(matches!(rx.try_recv(), Ok(Work::Close(7))));
+        assert!(Slot::take(&active).is_some());
+        drop(slots);
+        assert_eq!(active.load(Ordering::Acquire), 0);
     }
 }

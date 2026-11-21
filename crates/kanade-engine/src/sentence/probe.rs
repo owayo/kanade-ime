@@ -74,7 +74,7 @@ impl Worker {
             let (tx, rx) = mpsc::sync_channel(1);
             let binary = self.binary.clone();
             std::thread::Builder::new()
-                .name("kanade-sentence-search".into())
+                .name(diagnostics::Thread::SENTENCE_SEARCH.into())
                 .spawn(move || run(&binary, rx))
                 .ok()?;
             self.jobs = Some(tx);

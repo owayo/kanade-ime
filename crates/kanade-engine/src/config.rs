@@ -140,6 +140,17 @@ impl Config {
         }
     }
 }
+/// The pipe this engine listens on. `KANADE_INSTANCE` names an isolated
+/// instance, which a test or development engine sets together with its own
+/// data directory. Frontends never read it: they reach the installed engine.
+#[cfg(windows)]
+pub fn endpoint() -> io::Result<String> {
+    match std::env::var("KANADE_INSTANCE") {
+        Ok(label) => kanade_ipc::windows::instance_endpoint(&label),
+        Err(std::env::VarError::NotPresent) => kanade_ipc::windows::endpoint(),
+        Err(std::env::VarError::NotUnicode(_)) => Err(io::ErrorKind::InvalidInput.into()),
+    }
+}
 pub fn data_directory() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("KANADE_DATA_DIR") {
         return Ok(path.into());

@@ -40,7 +40,7 @@ run = "make emoji-data"
 
 [tasks.contract]
 env = { RUST_TEST_THREADS = "1" }
-run = ["cargo run -p kanade-eval -- contract", "cargo test -p kanade-eval -- --ignored", "cargo test -p kanade-mozc --test learning --test symbols -- --ignored", "cargo test -p kanade-mozc --lib -- --ignored", "cargo test -p kanade-engine --test contracts --test selection_learning -- --ignored --skip dictionary_", "cargo test -p kanade-engine --test socket -- --ignored", "cargo test -p kanade-engine --test dictionary -- --ignored --skip project_approval_and_rebuild"]
+run = ["cargo run -p kanade-eval -- contract", "cargo test -p kanade-eval -- --ignored", "cargo test -p kanade-mozc --test learning --test symbols -- --ignored", "cargo test -p kanade-mozc --lib -- --ignored", "cargo test -p kanade-engine --test contracts --test selection_learning -- --ignored --skip dictionary_", "cargo test -p kanade-engine --test socket -- --ignored", "cargo test -p kanade-engine --test windows_pipe --test windows_supervisor --test windows_sandbox -- --ignored", "cargo test -p kanade-engine --test dictionary -- --ignored --skip project_approval_and_rebuild"]
 
 [tasks.learning-contract]
 run = "cargo test -p kanade-engine --test contracts dictionary_ -- --ignored"
