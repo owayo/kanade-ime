@@ -8,6 +8,12 @@ rust-version.workspace = true
 [dependencies]
 kanade-ipc.workspace = true
 
+[build-dependencies]
+kanade-winres = { path = "../kanade-winres" }
+
+[dev-dependencies]
+kanade-winres = { path = "../kanade-winres" }
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

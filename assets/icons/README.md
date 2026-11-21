@@ -9,3 +9,21 @@ macOS packaging crops the master to a 1,060-pixel square at offset (97, 112), re
 The earlier `tray-*.png` koto artwork is retained as source history; current macOS input-source packaging uses the selected Mincho mark.
 
 Windows packaging resamples `app.png` into the icon of the Start menu shortcut with `packaging/windows/build-icon.ps1`: bitmaps of 16 to 64 pixels and a 256-pixel PNG. The あ and A of the Windows taskbar are not artwork. The text service draws them when the taskbar asks, in the colour of the taskbar text.
+
+## Windows brand icon
+
+Windows shows an input method's brand icon in the input switcher (Win+Space) and in the taskbar's input indicator. Microsoft's [IME requirements](https://learn.microsoft.com/en-us/windows/apps/develop/input/input-method-editor-requirements) define it as a white box holding a black glyph, with an outer stroke of one pixel in black at half opacity. They ask for 16, 20, 24, 32, 40 and 48 pixels, each 32-bit with an alpha channel, stored in the DLL instead of a standalone `.ico` file.
+
+`input-template.png` is the source for this icon too. `crates/kanade-winres` converts it while the input DLL is built. The silhouette becomes the white box and the cutout becomes the black glyph. The stroke is added around the silhouette, so the glyph keeps the margins it has in the artwork, and the stroke follows the rounded corners. The box fills each size except for that stroke. Every size is sampled by area directly from the master. Clear and solid areas of the master are treated as exact: its faint noise and its alpha of 253–254 do not tint the result.
+
+`crates/kanade-tip/build.rs` links the six bitmaps into `kanade_tip.dll` as the DLL's only icon group, for the 64-bit and the 32-bit build alike. No resource compiler runs and no generated file is tracked. Registration names the icon by position zero.
+
+To look at the result, run:
+
+```sh
+cargo run -p kanade-winres --example brand-icon-preview -- <output directory>
+```
+
+It writes `kanade-brand.ico`, with the same bitmaps as the DLL, and `kanade-brand-preview.png`, which shows every size on the light and the dark taskbar colour.
+
+Horizontal strokes of the Mincho glyph are thinner than one pixel at 16 and 20 pixels, so the character is soft at those sizes, as it is in the macOS menu bar. A sharper small size would need separately drawn artwork.

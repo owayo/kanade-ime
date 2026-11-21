@@ -7,3 +7,6 @@
 )]
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+#[doc(hidden)]
+pub use native::BRAND_ICON_INDEX;
