@@ -7,11 +7,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from bundled_model import carriers, locked_model, releases, staging_name, verify_model
-
-INSTALLERS = (
-    "kanade-ime-aarch64-apple-darwin.dmg",
-    "kanade-ime-x86_64-pc-windows-msvc.exe",
+from bundled_model import (
+    INSTALLERS,
+    carriers,
+    locked_model,
+    releases,
+    staging_name,
+    verify_model,
 )
 
 

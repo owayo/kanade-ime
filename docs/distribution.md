@@ -15,7 +15,7 @@
 
 同じ Release にある `tsumugi.gguf` は、インストーラーが同梱しているモデルの写しです。インストーラーのビルドが取得するために添付しています。利用するときにダウンロードする必要はありません。
 
-Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。Windows では Tsumugi をインストール先の `models/` に、macOS では Kanade 内の設定アプリに配置します。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。
+Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。Windows では Tsumugi をインストール先の `models/` に、macOS では Kanade 内の設定アプリに配置します。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。同梱モデルが替わった版に更新したときは、モデルを取り込み直すまで候補の並べ替えが働きません。その手順も同じページにあります。
 
 ## macOS
 
@@ -57,7 +57,7 @@ EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエン�
 
 `Release` の手動実行で `channel` を選びます。既定の `stable` は署名・公証した正式版を配布します。`dry_run` では正式版の次の版を計算します。
 
-`preview` は、既定ブランチの同じコミットで CI に合格した Windows x64 の未署名 EXE と、Apple Silicon Mac の一時署名・未公証 DMG を GitHub Releases のプレリリースとして公開します。両方に同じ Tsumugi を1個同梱します。Release 本文にモデルの版、バイト数、SHA-256、インストーラーを検査した CI のリンクが載ります。`dry_run` では両インストーラーを取得してチェックサムの照合まで行います。
+`preview` は、既定ブランチの同じコミットで CI に合格した Windows x64 の未署名 EXE と、Apple Silicon Mac の一時署名・未公証 DMG を GitHub Releases のプレリリースとして公開します。両方に同じ Tsumugi を1個同梱します。Release 本文にモデルの版、バイト数、SHA-256、インストーラーを検査した CI のリンクが載ります。更新した人がモデルを取り込み直す手順も載ります。直前のプレビュー版が別のモデルを添付しているときは、比べた版のタグを添えて、同梱モデルが替わったことを書きます。正式版の本文にも同じ手順が載り、直前の正式版と比べます。本文は `.github/scripts/release_notes.py` が組み立てます。`dry_run` では両インストーラーを取得してチェックサムの照合まで行います。
 
 Tsumugi はインストーラーに同梱する形で配布します。モデルだけの Release は作りません。各 Release には、インストーラーが同梱しているモデルの写しを `tsumugi.gguf` として添付します。`locks/llm.lock.toml` が記録するのはモデルの版・バイト数・SHA-256 で、URL は持ちません。インストーラーを作るときは、`.github/scripts/bundled_model.py` が Release の添付ファイルから SHA-256 の一致するものを探して取得し、ロックと照合してから同梱します。
 
@@ -67,7 +67,7 @@ Tsumugi はインストーラーに同梱する形で配布します。モデル
 python3 .github/scripts/bundled_model.py --attach <GGUF>
 ```
 
-モデルを添付すると、重みが公開されます。取り消せないので、添付するのは同梱すると決めたモデルだけにします。Release のページでは、この添付は「次の版に同梱するモデル」と表示されます。添付した直後は、API の一覧に出るまで数秒かかることがあります。次の Release を公開すると、モデルは `tsumugi.gguf` として新しい Release に付きます。前の Release に添付した写しは、公開のジョブが削除します。手で削除するときは次のコマンドを使います。
+モデルを添付すると、重みが公開されます。取り消せないので、添付するのは同梱すると決めたモデルだけにします。Release のページでは、この添付は「次の版に同梱するモデル」と表示されます。添付した直後は、API の一覧に出るまで数秒かかることがあります。次の Release を公開すると、モデルは `tsumugi.gguf` として新しい Release に付きます。その本文には、直前の版と比べて同梱モデルが替わったことが入ります。前の Release に添付した写しは、公開のジョブが削除します。手で削除するときは次のコマンドを使います。
 
 ```sh
 gh release delete-asset <前の Release のタグ> tsumugi-<モデルの版>.gguf
