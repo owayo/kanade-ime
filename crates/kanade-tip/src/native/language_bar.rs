@@ -4,6 +4,7 @@
 //! service: the first whose identifier is `GUID_LBI_INPUTMODE`. The button's
 //! state is the pair of input-mode compartments, so it holds no input.
 use super::*;
+use std::time::{Duration, Instant};
 use windows::{
     Win32::{
         Graphics::Gdi::HBITMAP,
@@ -16,6 +17,9 @@ use windows_core::ComObject;
 
 /// The button has one sink, so any nonzero value identifies it.
 const COOKIE: u32 = 0x4b4e_4d42;
+
+/// How long a keystroke relies on the taskbar colours read before it.
+const COLOUR_INTERVAL: Duration = Duration::from_secs(1);
 
 struct Face {
     glyph: &'static str,
@@ -174,22 +178,74 @@ pub(super) struct ModeButton {
     tid: u32,
     settings: Settings,
     sink: RefCell<Option<ITfLangBarItemSink>>,
+    /// Reads the colour of the taskbar text.
+    colours: Box<dyn Fn() -> mode_icon::Palette>,
     /// The mode and the colours the sink was last told about.
     shown: Cell<Option<(bool, mode_icon::Palette)>>,
+    /// When the colours were last read.
+    read: Cell<Instant>,
+    /// The pictures drawn so far, by mode, icon size and colours. Drawing one
+    /// takes longer than a keystroke should wait for the indicator.
+    drawn: RefCell<Vec<(Look, mode_icon::Drawing)>>,
     _guard: ModuleGuard,
 }
 
+/// What decides the picture of the button: the mode, the size and the colours.
+type Look = (bool, i32, mode_icon::Palette);
+
+/// More looks than one thread shows: two modes at a few sizes and themes.
+const DRAWN_LIMIT: usize = 8;
+
 impl ModeButton {
     fn new(switch: input_mode::Switch, tid: u32, settings: Settings) -> Self {
-        let shown = (switch.japanese(), mode_icon::Palette::of_taskbar());
+        let colours = Box::new(mode_icon::Palette::of_taskbar);
+        Self::with_colours(switch, tid, settings, colours)
+    }
+
+    fn with_colours(
+        switch: input_mode::Switch,
+        tid: u32,
+        settings: Settings,
+        colours: Box<dyn Fn() -> mode_icon::Palette>,
+    ) -> Self {
+        let shown = (switch.japanese(), colours());
         Self {
             switch: RefCell::new(Some(switch)),
             tid,
             settings,
             sink: RefCell::new(None),
+            colours,
             shown: Cell::new(Some(shown)),
+            read: Cell::new(Instant::now()),
+            drawn: RefCell::new(Vec::new()),
             _guard: ModuleGuard::new(),
         }
+    }
+
+    /// The picture of the current mode, drawn once for each look.
+    fn drawing(&self) -> Result<mode_icon::Drawing> {
+        let look: Look = (
+            self.japanese()?,
+            mode_icon::small_icon_size(),
+            (self.colours)(),
+        );
+        let kept = self.drawn.try_borrow().ok().and_then(|drawn| {
+            drawn
+                .iter()
+                .find(|(kept, _)| *kept == look)
+                .map(|(_, drawing)| drawing.clone())
+        });
+        if let Some(drawing) = kept {
+            return Ok(drawing);
+        }
+        let drawing = mode_icon::Drawing::new(face(look.0).glyph, look.1, look.2)?;
+        if let Ok(mut drawn) = self.drawn.try_borrow_mut() {
+            if drawn.len() >= DRAWN_LIMIT {
+                drawn.clear();
+            }
+            drawn.push((look, drawing.clone()));
+        }
+        Ok(drawing)
     }
 
     fn switch(&self) -> Result<input_mode::Switch> {
@@ -224,10 +280,15 @@ impl ModeButton {
 
     /// Tells the indicator when the mode or the taskbar colours have changed.
     pub(super) fn sync(&self) {
+        self.sync_at(Instant::now());
+    }
+
+    fn sync_at(&self, time: Instant) {
         let Ok(japanese) = self.japanese() else {
             return;
         };
-        let now = (japanese, mode_icon::Palette::of_taskbar());
+        self.read.set(time);
+        let now = (japanese, (self.colours)());
         if self.shown.replace(Some(now)) == Some(now) {
             return;
         }
@@ -235,6 +296,20 @@ impl ModeButton {
         let sink = self.sink.try_borrow().ok().and_then(|sink| sink.clone());
         if let Some(sink) = sink {
             let _ = unsafe { sink.OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP) };
+        }
+    }
+
+    /// Called for every key. The taskbar theme can change while this thread
+    /// keeps the focus, and nothing reports that to a text service. The icon
+    /// has no outline to stay legible on the other theme, so the colours are
+    /// read again, at most once in `COLOUR_INTERVAL`.
+    pub(super) fn refresh(&self) {
+        self.refresh_at(Instant::now());
+    }
+
+    fn refresh_at(&self, time: Instant) {
+        if time.saturating_duration_since(self.read.get()) >= COLOUR_INTERVAL {
+            self.sync_at(time);
         }
     }
 
@@ -320,11 +395,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
         }
     }
     fn GetIcon(&self) -> Result<HICON> {
-        mode_icon::render(
-            face(self.japanese()?).glyph,
-            mode_icon::small_icon_size(),
-            mode_icon::Palette::of_taskbar(),
-        )
+        self.drawing()?.icon()
     }
     fn GetText(&self) -> Result<BSTR> {
         Ok(face(self.japanese()?).name.into())
@@ -663,6 +734,124 @@ mod tests {
             switch.apply(tid, input_mode::Command::Off)?;
             button.sync();
             assert_eq!(updates.borrow().len(), 1);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_theme_change_reaches_the_indicator_with_the_next_key() -> Result<()> {
+        with_tip(|_, _, tid, switch| unsafe {
+            let (available, opened) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(0)));
+            let theme = Rc::new(Cell::new(mode_icon::Palette::ON_DARK));
+            let reads = Rc::new(Cell::new(0u32));
+            let colours = {
+                let (theme, reads) = (theme.clone(), reads.clone());
+                move || {
+                    reads.set(reads.get() + 1);
+                    theme.get()
+                }
+            };
+            let button = ComObject::new(ModeButton::with_colours(
+                switch,
+                tid,
+                settings(&available, &opened),
+                Box::new(colours),
+            ));
+            let updates = Rc::new(RefCell::new(Vec::new()));
+            let sink: ITfLangBarItemSink = Updates(updates.clone()).into();
+            let source = button.to_interface::<ITfSource>();
+            source.AdviseSink(&ITfLangBarItemSink::IID, &sink)?;
+            let made = button.read.get();
+            assert_eq!(reads.get(), 1);
+            // The taskbar turns light while this thread keeps the focus. Keys
+            // soon after the last reading rely on it.
+            theme.set(mode_icon::Palette::ON_LIGHT);
+            button.refresh_at(made);
+            button.refresh_at(made + Duration::from_millis(900));
+            assert_eq!(reads.get(), 1);
+            assert!(updates.borrow().is_empty());
+            // A later key reads the colours again and the indicator redraws.
+            button.refresh_at(made + Duration::from_secs(2));
+            assert_eq!(reads.get(), 2);
+            assert_eq!(*updates.borrow(), [CHANGED]);
+            // The icon is drawn in the colours of that moment.
+            let icon = button.to_interface::<ITfLangBarItemButton>().GetIcon()?;
+            DestroyIcon(icon)?;
+            assert_eq!(reads.get(), 3);
+            assert_eq!(
+                button.drawn.borrow().first().map(|(look, _)| look.2),
+                Some(mode_icon::Palette::ON_LIGHT)
+            );
+            // Further keys within the interval, and a clock that runs
+            // backwards, read nothing.
+            button.refresh_at(made + Duration::from_millis(2900));
+            button.refresh_at(made);
+            assert_eq!(reads.get(), 3);
+            // An unchanged theme is read again later without a redraw.
+            button.refresh_at(made + Duration::from_secs(4));
+            assert_eq!(reads.get(), 4);
+            assert_eq!(updates.borrow().len(), 1);
+            // A released button reads nothing.
+            button.detach();
+            button.refresh_at(made + Duration::from_secs(9));
+            assert_eq!(reads.get(), 4);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn the_button_draws_each_look_once() -> Result<()> {
+        with_tip(|_, _, tid, switch| unsafe {
+            let (available, opened) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(0)));
+            let theme = Rc::new(Cell::new(mode_icon::Palette::ON_DARK));
+            let colours = {
+                let theme = theme.clone();
+                move || theme.get()
+            };
+            let button = ComObject::new(ModeButton::with_colours(
+                switch.clone(),
+                tid,
+                settings(&available, &opened),
+                Box::new(colours),
+            ));
+            let item = button.to_interface::<ITfLangBarItemButton>();
+            let looks = || -> Vec<(bool, mode_icon::Palette)> {
+                let drawn = button.drawn.borrow();
+                drawn.iter().map(|(look, _)| (look.0, look.2)).collect()
+            };
+            // Nothing is drawn before the indicator asks.
+            assert!(looks().is_empty());
+            DestroyIcon(item.GetIcon()?)?;
+            let first = button.drawn.borrow().clone();
+            assert_eq!(looks(), [(true, mode_icon::Palette::ON_DARK)]);
+            // The same look again is the kept picture.
+            DestroyIcon(item.GetIcon()?)?;
+            assert_eq!(*button.drawn.borrow(), first);
+            // The other mode and the other theme are pictures of their own.
+            switch.apply(tid, input_mode::Command::Off)?;
+            DestroyIcon(item.GetIcon()?)?;
+            theme.set(mode_icon::Palette::ON_LIGHT);
+            DestroyIcon(item.GetIcon()?)?;
+            assert_eq!(
+                looks(),
+                [
+                    (true, mode_icon::Palette::ON_DARK),
+                    (false, mode_icon::Palette::ON_DARK),
+                    (false, mode_icon::Palette::ON_LIGHT),
+                ]
+            );
+            assert_ne!(button.drawn.borrow().first(), button.drawn.borrow().get(1));
+            // Looks beyond the limit start the collection again.
+            for shade in 1..=DRAWN_LIMIT as u8 {
+                theme.set(mode_icon::Palette {
+                    glyph: [shade, 0, 0],
+                    opacity: 255,
+                });
+                DestroyIcon(item.GetIcon()?)?;
+                assert!(button.drawn.borrow().len() <= DRAWN_LIMIT);
+            }
+            assert_eq!(looks().len(), 3);
+            assert_eq!(looks().last().map(|look| look.1.glyph), Some([8, 0, 0]));
             Ok(())
         })
     }

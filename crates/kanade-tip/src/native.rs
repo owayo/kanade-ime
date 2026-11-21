@@ -405,16 +405,25 @@ impl Tip {
             _guard: ModuleGuard::new(),
         }
     }
-    /// Lets the taskbar button show the current mode and taskbar colours.
-    fn sync_button(&self) {
-        // The indicator calls back into the button, so no borrow is held.
-        let button = self
-            .button
+    /// The taskbar button, when this thread has one. The indicator calls
+    /// back into the button, so the caller holds no borrow of the slot.
+    fn taskbar_button(&self) -> Option<windows_core::ComObject<language_bar::ModeButton>> {
+        self.button
             .try_borrow()
             .ok()
-            .and_then(|button| button.as_ref().map(language_bar::Item::button));
-        if let Some(button) = button {
+            .and_then(|button| button.as_ref().map(language_bar::Item::button))
+    }
+    /// Lets the taskbar button show the current mode and taskbar colours.
+    fn sync_button(&self) {
+        if let Some(button) = self.taskbar_button() {
             button.sync();
+        }
+    }
+    /// Lets the button notice a taskbar theme that changed while this thread
+    /// kept the focus. Called for every key, so the button paces itself.
+    fn refresh_button(&self) {
+        if let Some(button) = self.taskbar_button() {
+            button.refresh();
         }
     }
 }
@@ -528,6 +537,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         Ok(())
     }
     fn OnTestKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        self.refresh_button();
         if input_mode::physical(w.0).is_some() {
             return Ok(true.into());
         }
@@ -570,6 +580,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             .into())
     }
     fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        self.refresh_button();
         if let Some(command) = input_mode::physical(w.0) {
             if l.0 & (1 << 30) == 0 {
                 self.set_input_mode(command, context.as_ref())?;
