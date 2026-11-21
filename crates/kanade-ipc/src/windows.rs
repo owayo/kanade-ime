@@ -106,12 +106,53 @@ unsafe extern "system" {
         required: *mut u32,
     ) -> i32;
     fn ConvertSidToStringSidW(sid: *const c_void, string: *mut *mut u16) -> i32;
+    fn ConvertStringSidToSidW(string: *const u16, sid: *mut *mut c_void) -> i32;
     fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
         string: *const u16,
         revision: u32,
         descriptor: *mut *mut c_void,
         size: *mut u32,
     ) -> i32;
+    fn GetSecurityInfo(
+        object: Handle,
+        kind: i32,
+        information: u32,
+        owner: *mut *mut c_void,
+        group: *mut *mut c_void,
+        dacl: *mut *mut c_void,
+        sacl: *mut *mut c_void,
+        descriptor: *mut *mut c_void,
+    ) -> u32;
+    fn SetSecurityInfo(
+        object: Handle,
+        kind: i32,
+        information: u32,
+        owner: *const c_void,
+        group: *const c_void,
+        dacl: *const c_void,
+        sacl: *const c_void,
+    ) -> u32;
+    fn SetEntriesInAclW(
+        count: u32,
+        entries: *const ExplicitAccess,
+        old: *const c_void,
+        new: *mut *mut c_void,
+    ) -> u32;
+}
+#[repr(C)]
+struct Trustee {
+    multiple: *mut c_void,
+    operation: i32,
+    form: i32,
+    kind: i32,
+    name: *mut c_void,
+}
+#[repr(C)]
+struct ExplicitAccess {
+    permissions: u32,
+    mode: i32,
+    inheritance: u32,
+    trustee: Trustee,
 }
 struct Owned(Handle);
 unsafe impl Send for Owned {}
@@ -202,6 +243,122 @@ fn named(prefix: &str) -> io::Result<String> {
         session(unsafe { GetCurrentProcessId() })?
     ))
 }
+/// The two groups every packaged application belongs to: the ordinary ones
+/// and those with fewer privileges. The pipe admits the same two.
+const PACKAGES: [&str; 2] = ["S-1-15-2-1", "S-1-15-2-2"];
+
+/// Adds `access` for every packaged application to the access list of a
+/// kernel object. `object` must allow reading and writing that list.
+fn grant_to_packages(object: Handle, access: u32) -> io::Result<()> {
+    // SE_KERNEL_OBJECT and DACL_SECURITY_INFORMATION.
+    const KERNEL_OBJECT: i32 = 6;
+    const ACCESS_LIST: u32 = 4;
+    // These three report their error as their result.
+    let done = |code: u32| match code {
+        0 => Ok(()),
+        code => Err(io::Error::from_raw_os_error(code as i32)),
+    };
+    let mut current = null_mut();
+    let mut descriptor = null_mut();
+    done(unsafe {
+        GetSecurityInfo(
+            object,
+            KERNEL_OBJECT,
+            ACCESS_LIST,
+            null_mut(),
+            null_mut(),
+            &mut current,
+            null_mut(),
+            &mut descriptor,
+        )
+    })?;
+    let mut groups = [null_mut(); PACKAGES.len()];
+    let result = (|| {
+        // An object without a list is open to everyone already. A list made
+        // of these entries alone would close it to everyone else.
+        if current.is_null() {
+            return Ok(());
+        }
+        for (group, name) in groups.iter_mut().zip(PACKAGES) {
+            if unsafe { ConvertStringSidToSidW(wide(name).as_ptr(), group) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        let entries = groups.map(|group| ExplicitAccess {
+            permissions: access,
+            // GRANT_ACCESS: merged with what the group already has.
+            mode: 1,
+            inheritance: 0,
+            trustee: Trustee {
+                multiple: null_mut(),
+                operation: 0,
+                // TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP.
+                form: 0,
+                kind: 5,
+                name: group,
+            },
+        });
+        let mut extended = null_mut();
+        done(unsafe {
+            SetEntriesInAclW(
+                entries.len() as u32,
+                entries.as_ptr(),
+                current,
+                &mut extended,
+            )
+        })?;
+        let set = done(unsafe {
+            SetSecurityInfo(
+                object,
+                KERNEL_OBJECT,
+                ACCESS_LIST,
+                null(),
+                null(),
+                extended,
+                null(),
+            )
+        });
+        unsafe {
+            LocalFree(extended);
+        }
+        set
+    })();
+    unsafe {
+        for group in groups {
+            LocalFree(group);
+        }
+        LocalFree(descriptor);
+    }
+    result
+}
+
+/// Lets the sandboxed peers that the pipe admits identify this process.
+///
+/// A frontend checks which program serves the pipe, and as which user,
+/// before it sends a key. For that it opens the serving process and its
+/// token, which a packaged application may not do by default: such a host
+/// could open the pipe and still never connect. This grants every package
+/// the two rights that check needs and nothing more: the limited query
+/// right on the process, and the right to read its token. The first shows
+/// the image name, the command line, the exit status and the process's time
+/// and I/O counters; the second the user, groups and privileges. Neither
+/// allows reading memory, waiting for, or changing the process. The
+/// counters move with every request, so a package that polls them can tell
+/// when the user types, though not what; a password field never reaches
+/// this process. Call it once in a process that serves an endpoint.
+pub fn identify_to_packages() -> io::Result<()> {
+    // PROCESS_QUERY_LIMITED_INFORMATION. The pseudo-handle has every right.
+    grant_to_packages(unsafe { GetCurrentProcess() }, 0x1000)?;
+    let mut token = null_mut();
+    // READ_CONTROL and WRITE_DAC, to read and write the token's access list.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), 0x0006_0000, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = owned(token)?;
+    // TOKEN_QUERY.
+    grant_to_packages(token.0, 0x0008)
+}
+
 fn verify(pipe: Handle, server: bool, expected: Option<&Path>) -> io::Result<()> {
     let mut pid = 0;
     let ok = unsafe {
@@ -618,6 +775,18 @@ mod tests {
             }
         }
         peers.join().unwrap();
+        let _client = Pipe::connect_to(&name, &this_process()).unwrap();
+        assert!(listener.accept().is_ok());
+    }
+    #[test]
+    fn letting_packages_identify_this_process_keeps_every_other_access() {
+        // Whether a sandboxed peer can then identify the process is tested
+        // with a real one, against the engine. Here: the grants are
+        // additions, can be repeated, and leave this user's access as it was.
+        identify_to_packages().unwrap();
+        identify_to_packages().unwrap();
+        let name = private_endpoint();
+        let mut listener = Listener::bind_to(&name).unwrap();
         let _client = Pipe::connect_to(&name, &this_process()).unwrap();
         assert!(listener.accept().is_ok());
     }

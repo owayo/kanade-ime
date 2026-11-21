@@ -145,6 +145,7 @@ Windowsでエンジンが止まったときは、このファイルの次の記�
 | `connection-refused-at-capacity` | 同時に接続できるアプリの上限（32）に達し、新しい接続を断った |
 | `connection-rejected` | 接続直後に相手が終了した、または同じユーザー・セッションのプロセスではなかった |
 | `listener-failed`・`fatal-listener-lost` | 接続を受け付けるパイプを用意できなかった。続いた場合はエンジンを終了し、監視が起動し直す |
+| `sandboxed-hosts-unreachable` | ストアアプリのように制限された環境で動くアプリに、接続先がエンジンであることを確かめる許可を出せなかった。そのアプリでは変換できない。ほかのアプリには影響しない |
 
 `engine-started` が2回続き、その間に `engine-exited` も `watch-started` も無い場合は、監視なしで起動したエンジンが記録を残さずに終了しています。
 

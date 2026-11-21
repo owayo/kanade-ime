@@ -71,6 +71,9 @@ pub enum Event {
     ConnectionThreadFailed,
     /// No pipe instance could be offered; the listener retries.
     ListenerFailed,
+    /// The engine could not let sandboxed hosts identify it. They will not
+    /// connect; every other host is unaffected.
+    SandboxedHostsUnreachable,
     /// A thread panicked. Carries the thread and the source position.
     Panicked,
     /// The engine dropped every session after a panic and kept running.
@@ -137,6 +140,7 @@ impl Event {
             Self::ConnectionRefusedAtCapacity => "connection-refused-at-capacity",
             Self::ConnectionThreadFailed => "connection-thread-failed",
             Self::ListenerFailed => "listener-failed",
+            Self::SandboxedHostsUnreachable => "sandboxed-hosts-unreachable",
             Self::Panicked => "panicked",
             Self::RecoveredFromPanic => "recovered-from-panic",
             Self::FatalAlreadyRunning => "fatal-already-running",
