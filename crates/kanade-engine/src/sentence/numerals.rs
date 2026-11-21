@@ -4,6 +4,7 @@
 //! The reading of 二位 and 2位 is the same, so the spelling follows the style
 //! of the text. This module only offers the alternatives; the model compares
 //! them after the committed context.
+use std::ops::Range;
 
 const DIGITS: &str = "〇一二三四五六七八九";
 /// Words counted with a preceding number.
@@ -44,7 +45,7 @@ fn unit(c: char) -> Option<u32> {
     }
 }
 
-fn numeral(c: char) -> bool {
+pub(super) fn numeral(c: char) -> bool {
     DIGITS.contains(c) || unit(c).is_some()
 }
 
@@ -53,7 +54,7 @@ fn wide(c: char) -> bool {
 }
 
 // 二十三 is 23 and 一九九〇 is 1990; 二十百 and 三三十 are not numbers.
-fn value(word: &str) -> Option<String> {
+pub(super) fn value(word: &str) -> Option<String> {
     let digit = |c: char| DIGITS.chars().position(|d| d == c);
     if word.chars().all(|c| digit(c).is_some()) {
         return Some(
@@ -96,7 +97,7 @@ fn counted(rest: &str) -> bool {
     }
 }
 
-fn runs(text: &str, following: &str) -> Vec<Run> {
+fn runs(text: &str, following: &str, spoken: &[String]) -> Vec<Run> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut found = Vec::new();
     let mut i = 0;
@@ -131,9 +132,12 @@ fn runs(text: &str, following: &str) -> Vec<Run> {
             w.strip_prefix(word)
                 .is_some_and(|tail| rest.starts_with(tail))
         });
-        if !matches!(before, Some('数' | '何' | '幾'))
+        // A number read from the kana is one whatever follows it.
+        let known = spoken.iter().any(|number| number == word);
+        let amount = !matches!(before, Some('数' | '何' | '幾'))
             && (before == Some('第') || !fixed)
-            && counted(&rest)
+            && counted(&rest);
+        if (known || amount)
             && let Some(digits) = value(word)
         {
             found.push(Run { start, end, digits });
@@ -154,11 +158,23 @@ fn rewrite(text: &str, runs: &[&Run]) -> String {
     result
 }
 
+/// `text` with the numbers that lie in `range` written with digits, when it
+/// has one there. `following` is the text displayed after it.
+pub(super) fn digits_within(text: &str, following: &str, range: Range<usize>) -> Option<String> {
+    let found = runs(text, following, &[]);
+    let inside: Vec<&Run> = found
+        .iter()
+        .filter(|run| range.start <= run.start && run.end <= range.end)
+        .collect();
+    (!inside.is_empty()).then(|| rewrite(text, &inside))
+}
+
 /// Spellings of `text` with digits: every number at once, then each of the
 /// first two numbers alone when there are several. `following` is the text
 /// displayed after it, which decides whether a final numeral is counted.
-pub(super) fn variants(text: &str, following: &str) -> Vec<String> {
-    let found = runs(text, following);
+/// `spoken` are kanji numerals known to be numbers from their reading.
+pub(super) fn variants(text: &str, following: &str, spoken: &[String]) -> Vec<String> {
+    let found = runs(text, following, spoken);
     let mut result = Vec::new();
     if found.is_empty() {
         return result;
@@ -195,11 +211,11 @@ mod tests {
             ("三か月の", "3か月の"),
             ("島式ホーム一面二線の", "島式ホーム1面2線の"),
         ] {
-            assert_eq!(variants(text, "")[0], expected, "{text}");
+            assert_eq!(variants(text, "", &[])[0], expected, "{text}");
         }
         // Each number can also change alone.
         assert_eq!(
-            variants("三人体制での二枚目と", ""),
+            variants("三人体制での二枚目と", "", &[]),
             [
                 "3人体制での2枚目と",
                 "3人体制での二枚目と",
@@ -207,8 +223,30 @@ mod tests {
             ]
         );
         // The counter may be displayed after the scored text.
-        assert_eq!(variants("同じく二", "位だった"), ["同じく2"]);
-        assert!(variants("同じく二", "").is_empty());
+        assert_eq!(variants("同じく二", "位だった", &[]), ["同じく2"]);
+        assert!(variants("同じく二", "", &[]).is_empty());
+        // A number known from its reading needs no counter after it.
+        let spoken = ["二〇〇".to_owned(), "二五".to_owned()];
+        assert_eq!(
+            variants("リーグ戦二〇〇試合近くに", "", &spoken),
+            ["リーグ戦200試合近くに"]
+        );
+        assert_eq!(variants("樹高約二五", "", &spoken), ["樹高約25"]);
+        assert!(variants("樹高約二五", "", &[]).is_empty());
+        assert!(variants("三二五試合", "", &spoken).is_empty());
+        // Only the numbers of one part of the text.
+        let text = "四級から三段まで";
+        let part = 0.."四級から".len();
+        assert_eq!(
+            digits_within(text, "", part.clone()).as_deref(),
+            Some("4級から三段まで")
+        );
+        assert_eq!(
+            digits_within(text, "", 0..text.len()).as_deref(),
+            Some("4級から3段まで")
+        );
+        assert_eq!(digits_within("四季から三段まで", "", part), None);
+        assert_eq!(digits_within("約二語", "", 0.."約二語".len()), None);
     }
 
     #[test]
@@ -229,11 +267,11 @@ mod tests {
             "一種の",
             "一体となって",
         ] {
-            assert!(variants(text, "").is_empty(), "{text}");
+            assert!(variants(text, "", &[]).is_empty(), "{text}");
         }
-        assert!(variants("十", "分な時間").is_empty());
+        assert!(variants("十", "分な時間", &[]).is_empty());
         // An ordinal is a number even where the bare word is not.
-        assert_eq!(variants("第一線で", ""), ["第1線で"]);
+        assert_eq!(variants("第一線で", "", &[]), ["第1線で"]);
         assert_eq!(value("二千二十四").as_deref(), Some("2024"));
         assert_eq!(value("千").as_deref(), Some("1000"));
         assert!(value("三三十").is_none());

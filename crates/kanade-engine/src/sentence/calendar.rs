@@ -111,9 +111,13 @@ pub(super) fn years(parts: &[Segment], context: &str) -> Option<Vec<(usize, usiz
                 break;
             }
             if let Some((year, ending)) = calendar_year(&joined) {
+                // に before せん and an early year is more often the first digit
+                // of 20xx, attached to the previous word as a particle. Both
+                // readings are then left to the scored comparison of numbers.
                 if start > 0
                     && joined.starts_with("せん")
-                    && DIGITS.iter().any(|(k, _)| *k == parts[start - 1].reading)
+                    && (DIGITS.iter().any(|(k, _)| *k == parts[start - 1].reading)
+                        || (year < 1100 && parts[start - 1].reading.ends_with('に')))
                 {
                     continue;
                 }
@@ -195,5 +199,25 @@ mod tests {
         );
         assert_eq!(number("せんきゅうひゃくはちじゅうよ"), Some(1984));
         assert!(number("にせんさんさん").is_none());
+    }
+
+    #[test]
+    fn a_particle_that_could_begin_the_year_leaves_it_undecided() {
+        // の and 2006, or のに and 1006.
+        let s = parts(&[
+            ("のに", "のに"),
+            ("せん", "線"),
+            ("ろく", "六"),
+            ("ねんど", "年度"),
+        ]);
+        assert!(surface(&s, "").is_none());
+        // に cannot begin 1990.
+        let s = parts(&[
+            ("すでに", "すでに"),
+            ("せん", "線"),
+            ("きゅうひゃく", "九百"),
+            ("きゅうじゅうねんには", "九十年には"),
+        ]);
+        assert_eq!(surface(&s, "").as_deref(), Some("すでに1990年には"));
     }
 }
