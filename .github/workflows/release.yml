@@ -70,23 +70,14 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/release-assets.py checksums release
           (cd release && sha256sum --check SHA256SUMS)
-          python3 - <<'PY'
-          import os, pathlib, sys, tomllib
-          sys.path.insert(0, ".github/scripts")
-          from bundled_model import locked_model
-          model = locked_model()
-          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
-          tag = f"v{version}-preview.{os.environ['GITHUB_RUN_NUMBER']}"
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              print(f"tag={tag}", file=out)
-          ci = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['CI_RUN']}"
-          pathlib.Path("preview-notes.md").write_text(
-              f"Kanade {version} のプレビュー版です。Windows x64 の EXE は未署名、Apple Silicon Mac の DMG は一時署名・未公証です。\n\n"
-              f"どちらにも Tsumugi {model['version']}（{model['size']:,} バイト）を同梱しています。\n\n"
-              f"モデルの SHA-256 は `{model['sha256']}` です。インストーラーは添付の SHA256SUMS で照合できます。\n\n"
-              f"`{model['file']}` は同梱しているモデルの写しで、インストーラーのビルドが取得するために添付しています。利用するときにダウンロードする必要はありません。\n\n"
-              f"[両 OS のインストーラー検査]({ci})\n", encoding="utf-8")
-          PY
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          tag="v$version-preview.$GITHUB_RUN_NUMBER"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # The text tells people who update what the bundled model needs from them.
+          python3 .github/scripts/release_notes.py preview \
+            --version "$version" --tag "$tag" --repo "$GITHUB_REPOSITORY" \
+            --ci "https://github.com/$GITHUB_REPOSITORY/actions/runs/$CI_RUN" \
+            --output preview-notes.md
           cat preview-notes.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish and verify the preview
         if: ${{ !inputs.dry_run }}
@@ -329,6 +320,16 @@ jobs:
         run: python3 .github/scripts/release-assets.py checksums release --expected "$EXPECTED"
       - name: Check the checksum manifest with the system hasher
         run: cd release && sha256sum --check SHA256SUMS
+      # The text tells people who update what the bundled model needs from them.
+      - name: Write the release text
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_notes.py stable \
+            --tag "$TAG" --repo "$GITHUB_REPOSITORY" --output release-notes.md
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare-release.outputs.tag }}
@@ -341,12 +342,7 @@ jobs:
             release/kanade-ime-x86_64-pc-windows-msvc.exe
             release/tsumugi.gguf
             release/SHA256SUMS
-          body: |
-            Windows x64とApple Silicon Mac向けの日本語入力IMEです。
-            SHA256SUMSで照合してから、インストーラーを開いてください。
-            macOSはDMG内の「Kanade インストーラー.app」、WindowsはEXEを起動します。
-            導入手順とネイティブ検証の状況も確認してください。
-            tsumugi.ggufは同梱しているモデルの写しです。インストーラーのビルドが取得するために添付しています。
+          body_path: release-notes.md
       - name: Verify published assets
         env:
           GH_TOKEN: ${{ github.token }}
