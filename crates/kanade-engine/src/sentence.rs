@@ -21,6 +21,23 @@ const MAX_WINDOWS: usize = 4;
 const SCAN_START_MS: u64 = 350;
 /// Changes already chosen are shown instead of waiting longer for another window.
 const SCAN_APPLY_MS: u64 = 600;
+/// Thresholds that the scripted scores of the unit tests are written against.
+/// Registering other weights changes none of their expectations.
+#[cfg(test)]
+pub(crate) const TEST_POLICY: Preview = Preview {
+    sentence: 5.0,
+    clause: 7.0,
+    runner_up: 0.75,
+    added: 2.0,
+    ending: 1.5,
+    rank: 0.75,
+    digits_seen: 0.0,
+    digits: 3.0,
+    shortlist: 6,
+    shortlist_cost: 32,
+    rounds: 1,
+    katakana: 8,
+};
 
 /// A segment whose displayed spelling a candidate replaces.
 type Change = (usize, String);
@@ -950,7 +967,7 @@ mod tests {
     #[test]
     fn a_long_clause_is_scored_in_consecutive_windows() {
         use super::{FocusCandidate, Job, MAX_WINDOWS, Segment, scored_windows};
-        let policy = &kanade_llm::profile::CATALOG[0].preview;
+        let policy = &super::TEST_POLICY;
         let option = |value: &str| FocusCandidate {
             reading: String::new(),
             annotation: String::new(),
@@ -1041,7 +1058,7 @@ mod tests {
             changes: vec![None; 3],
             lattice: None,
             round: 1,
-            policy: kanade_llm::profile::CATALOG[0].preview,
+            policy: super::TEST_POLICY,
         };
         // A lead of five over the display and 3.75 over the runner-up, after penalties.
         assert_eq!(
@@ -1083,7 +1100,7 @@ mod tests {
     #[test]
     fn numbers_are_compared_after_the_words_and_follow_committed_digits() {
         use super::{Job, Proposal};
-        let policy = kanade_llm::profile::CATALOG[0].preview;
+        let policy = super::TEST_POLICY;
         let words = Proposal {
             job: Job {
                 context: "2010年には".into(),
@@ -1136,7 +1153,7 @@ mod tests {
         // A model whose registration allows a second accepted spelling per window.
         let policy = &Preview {
             rounds: 2,
-            ..kanade_llm::profile::CATALOG[0].preview
+            ..super::TEST_POLICY
         };
         let option = |value: &str| FocusCandidate {
             reading: String::new(),
