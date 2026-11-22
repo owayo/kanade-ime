@@ -8,7 +8,7 @@ use kanade_engine::config::Config;
 use kanade_ipc::settings_log::{
     Component as LogComponent, Event as LogEvent, record as settings_log,
 };
-use kanade_ipc::{Manage, manage::Action};
+use kanade_ipc::{Manage, StoreState, manage::Action};
 mod control;
 mod dictionary_panel;
 mod icon;
@@ -35,6 +35,8 @@ struct Settings {
     model_remove_confirm: bool,
     config: Config,
     settings_loaded: bool,
+    /// What the engine could read, as of the last refresh.
+    stores: crate::Stores,
     loading: bool,
     records: Vec<serde_json::Value>,
     total: u64,
@@ -67,6 +69,7 @@ impl Settings {
             model_remove_confirm: false,
             config: Config::default(),
             settings_loaded: false,
+            stores: crate::Stores::UNKNOWN,
             loading: false,
             records: vec![],
             total: 0,
@@ -93,7 +96,7 @@ impl Settings {
         self.status = "設定を取得しています。".into();
         let offset = self.offset;
         let task = cx.background_spawn(async move {
-            let config = crate::settings();
+            let config = crate::settings_with_stores();
             let records = crate::manage(Manage {
                 action: Action::ListLearning as i32,
                 offset,
@@ -123,8 +126,9 @@ impl Settings {
                     settings_log(LogComponent::Settings, LogEvent::Loaded);
                 }
                 let config_ok = config.is_ok();
-                if let Ok(config) = config {
+                if let Ok((config, stores)) = config {
                     this.config = config;
+                    this.stores = stores;
                     this.settings_loaded = true;
                 }
                 this.status = match records {
@@ -156,6 +160,11 @@ impl Settings {
             // Unloaded defaults must not overwrite the saved settings.
             self.status =
                 "設定を取得できていないため変更できません。「更新」を押してください。".into();
+            return;
+        }
+        if self.stores.settings == StoreState::Unreadable {
+            // The engine refuses too: the file it could not read stays as it is.
+            self.status = "設定ファイルを読めないため、変更を保存できません。".into();
             return;
         }
         let before = self.config.clone();
@@ -274,8 +283,53 @@ fn caption(label: &'static str, detail: &'static str) -> gpui::Div {
 /// One end of a numeric setting: element ID, accessible label and the change.
 type SettingStep = (&'static str, &'static str, fn(&mut Config));
 impl Settings {
+    /// Whether the settings can be changed now. Not while the engine cannot
+    /// read its settings file, which it then never writes.
     fn ready(&self) -> bool {
-        self.settings_loaded && !self.loading && !self.learning_busy
+        self.settings_loaded
+            && !self.loading
+            && !self.learning_busy
+            && self.stores.settings != StoreState::Unreadable
+    }
+    /// Why the engine runs without its settings or its learning store, and
+    /// what brings them back. Shown until a refresh finds them readable.
+    fn store_notice(&self) -> Option<gpui::Div> {
+        let settings = self.stores.settings == StoreState::Unreadable;
+        let learning = self.stores.learning == StoreState::Unreadable;
+        if !settings && !learning {
+            return None;
+        }
+        // The engine names the file it opened; this application may run with
+        // another data directory.
+        let file = |named: &str, name: &str| {
+            if named.is_empty() {
+                name.to_string()
+            } else {
+                named.to_string()
+            }
+        };
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .bg(rgb(0xffecee))
+                .when(settings, |notice| {
+                    notice.child(format!(
+                        "設定ファイル（{}）を読めないため、学習や Tsumugi などの機能を止めています。このファイルは書き換えません。直すか削除してから「更新」を押すと、読み直します。",
+                        file(&self.stores.settings_file, "settings.toml")
+                    ))
+                })
+                .when(learning, |notice| {
+                    notice.child(format!(
+                        "学習の記録（{}）を読めないため、Kanade の学習を止めています。このファイルは書き換えません。直すか削除してから{}し直すと、読み直します。",
+                        file(&self.stores.learning_file, "learning.json"),
+                        if cfg!(windows) { "サインイン" } else { "ログイン" }
+                    ))
+                }),
+        )
     }
     fn toggle(
         &self,
@@ -388,7 +442,9 @@ impl Settings {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(if self.total == 0 {
+                    .child(if self.stores.learning == StoreState::Unreadable {
+                        "記録を読めないため、表示できません。".to_string()
+                    } else if self.total == 0 {
                         "記録はありません。".to_string()
                     } else {
                         format!("{} 件中 {}〜{} 件", self.total, self.offset + 1, last)
@@ -668,6 +724,7 @@ impl Render for Settings {
                             .text_color(rgb(ACCENT))
                             .child(self.status.clone()),
                     )
+                    .when_some(self.store_notice(), |header, notice| header.child(notice))
                     .when_some(self.learning_close_notice(cx), |header, notice| header.child(notice)),
             )
             .child(

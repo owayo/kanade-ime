@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use kanade_ipc::{Manage, manage::Action};
+use kanade_ipc::{Manage, StoreState, manage::Action};
 mod dictionary;
 /// Windows opens a console for this program when it is started from the Start
 /// menu or Explorer, unless the packaged manifest tells Windows 11 24H2 or
@@ -60,7 +60,14 @@ fn main() -> Result<()> {
                 }
                 kanade_ui::save(&serde_json::from_slice(&bytes)?)?;
             }
-            println!("{}", serde_json::to_string_pretty(&kanade_ui::settings()?)?);
+            let (settings, stores) = kanade_ui::settings_with_stores()?;
+            if stores.settings == StoreState::Unreadable {
+                eprintln!(
+                    "The settings file {} cannot be read. The engine keeps every optional feature off and saves no settings until it can.",
+                    stores.settings_file
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&settings)?);
             Ok(())
         }
         Some("dictionary") => dictionary::run(&args[2..]),
@@ -101,7 +108,13 @@ fn main() -> Result<()> {
                 },
                 _ => bail!("unknown learning command"),
             };
-            let result = kanade_ui::manage(request)?;
+            let (result, stores) = kanade_ui::manage_with_stores(request)?;
+            if stores.learning == StoreState::Unreadable {
+                eprintln!(
+                    "The learning store {} cannot be read. Kanade learns nothing and leaves the file unchanged until it is started again.",
+                    stores.learning_file
+                );
+            }
             if result.get("cleared") == Some(&serde_json::Value::Bool(false)) {
                 bail!("learning could not be cleared: {}", result["reason"]);
             }

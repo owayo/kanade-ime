@@ -14,7 +14,30 @@ pub mod writing;
 type Stream = ipc::unix::DeadlineStream;
 #[cfg(windows)]
 type Stream = ipc::windows::Pipe;
+/// Whether the engine could read its settings file and its learning store
+/// when it started. Both are unspecified for an engine from before this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stores {
+    pub settings: StoreState,
+    pub learning: StoreState,
+    /// A file the engine could not read, as the engine opened it, since this
+    /// application may run with another data directory. Empty otherwise.
+    pub settings_file: String,
+    pub learning_file: String,
+}
+impl Stores {
+    pub const UNKNOWN: Self = Self {
+        settings: StoreState::Unspecified,
+        learning: StoreState::Unspecified,
+        settings_file: String::new(),
+        learning_file: String::new(),
+    };
+}
 pub fn manage(request: Manage) -> Result<serde_json::Value> {
+    Ok(manage_with_stores(request)?.0)
+}
+/// Like `manage`, also reporting what the engine could read.
+pub fn manage_with_stores(request: Manage) -> Result<(serde_json::Value, Stores)> {
     let timeout = Duration::from_secs(if request.action == Action::EditProject as i32 {
         15
     } else {
@@ -59,14 +82,29 @@ pub fn manage(request: Manage) -> Result<serde_json::Value> {
     let Some(response::Body::Management(result)) = response.body else {
         bail!("engine rejected the management request");
     };
-    Ok(serde_json::from_str(&result.json)?)
+    let state = |value| StoreState::try_from(value).unwrap_or(StoreState::Unspecified);
+    let stores = Stores {
+        settings: state(result.settings),
+        learning: state(result.learning),
+        settings_file: result.settings_file,
+        learning_file: result.learning_file,
+    };
+    Ok((serde_json::from_str(&result.json)?, stores))
 }
 pub fn settings() -> Result<Config> {
-    serde_json::from_value(manage(Manage {
+    Ok(settings_with_stores()?.0)
+}
+/// The settings in force. While the settings file cannot be read, these keep
+/// every optional feature off and the engine refuses to save them.
+pub fn settings_with_stores() -> Result<(Config, Stores)> {
+    let (settings, stores) = manage_with_stores(Manage {
         action: Action::GetSettings as i32,
         ..Default::default()
-    })?)
-    .context("invalid settings response")
+    })?;
+    Ok((
+        serde_json::from_value(settings).context("invalid settings response")?,
+        stores,
+    ))
 }
 pub fn save(settings: &Config) -> Result<()> {
     settings.validate()?;
