@@ -22,9 +22,12 @@ pub fn manage(request: Manage) -> Result<serde_json::Value> {
     });
     #[cfg(unix)]
     let mut stream = Stream::connect(&ipc::unix::socket_path()?, timeout)?;
+    // Like the text service, the settings application names the engine by
+    // the native path beside its own, which needs no drive letter.
     #[cfg(windows)]
-    let mut stream =
-        Stream::connect(&std::env::current_exe()?.with_file_name("kanade-engine.exe"))?;
+    let mut stream = Stream::connect(&ipc::windows::Program::Native(
+        ipc::windows::native_executable()?.with_file_name("kanade-engine.exe"),
+    ))?;
     stream.begin(timeout);
     ipc::send(
         &mut stream,

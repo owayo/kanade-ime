@@ -33,6 +33,19 @@ pub(super) fn installed(name: &str) -> Option<PathBuf> {
     Some(install_root(&module_path().ok()?)?.join(name))
 }
 
+/// A program installed with this text service, named for comparison with
+/// the image of another process. A sandboxed host may not see the drive
+/// letter of the volume, so the program is named by the native path next to
+/// this module, which needs none. The Win32 path stands in only when this
+/// module's native path cannot be read.
+pub(super) fn installed_program(name: &str) -> Option<kanade_ipc::windows::Program> {
+    use kanade_ipc::windows::{Program, native_path_of};
+    match native_path_of(MODULE.load(Ordering::Acquire)) {
+        Ok(native) => Some(Program::Native(install_root(&native)?.join(name))),
+        Err(_) => installed(name).map(Program::Win32),
+    }
+}
+
 // Mandatory integrity levels: an ordinary desktop process has at least the
 // first and less than the second.
 const MEDIUM: u32 = 0x2000;
@@ -179,6 +192,31 @@ mod tests {
             Some(Path::new(r"C:\x86\Kanade"))
         );
         assert_eq!(install_root(Path::new("")), None);
+        // A native path has no drive letter and is found the same way.
+        let native = Path::new(r"\Device\HarddiskVolume3\Program Files\Kanade");
+        for module in [
+            r"\Device\HarddiskVolume3\Program Files\Kanade\kanade_tip.dll",
+            r"\Device\HarddiskVolume3\Program Files\Kanade\x86\kanade_tip.dll",
+        ] {
+            assert_eq!(install_root(Path::new(module)), Some(native));
+        }
+    }
+
+    #[test]
+    fn the_engine_is_named_by_the_native_path_beside_this_module() -> Result<()> {
+        use kanade_ipc::windows::{Program, native_executable};
+        // A test binary is not loaded as a module: its executable stands in.
+        // A null module also names the executable, so other tests that read
+        // the module see the same file.
+        let handle =
+            unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null()) }?;
+        MODULE.store(handle.0 as usize, Ordering::Release);
+        let native = native_executable().map_err(|_| failure())?;
+        assert_eq!(
+            installed_program("kanade-engine.exe"),
+            Some(Program::Native(native.with_file_name("kanade-engine.exe")))
+        );
+        Ok(())
     }
 
     #[test]

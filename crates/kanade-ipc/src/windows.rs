@@ -2,7 +2,7 @@
 use std::{
     ffi::c_void,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     ptr::{null, null_mut},
     time::{Duration, Instant},
 };
@@ -92,6 +92,19 @@ unsafe extern "system" {
         flags: u32,
         name: *mut u16,
         len: *mut u32,
+    ) -> i32;
+    fn K32GetMappedFileNameW(
+        process: Handle,
+        address: *const c_void,
+        name: *mut u16,
+        size: u32,
+    ) -> u32;
+    fn CompareStringOrdinal(
+        first: *const u16,
+        first_len: i32,
+        second: *const u16,
+        second_len: i32,
+        ignore_case: i32,
     ) -> i32;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
@@ -212,6 +225,78 @@ fn sid(process: Handle) -> io::Result<String> {
         LocalFree(string.cast());
     }
     result
+}
+
+/// The program expected at the other end of a pipe, and how its path is
+/// written.
+///
+/// A drive letter is resolved in the caller's view of the system. A sandboxed
+/// process may not see the drive letter of every volume: the system then
+/// reports another process's image by its native path, and a Win32 path never
+/// matches it. A native path needs no drive letter, so a caller that may run
+/// in a sandbox names the program by its native path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Program {
+    /// A path with a drive letter, such as
+    /// `C:\Program Files\Kanade\kanade-engine.exe`.
+    Win32(PathBuf),
+    /// A path in the object manager's namespace, such as
+    /// `\Device\HarddiskVolume3\Program Files\Kanade\kanade-engine.exe`.
+    Native(PathBuf),
+}
+
+/// `PROCESS_NAME_NATIVE`.
+const NATIVE_NAME: u32 = 1;
+
+fn image_name(process: Handle, flags: u32) -> io::Result<String> {
+    let mut buffer = vec![0u16; 32768];
+    let mut len = buffer.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(process, flags, buffer.as_mut_ptr(), &mut len) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    String::from_utf16(&buffer[..len as usize]).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// The native path of this process's executable.
+pub fn native_executable() -> io::Result<PathBuf> {
+    image_name(unsafe { GetCurrentProcess() }, NATIVE_NAME).map(PathBuf::from)
+}
+
+/// The native path of the file mapped at `address` in this process, such as
+/// the base address of a loaded module. Reading it needs no drive letter. The
+/// address is only looked up, never read.
+pub fn native_path_of(address: usize) -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; 32768];
+    let len = unsafe {
+        K32GetMappedFileNameW(
+            GetCurrentProcess(),
+            address as *const c_void,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+        )
+    } as usize;
+    if len == 0 || len >= buffer.len() {
+        return Err(io::Error::last_os_error());
+    }
+    String::from_utf16(&buffer[..len])
+        .map(PathBuf::from)
+        .map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// Whether two paths name the same file as Windows compares file names:
+/// ordinally, ignoring case. A leading `\\?\` is not part of the name.
+fn same_file_name(first: &str, second: &str) -> bool {
+    let first: Vec<u16> = first.trim_start_matches("\\\\?\\").encode_utf16().collect();
+    let second: Vec<u16> = second
+        .trim_start_matches("\\\\?\\")
+        .encode_utf16()
+        .collect();
+    let (Ok(first_len), Ok(second_len)) = (i32::try_from(first.len()), i32::try_from(second.len()))
+    else {
+        return false;
+    };
+    // CSTR_EQUAL.
+    unsafe { CompareStringOrdinal(first.as_ptr(), first_len, second.as_ptr(), second_len, 1) == 2 }
 }
 /// The installed engine's endpoint for this user and logon session.
 pub fn endpoint() -> io::Result<String> {
@@ -359,7 +444,7 @@ pub fn identify_to_packages() -> io::Result<()> {
     grant_to_packages(token.0, 0x0008)
 }
 
-fn verify(pipe: Handle, server: bool, expected: Option<&Path>) -> io::Result<()> {
+fn verify(pipe: Handle, server: bool, expected: Option<&Program>) -> io::Result<()> {
     let mut pid = 0;
     let ok = unsafe {
         if server {
@@ -378,17 +463,13 @@ fn verify(pipe: Handle, server: bool, expected: Option<&Path>) -> io::Result<()>
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     if let Some(expected) = expected {
-        let mut buffer = vec![0u16; 32768];
-        let mut len = buffer.len() as u32;
-        if unsafe { QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &mut len) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let actual =
-            String::from_utf16(&buffer[..len as usize]).map_err(|_| io::ErrorKind::InvalidData)?;
-        if !actual
-            .trim_start_matches("\\\\?\\")
-            .eq_ignore_ascii_case(expected.to_string_lossy().trim_start_matches("\\\\?\\"))
-        {
+        // The peer's image is read in the form the expected path is written
+        // in, so that the two are comparable.
+        let (flags, path) = match expected {
+            Program::Win32(path) => (0, path),
+            Program::Native(path) => (NATIVE_NAME, path),
+        };
+        if !same_file_name(&image_name(process.0, flags)?, &path.to_string_lossy()) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
     }
@@ -401,15 +482,23 @@ pub struct Pipe {
 impl Pipe {
     /// Management is restricted to the installed settings executable. Input hosts
     /// retain conversion access without gaining access to stored learning records.
+    /// The engine is never sandboxed, so the settings executable is named by
+    /// its Win32 path.
     pub fn verify_management_peer(&self, expected_client: &Path) -> io::Result<()> {
-        verify(self.handle.0, false, Some(expected_client))
+        verify(
+            self.handle.0,
+            false,
+            Some(&Program::Win32(expected_client.to_owned())),
+        )
     }
 
-    pub fn connect(expected_server: &Path) -> io::Result<Self> {
+    /// Connects to the installed engine after checking that `expected_server`
+    /// serves it, as this user in this logon session.
+    pub fn connect(expected_server: &Program) -> io::Result<Self> {
         Self::connect_to(&endpoint()?, expected_server)
     }
     /// Connects to a named endpoint, for an isolated instance.
-    pub fn connect_to(endpoint: &str, expected_server: &Path) -> io::Result<Self> {
+    pub fn connect_to(endpoint: &str, expected_server: &Program) -> io::Result<Self> {
         let name = wide(endpoint);
         unsafe {
             WaitNamedPipeW(name.as_ptr(), 50);
@@ -705,8 +794,8 @@ mod tests {
             .open(endpoint)
             .unwrap()
     }
-    fn this_process() -> std::path::PathBuf {
-        std::env::current_exe().unwrap()
+    fn this_process() -> Program {
+        Program::Win32(std::env::current_exe().unwrap())
     }
 
     #[test]
@@ -823,12 +912,68 @@ mod tests {
     fn a_peer_is_checked_against_the_expected_server_image() {
         let name = private_endpoint();
         let mut listener = Listener::bind_to(&name).unwrap();
-        let other = this_process().with_file_name("another-engine.exe");
+        let other = Program::Win32(
+            std::env::current_exe()
+                .unwrap()
+                .with_file_name("another-engine.exe"),
+        );
         let refused = Pipe::connect_to(&name, &other).err().unwrap();
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
         // The frontend closed its end; the listener carries on.
         assert!(matches!(listener.accept(), Err(Refusal::Peer(_))));
         let _client = Pipe::connect_to(&name, &this_process()).unwrap();
         assert!(listener.accept().is_ok());
+    }
+    #[test]
+    fn a_peer_is_checked_by_its_native_image_name() {
+        let native = native_executable().unwrap();
+        // No drive letter: the volume is named by its device.
+        assert!(
+            native.to_string_lossy().starts_with(r"\Device\"),
+            "{native:?}"
+        );
+        let name = private_endpoint();
+        let mut listener = Listener::bind_to(&name).unwrap();
+        // The whole path is compared: a program of the same name in another
+        // folder is not the expected one.
+        let elsewhere = native
+            .parent()
+            .unwrap()
+            .join("other")
+            .join(native.file_name().unwrap());
+        let refused = Pipe::connect_to(&name, &Program::Native(elsewhere))
+            .err()
+            .unwrap();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert!(matches!(listener.accept(), Err(Refusal::Peer(_))));
+        // File names do not differ by case.
+        let upper = PathBuf::from(native.to_string_lossy().to_uppercase());
+        let _client = Pipe::connect_to(&name, &Program::Native(upper)).unwrap();
+        assert!(listener.accept().is_ok());
+    }
+    #[test]
+    fn a_mapped_address_names_its_file_natively() {
+        // A static lives in this executable's image, so its address names
+        // the executable.
+        static MARK: u8 = 0;
+        let mapped = native_path_of(&raw const MARK as usize).unwrap();
+        assert!(same_file_name(
+            &mapped.to_string_lossy(),
+            &native_executable().unwrap().to_string_lossy()
+        ));
+        assert!(native_path_of(0).is_err());
+    }
+    #[test]
+    fn file_names_compare_ordinally_ignoring_case() {
+        assert!(same_file_name(
+            r"\\?\C:\Program Files\Kanade\kanade-engine.exe",
+            r"c:\program files\kanade\KANADE-ENGINE.EXE"
+        ));
+        assert!(same_file_name("Ä", "ä"));
+        assert!(!same_file_name(
+            r"C:\Program Files\Kanade\kanade-engine.exe",
+            r"C:\Program Files\Kanade\kanade-engine.exe.bak"
+        ));
+        assert!(!same_file_name(r"C:\a", r"C:\a\"));
     }
 }

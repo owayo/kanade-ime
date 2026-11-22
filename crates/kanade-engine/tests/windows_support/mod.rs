@@ -3,7 +3,10 @@
 //! Windows integration tests; nothing here touches an installed engine.
 #![allow(dead_code)]
 pub mod sandbox;
-use kanade_ipc::{frontend::Client, windows::Pipe};
+use kanade_ipc::{
+    frontend::Client,
+    windows::{Pipe, Program},
+};
 use std::{
     ffi::c_void,
     io,
@@ -315,7 +318,7 @@ impl Engine {
         events(&self.data.path().join("logs/engine-events.log"))
     }
     pub fn pipe(&self) -> io::Result<Pipe> {
-        Pipe::connect_to(&self.endpoint, &engine_binary())
+        Pipe::connect_to(&self.endpoint, &Program::Win32(engine_binary()))
     }
     pub fn client(&self) -> io::Result<Client<Pipe>> {
         Client::connect(self.pipe()?)
