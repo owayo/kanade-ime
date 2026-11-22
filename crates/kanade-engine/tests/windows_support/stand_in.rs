@@ -5,7 +5,10 @@
 //!
 //! A test process cannot be every host a text service runs in. With
 //! `type <endpoint> <engine>` this program connects to that engine as a
-//! frontend does, types a word and exits with what came of it.
+//! frontend does, types a word and exits with what came of it. `<engine>` is
+//! the expected engine relative to this program's folder. Like the text
+//! service beside the installed engine, this program names it by the native
+//! path next to its own, which needs no drive letter.
 
 /// A command line this program does not know.
 const USAGE: i32 = 64;
@@ -15,7 +18,7 @@ mod frontend {
     use kanade_ipc::{
         Context, Key, KeyReply, Privacy, SpecialKey,
         frontend::{Client, Document},
-        windows::Pipe,
+        windows::{Pipe, Program, native_executable},
     };
     use std::{ffi::OsStr, path::Path};
 
@@ -23,8 +26,11 @@ mod frontend {
     /// system's error code, kept apart from every other result.
     fn connect(endpoint: &OsStr, engine: &OsStr) -> Result<Pipe, i32> {
         let endpoint = endpoint.to_str().ok_or(super::USAGE)?;
-        Pipe::connect_to(endpoint, Path::new(engine))
-            .map_err(|error| 1000 + error.raw_os_error().unwrap_or(0))
+        let failed = |error: std::io::Error| 1000 + error.raw_os_error().unwrap_or(0);
+        let folder = native_executable().map_err(failed)?;
+        let folder = folder.parent().ok_or(super::USAGE)?;
+        let expected = Program::Native(folder.join(Path::new(engine)));
+        Pipe::connect_to(endpoint, &expected).map_err(failed)
     }
     struct Editor(String);
     impl Document for Editor {

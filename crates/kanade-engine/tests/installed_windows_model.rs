@@ -1,6 +1,10 @@
 //! Exercise an installed, opted-in Windows IME with an in-memory document.
 #![cfg(windows)]
-use kanade_ipc::{frontend::*, windows::Pipe, *};
+use kanade_ipc::{
+    frontend::*,
+    windows::{Pipe, Program},
+    *,
+};
 use std::{path::PathBuf, time::Duration};
 
 #[derive(Default)]
@@ -28,7 +32,7 @@ fn installed_engine_refines_a_conversion_over_the_native_pipe() {
     let engine = PathBuf::from(std::env::var_os("ProgramW6432").unwrap())
         .join("Kanade")
         .join("kanade-engine.exe");
-    let mut client = Client::connect(Pipe::connect(&engine).unwrap()).unwrap();
+    let mut client = Client::connect(Pipe::connect(&Program::Win32(engine)).unwrap()).unwrap();
     let mut editor = Editor::default();
     let context = Context {
         app: "kanade.integration.test".into(),

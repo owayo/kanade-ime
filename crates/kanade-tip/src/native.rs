@@ -121,7 +121,7 @@ impl Shared {
             if c.as_mut().is_some_and(|c| !c.needs_transport()) {
                 return;
             }
-            let pipe = programs::installed("kanade-engine.exe")
+            let pipe = programs::installed_program("kanade-engine.exe")
                 .and_then(|engine| Pipe::connect(&engine).ok());
             match (c.as_mut(), pipe) {
                 (Some(client), Some(pipe)) => {
