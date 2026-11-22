@@ -155,6 +155,8 @@ pub enum Reason {
     WorkerMissing,
     ModelMissing,
     ModelChanged,
+    /// The qualification names another worker binary or runtime, as after
+    /// every update of Kanade. Qualifying again resolves it.
     RuntimeChanged,
     PromptChanged,
     ReportMissing,
@@ -227,6 +229,8 @@ impl Qualification {
         {
             return Reason::ModelChanged;
         }
+        // Another worker or runtime made the measurement. Nothing below is
+        // compared for such a record: the rest of the build may differ too.
         if e.runtime != profile::RUNTIME || e.worker_sha256 != worker_sha256 {
             return Reason::RuntimeChanged;
         }

@@ -31,6 +31,15 @@ finally { $stream.Dispose(); $hash.Dispose() }
 if ($digest -ne $fixed.sha256) {
     throw 'The supplied GGUF does not match the installed Tsumugi worker.'
 }
+# After an update the engine qualifies an installed model again by itself. It
+# refuses an import while that runs, and none is needed once it has passed.
+$deadline = [DateTime]::UtcNow.AddMinutes(3)
+while ($state.job -and $state.job.phase -notin 'done', 'failed') {
+    if ([DateTime]::UtcNow -ge $deadline) { throw 'Kanade did not finish qualifying the installed Tsumugi.' }
+    Start-Sleep -Milliseconds 400
+    $current = Get-State
+    if ($current) { $state = $current }
+}
 if (-not ($state.ready -and $state.installed.id -eq $fixed.id)) {
     $response = & $ui models import $modelPath --accept-license --accept-local-processing
     if ($LASTEXITCODE -ne 0) { throw 'Tsumugi import failed.' }

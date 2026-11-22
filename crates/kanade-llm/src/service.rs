@@ -40,6 +40,13 @@ pub trait Rerank: Send {
     fn take(&self, id: u64) -> Poll;
     /// Drops a queued job or discards the result of a running one.
     fn cancel(&self, id: u64);
+    /// The model the settings switched on is not served until the user acts
+    /// in the settings: imports it again, accepts its terms, measures it or
+    /// starts a service that has stopped. While the engine can still bring
+    /// the model into service by itself, nothing is asked of the user.
+    fn setup_required(&self) -> bool {
+        false
+    }
 }
 
 pub trait Backend: Send {
@@ -150,6 +157,9 @@ struct State {
     stop: bool,
     /// Scoring requests actually sent to a backend; for tests and status.
     scored: u64,
+    /// The manager's part of `Rerank::setup_required`: nothing is served, and
+    /// only the user can change that.
+    setup_required: bool,
 }
 struct Shared {
     state: Mutex<State>,
@@ -184,6 +194,7 @@ impl Service {
                 running: false,
                 stop: false,
                 scored: 0,
+                setup_required: false,
             }),
             wake: Condvar::new(),
             tuning,
@@ -197,6 +208,8 @@ impl Service {
         reset(&mut state);
         state.target = Some(Target { path, model });
         state.health = Health::Starting;
+        // A model that is served does not wait for the user.
+        state.setup_required = false;
         if !state.running
             && let Some(spawner) = state.spawner.take()
         {
@@ -234,6 +247,16 @@ impl Service {
     /// Number of scoring requests that reached a backend.
     pub fn scored(&self) -> u64 {
         self.0.lock().scored
+    }
+    /// Set by the manager, which knows why nothing is served. A service that
+    /// stopped by itself needs no such word: see `Rerank::setup_required`.
+    pub fn set_setup_required(&self, required: bool) {
+        self.0.lock().setup_required = required;
+    }
+    /// Changes whenever serving starts or stops.
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.0.lock().generation
     }
 }
 fn reset(state: &mut State) {
@@ -314,6 +337,12 @@ impl Rerank for Service {
         if state.active == Some(id) {
             state.discard_active = true;
         }
+    }
+    fn setup_required(&self) -> bool {
+        let state = self.0.lock();
+        // A service that stopped, after a refused model or repeated failures,
+        // refuses every job and is not started again from here.
+        state.setup_required || matches!(state.health, Health::Faulted(_))
     }
 }
 
@@ -847,6 +876,54 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
         assert_eq!(script.starts.load(Ordering::SeqCst), 1);
         assert_eq!(service.submit(job("a")), None);
+    }
+    #[test]
+    fn a_stopped_service_and_the_managers_word_ask_for_the_settings() {
+        // A refused model stops the service, and only the user can change
+        // that. The manager still believes the model is served.
+        let refusing = Script {
+            reject: true,
+            ..Default::default()
+        };
+        let service = Service::with(refusing, tuning());
+        assert!(!service.setup_required());
+        service.activate("model".into(), tsumugi());
+        until(&service, |h| h == Health::Faulted(Reason::ModelChanged));
+        assert!(service.setup_required());
+        // A wait before another attempt is not the user's to end.
+        let failing = Script {
+            failing_starts: 100,
+            ..Default::default()
+        };
+        let waiting = Service::with(
+            failing.clone(),
+            Tuning {
+                backoff: [Duration::from_millis(1), Duration::from_secs(600)],
+                ..tuning()
+            },
+        );
+        waiting.activate("model".into(), tsumugi());
+        until(&waiting, |h| {
+            h == Health::Backoff && failing.starts.load(Ordering::SeqCst) == 2
+        });
+        assert!(!waiting.setup_required());
+        // The stop after the last attempt is.
+        let failing = Script {
+            failing_starts: 100,
+            ..Default::default()
+        };
+        let service = Service::with(failing, tuning());
+        service.activate("model".into(), tsumugi());
+        until(&service, |h| h == Health::Faulted(Reason::WorkerFailed));
+        assert!(service.setup_required());
+        // Once it is switched off, the word is the manager's alone.
+        service.deactivate();
+        assert!(!service.setup_required());
+        service.set_setup_required(true);
+        assert!(service.setup_required());
+        // A model that is served does not wait for the user.
+        service.activate("model".into(), tsumugi());
+        assert!(!service.setup_required());
     }
     #[test]
     fn an_idle_worker_is_stopped_and_started_again_on_demand() {

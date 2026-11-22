@@ -250,12 +250,20 @@ struct Script {
     /// offers none prefers its first candidate.
     wanted: Vec<String>,
     refuse: bool,
+    /// The model waits for the user in the settings.
+    setup_required: bool,
+    /// Jobs offered, including the refused ones.
+    offered: u32,
 }
 #[derive(Clone, Default)]
 struct Reranker(Arc<Mutex<Script>>);
 impl Rerank for Reranker {
+    fn setup_required(&self) -> bool {
+        self.0.lock().unwrap().setup_required
+    }
     fn submit(&self, job: Job) -> Option<u64> {
         let mut script = self.0.lock().unwrap();
+        script.offered += 1;
         if script.refuse {
             return None;
         }
@@ -491,7 +499,7 @@ fn nothing_is_queued_when_disabled_or_outside_a_normal_safe_context() {
     assert!(!Config::default().llm);
 
     type Edit = fn(&mut Fixture);
-    let cases: [(&str, Edit); 10] = [
+    let cases: [(&str, Edit); 11] = [
         ("private", |f| f.context.privacy = Privacy::Private as i32),
         ("unknown", |f| f.context.privacy = Privacy::Unknown as i32),
         ("excluded application", |f| {
@@ -517,6 +525,11 @@ fn nothing_is_queued_when_disabled_or_outside_a_normal_safe_context() {
         ("refused by the service", |f| {
             f.llm.0.lock().unwrap().refuse = true
         }),
+        ("refused until the settings are set up", |f| {
+            let mut script = f.llm.0.lock().unwrap();
+            script.refuse = true;
+            script.setup_required = true;
+        }),
     ];
     for (name, edit) in cases {
         let mut f = fixture(settings(true));
@@ -524,10 +537,10 @@ fn nothing_is_queued_when_disabled_or_outside_a_normal_safe_context() {
         let reply = f.convert("こうえん");
         assert_eq!(f.llm.jobs(), 0, "{name}");
         assert!(!page(&reply).refinement_pending, "{name}");
-        let expected = if name == "refused by the service" {
-            RefinementOutcome::Unavailable
-        } else {
-            RefinementOutcome::Unspecified
+        let expected = match name {
+            "refused by the service" => RefinementOutcome::Unavailable,
+            "refused until the settings are set up" => RefinementOutcome::SetupRequired,
+            _ => RefinementOutcome::Unspecified,
         };
         assert_eq!(page(&reply).refinement_outcome(), expected, "{name}");
         // A poll in such a state is answered cheaply with "nothing".
@@ -549,6 +562,93 @@ fn nothing_is_queued_when_disabled_or_outside_a_normal_safe_context() {
     // A reading that is too short is not sent either.
     let mut f = fixture(settings(true));
     f.convert("こ");
+    assert_eq!(f.llm.jobs(), 0);
+}
+
+#[test]
+fn a_model_that_waits_for_the_settings_is_reported_instead_of_scored() {
+    type Edit = fn(&mut Fixture);
+    // The comparison each conversion would start, and how many jobs the
+    // conversion itself offers for it.
+    let cases: [(&str, &str, Edit, u32); 3] = [
+        // The focused segment, after preceding text.
+        ("focused segment", "こうえん", |_| {}, 1),
+        // The whole text at the beginning of a field, where the focused
+        // segment has no context to be scored with.
+        (
+            "beginning of a field",
+            "かめらでとります",
+            |f| f.context.preceding_text.clear(),
+            0,
+        ),
+        // The whole text after preceding text. The focused segment has a
+        // single choice, so no job is formed for it.
+        ("single choice in focus", "かめらでとります", |_| {}, 0),
+    ];
+    for (name, reading, edit, offered) in cases {
+        // The model waits for the user: the page says so at once. Nothing
+        // is searched, and no job is offered that would only be refused.
+        let mut f = fixture(settings(true));
+        edit(&mut f);
+        {
+            let mut script = f.llm.0.lock().unwrap();
+            script.refuse = true;
+            script.setup_required = true;
+        }
+        let reply = f.convert(reading);
+        assert!(!page(&reply).refinement_pending, "{name}");
+        assert_eq!(
+            page(&reply).refinement_outcome(),
+            RefinementOutcome::SetupRequired,
+            "{name}"
+        );
+        // A frontend that polls for a preview all the same gets that answer.
+        let response::Body::Candidates(update) = preview_poll(&mut f, &reply) else {
+            panic!("{name}: nothing may be previewed");
+        };
+        assert!(update.candidates.is_none() && !update.pending, "{name}");
+        assert_eq!(
+            update.refinement_outcome(),
+            RefinementOutcome::SetupRequired,
+            "{name}"
+        );
+        assert_eq!(f.llm.0.lock().unwrap().offered, offered, "{name}");
+
+        // A service that merely refuses is not reported that way. Where the
+        // focused segment offered no job, the text is still looked at.
+        let mut f = fixture(settings(true));
+        edit(&mut f);
+        f.llm.0.lock().unwrap().refuse = true;
+        let reply = f.convert(reading);
+        assert_eq!(page(&reply).refinement_pending, offered == 0, "{name}");
+        let response::Body::Candidates(update) = preview_poll(&mut f, &reply) else {
+            panic!("{name}: nothing was scored");
+        };
+        assert!(update.candidates.is_none() && !update.pending, "{name}");
+        assert_eq!(
+            update.refinement_outcome(),
+            RefinementOutcome::Unavailable,
+            "{name}"
+        );
+        assert!(f.llm.0.lock().unwrap().offered > 0, "{name}");
+    }
+}
+
+#[test]
+fn a_calendar_year_is_shown_while_the_model_waits_for_the_settings() {
+    let mut config = settings(true);
+    config.calculated_dates = true;
+    let mut f = fixture(config);
+    {
+        let mut script = f.llm.0.lock().unwrap();
+        script.refuse = true;
+        script.setup_required = true;
+    }
+    let initial = f.convert("にせんいちねんのあめ");
+    assert_eq!(surface(initial.preedit.as_ref().unwrap()), "二千一年の雨");
+    // The year needs no model, so this conversion is still looked at.
+    assert!(page(&initial).refinement_pending);
+    assert_eq!(previewed(&mut f, &initial).as_deref(), Some("2001年の雨"));
     assert_eq!(f.llm.jobs(), 0);
 }
 
@@ -749,12 +849,25 @@ fn unusable_scores_leave_the_list_alone() {
         let enter = f.special(SpecialKey::Enter);
         assert_eq!(enter.commit.unwrap().value, "公園");
     }
-    let mut f = fixture(settings(true));
-    let reply = f.convert("こうえん");
-    f.llm.0.lock().unwrap().answer = Some(Poll::Gone);
-    let failed = f.poll(page(&reply));
-    assert_eq!(failed.refinement_outcome(), RefinementOutcome::Unavailable);
-    assert_eq!(f.special(SpecialKey::Enter).commit.unwrap().value, "公園");
+    // A job that vanished. When the service stopped for good with it, the
+    // user is needed in the settings.
+    for (stopped, expected) in [
+        (false, RefinementOutcome::Unavailable),
+        (true, RefinementOutcome::SetupRequired),
+    ] {
+        let mut f = fixture(settings(true));
+        let reply = f.convert("こうえん");
+        assert!(page(&reply).refinement_pending);
+        {
+            let mut script = f.llm.0.lock().unwrap();
+            script.answer = Some(Poll::Gone);
+            script.setup_required = stopped;
+        }
+        let failed = f.poll(page(&reply));
+        assert!(failed.candidates.is_none() && !failed.pending);
+        assert_eq!(failed.refinement_outcome(), expected);
+        assert_eq!(f.special(SpecialKey::Enter).commit.unwrap().value, "公園");
+    }
     // Unscored choices keep their slots while the scored ones are ordered.
     let mut f = fixture(settings(true));
     let reply = f.convert("こうえん");

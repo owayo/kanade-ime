@@ -5,14 +5,17 @@ from pathlib import Path
 
 from bundled_model import INSTALLERS, locked_model, releases
 
-# The engine stops using an imported model that is not the bundled one, and
-# only the settings say so. The steps are right whichever version was installed.
+# The engine stops using an imported model that is not the bundled one. The
+# candidate window then asks for the settings, and the settings say what to do.
+# The steps are right whichever version was installed.
 STEPS = (
     "以前の版で Tsumugi を取り込んでいた場合は、更新後に Kanade の設定の"
     "「ローカルAI」を開いてください。「モデルが変更されています」と"
     "表示されていたら、利用条件と端末内処理に同意して"
     "「Tsumugi を取り込む」を押します。"
     "取り込み直すまで、候補の並べ替えは働きません。"
+    "並べ替えを有効にしていた場合は、その間、候補欄に"
+    "「AI は設定が必要」と出ます。"
 )
 
 

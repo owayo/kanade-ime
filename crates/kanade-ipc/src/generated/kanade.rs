@@ -657,6 +657,7 @@ impl CandidateSource {
         }
     }
 }
+/// SETUP_REQUIRED: the model the settings switched on is not served until the user acts in the settings. Older frontends show it as UNSPECIFIED.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -665,6 +666,7 @@ pub enum RefinementOutcome {
     Evaluated = 1,
     Unavailable = 2,
     TimedOut = 3,
+    SetupRequired = 4,
 }
 impl RefinementOutcome {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -677,6 +679,7 @@ impl RefinementOutcome {
             Self::Evaluated => "REFINEMENT_OUTCOME_EVALUATED",
             Self::Unavailable => "REFINEMENT_OUTCOME_UNAVAILABLE",
             Self::TimedOut => "REFINEMENT_OUTCOME_TIMED_OUT",
+            Self::SetupRequired => "REFINEMENT_OUTCOME_SETUP_REQUIRED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -686,6 +689,7 @@ impl RefinementOutcome {
             "REFINEMENT_OUTCOME_EVALUATED" => Some(Self::Evaluated),
             "REFINEMENT_OUTCOME_UNAVAILABLE" => Some(Self::Unavailable),
             "REFINEMENT_OUTCOME_TIMED_OUT" => Some(Self::TimedOut),
+            "REFINEMENT_OUTCOME_SETUP_REQUIRED" => Some(Self::SetupRequired),
             _ => None,
         }
     }

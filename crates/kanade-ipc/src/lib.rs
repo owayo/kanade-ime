@@ -62,6 +62,7 @@ impl CandidatePage {
                 RefinementOutcome::Evaluated => "AI 評価済み",
                 RefinementOutcome::Unavailable => "AI 評価できず・通常候補",
                 RefinementOutcome::TimedOut => "AI 時間切れ・通常候補",
+                RefinementOutcome::SetupRequired => "AI は設定が必要・通常候補",
                 RefinementOutcome::Unspecified => "通常候補",
             }
         };

@@ -73,6 +73,17 @@ impl Frozen {
     }
 }
 
+/// Why nothing was scored. A model that waits for the user in the settings,
+/// as after an update that changed the bundled model, is told apart from one
+/// that is merely unavailable: the candidate window asks for the settings.
+pub(super) fn unscored(llm: Option<&dyn Rerank>) -> RefinementOutcome {
+    if llm.is_some_and(|llm| llm.setup_required()) {
+        RefinementOutcome::SetupRequired
+    } else {
+        RefinementOutcome::Unavailable
+    }
+}
+
 /// Drops a queued or running job and forgets a delivered update.
 pub(super) fn cancel(llm: Option<&dyn Rerank>, session: &mut Session) {
     if let Some(sentence) = session.sentence.take() {
@@ -144,7 +155,7 @@ impl<C: ConversionEngine> Engine<C> {
             return;
         }
         let Some(job) = self.llm.as_deref().and_then(|llm| llm.submit(job)) else {
-            page.refinement_outcome = RefinementOutcome::Unavailable as i32;
+            page.refinement_outcome = unscored(self.llm.as_deref()) as i32;
             return;
         };
         session.refinement = Some(Refinement {
@@ -232,7 +243,8 @@ impl<C: ConversionEngine> Engine<C> {
                 Poll::Pending => return answer(None, true, RefinementOutcome::Unspecified),
                 Poll::Gone => {
                     session.refinement = None;
-                    (None, RefinementOutcome::Unavailable)
+                    // The service may have stopped for good with this job.
+                    (None, unscored(llm))
                 }
                 Poll::Ready(scores) => {
                     let refinement = session.refinement.take().ok_or(Code::Invalid)?;
