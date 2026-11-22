@@ -7,6 +7,17 @@ xtask = "run --locked --package xtask --"
 # if any accelerator backend is present.
 [env]
 GGML_METAL = "OFF"
+# On Windows x64 the runtime is compiled with clang-cl under Ninja, on every
+# machine. The compiler of Visual Studio 2022 keeps the accumulators of the
+# matrix kernel in memory, and scoring then takes about 40 % longer than with
+# Visual Studio 2026; see the toolchain file. The runtime's build script reads
+# these two names for that target only. It also forwards every CMAKE_* variable
+# to CMake as a definition, where the two names mean nothing on any target.
+# A target directory that already holds the runtime keeps the old build:
+# remove it with `cargo clean -p llama-cpp-sys-2` (and the profile and target
+# options of the build) after changing either line.
+CMAKE_GENERATOR_x86_64_pc_windows_msvc = "Ninja"
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "crates/kanade-llm/toolchain/x86_64-pc-windows-msvc.cmake", relative = true }
 # The checkout Cargo runs in. xtask reads it when it is compiled, so Cargo
 # rebuilds xtask whenever it changes. Cargo otherwise judges freshness by
 # modification times, and a target directory shared with or copied from another

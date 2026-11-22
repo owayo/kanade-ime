@@ -74,7 +74,7 @@ Tsumugi 26.11.105 は、日本語版 Wikipedia の全記事から、測定に使
 
 配布対象はApple SiliconのMacとWindows x64です。Windowsの32bitアプリには同梱の入力DLLを使います。Linux、Intel Mac、Windows ARM64の配布物は作りません。
 
-ソースからのビルドには、mise、GitとOSの開発ツールが必要です。MacではXcode、Windowsでは対応するMSVC SDKとCMakeを用意します。Rust、Bazelisk、プロジェクト解析器の版はリポジトリで固定します。
+ソースからのビルドには、mise、GitとOSの開発ツールが必要です。MacではXcode、Windowsでは対応するMSVC SDKとCMake、LLVMのclang-cl、Ninjaを用意します。推論ワーカーのllama.cppは、入っているVisual Studioの版によらずclang-clでビルドします（[理由と測定](docs/llm.md#building-the-worker-on-windows)）。Rust、Bazelisk、プロジェクト解析器の版はリポジトリで固定します。
 
 ## インストール
 

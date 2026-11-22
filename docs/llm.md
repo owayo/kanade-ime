@@ -30,6 +30,26 @@ flowchart LR
 
 The key loop copies a few short strings into a queue of two jobs and later looks a result up. Both operations take a lock that is only held for a few memory operations. Spawning, loading, hashing, timeouts and restarts happen on the service and management threads.
 
+### Building the worker on Windows
+
+For `x86_64-pc-windows-msvc` the llama.cpp runtime is compiled with clang-cl under Ninja, whichever Visual Studio is installed. `.cargo/config.toml` hands `CMAKE_GENERATOR_x86_64_pc_windows_msvc` and `CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc` to the build script of `llama-cpp-sys-2`, and the [toolchain file](../crates/kanade-llm/toolchain/x86_64-pc-windows-msvc.cmake) chooses the compiler. Other targets read neither. The Microsoft headers, libraries and linker are still those of the installed Visual Studio.
+
+The compiler of Visual Studio 2022 (MSVC 19.44), which the release and CI images have, keeps the accumulators of the runtime's matrix kernel in memory and loads and stores them in every step. Visual Studio 2026 (MSVC 19.51) keeps them in registers. A released worker therefore scored about 40 % slower than one built on a machine with Visual Studio 2026. clang-cl keeps them in registers once its instruction scheduler leaves the kernel in source order (`-enable-misched=false`). It compiles without contracting a multiplication and an addition into one rounding (`-ffp-contract=off`), so its scores equal those of an MSVC build bit for bit.
+
+On the development PC, each worker answered the 85 ranking requests of the qualification 16 times, 1,360 requests in all, in one run with the bundled model:
+
+| Worker | Median | 95th percentile |
+|---|---:|---:|
+| Release 26.11.118-preview.8 | 19.6 ms | 30.4 ms |
+| Built with MSVC 19.44 (Visual Studio 2022) | 19.1 ms | 29.7 ms |
+| Built with MSVC 19.51 (Visual Studio 2026) | 13.8 ms | 20.1 ms |
+| clang-cl, in the Visual Studio 2022 environment | 13.3 ms | 19.2 ms |
+| clang-cl, in the Visual Studio 2026 environment | 13.4 ms | 19.2 ms |
+
+All five returned the same scores for every request.
+
+The build needs clang-cl from LLVM, found on `PATH`, in `LIBCLANG_PATH`, under `Program Files\LLVM` or in Visual Studio's own copy of LLVM, and Ninja, found on `PATH` or among the C++ CMake tools of Visual Studio. A target directory that already holds the runtime keeps its earlier build when either setting changes: remove it with `cargo clean -p llama-cpp-sys-2`, with the profile and target options of the build.
+
 ## Tsumugi model
 
 Kanade accepts one local reranker, **Tsumugi 26.11.105**. Model versions use Japan time and the form `yy.mm.counter`. The counter starts at 100 each month and increases for each model release, independently of the IME version. Its F16 GGUF contains 28,058,112 parameters and occupies 66,507,360 bytes. The weights learned to write the text of Japanese Wikipedia from its reading, and then to compare the spellings Mozc offers. The articles and sentences used to measure conversion were left out. The engine, worker and settings use the same pinned identity. The Windows EXE installs the GGUF in the application’s `models` directory. The macOS DMG includes it under `Settings.app/Contents/Resources/models` inside Kanade.app. Model distribution terms are separate from the Kanade source license. [GGUF identity and qualification profile](../locks/llm.lock.toml) · [Training data](third-party.md#tsumugi-training-data)
