@@ -4,7 +4,11 @@
     <!-- Install the same component GUIDs before the cached old MSI removes its
          product. Older packages can shut down TIP hosts when their DLL loses
          its last component reference. Keep both steps inside the transaction. -->
-    <MajorUpgrade DowngradeErrorMessage="A newer Kanade version is already installed." Schedule="afterInstallExecute" />
+    <!-- Windows Installer compares only the first three fields of a version,
+         and builds that differ only in their preview number share them. A
+         build with the same version replaces the installed one, rather than
+         being installed beside it. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer Kanade version is already installed." Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" />
     <MediaTemplate EmbedCab="yes" />
     <!-- The TIP is loaded into editors. Let users save and restart them themselves. -->
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
