@@ -50,6 +50,13 @@ pub fn is_conversion_control(key: &Key) -> bool {
         && key.special == SpecialKey::None as i32
         && matches!(key.text.as_str(), "u" | "i" | "o" | "p" | "t")
 }
+/// A printable key that an idle conversion session can own.
+pub fn starts_composition(key: &Key) -> bool {
+    key.modifiers & (MOD_CONTROL | MOD_ALT | MOD_META) == 0
+        && !key.text.is_empty()
+        && key.text.bytes().all(|c| c.is_ascii_graphic())
+}
+
 /// Matches the pinned keymap's explicit history-removal command, not text deletion.
 pub fn is_history_delete(key: &Key) -> bool {
     key.text.is_empty() && key.special == SpecialKey::Delete as i32 && key.modifiers == MOD_CONTROL
@@ -194,8 +201,7 @@ impl<T: Transport> Client<T> {
             return self.policy.composing
                 && (key.special != SpecialKey::None as i32 || is_conversion_control(key));
         }
-        self.policy.composing
-            || (!key.text.is_empty() && key.text.chars().all(|c| c.is_ascii_graphic()))
+        self.policy.composing || starts_composition(key)
     }
     pub fn privacy_for_app(&self, app: &str) -> Privacy {
         let allowed = if let Some(policy) = &self.learning_policy {
@@ -219,6 +225,18 @@ impl<T: Transport> Client<T> {
         passed_through: bool,
         document: &mut impl Document,
     ) -> bool {
+        self.key_result(key, context, passed_through, document)
+            .unwrap_or(self.held || self.blocked)
+    }
+    /// None when the key did not get a valid reply. An applied reply still
+    /// has its own result if the subsequent acknowledgement could not be sent.
+    pub fn key_result(
+        &mut self,
+        key: Key,
+        context: Context,
+        passed_through: bool,
+        document: &mut impl Document,
+    ) -> Option<bool> {
         if context.privacy == Privacy::Password as i32 {
             self.transport = None;
             self.last_reading.clear();
@@ -226,20 +244,21 @@ impl<T: Transport> Client<T> {
             self.blocked = false;
             self.held = false;
             self.stranded = false;
-            return false;
+            return Some(false);
         }
         if self.blocked {
-            return true;
+            return Some(true);
         }
         if self.held {
             match self.resume(&key, &context, passed_through, document) {
                 Held::Restored => {}
-                Held::Used => return true,
-                Held::Passed => return false,
+                Held::Used => return Some(true),
+                Held::Passed => return Some(false),
             }
         }
         let Some(seq) = self.event_seq.checked_add(1) else {
-            return self.recover();
+            self.recover();
+            return None;
         };
         self.event_seq = seq;
         let request = Request {
@@ -406,6 +425,7 @@ impl<T: Transport> Client<T> {
             })),
         };
         self.request(request, seq, document)
+            .unwrap_or(self.held || self.blocked)
     }
     fn matches(&self, reply: &KeyReply, seq: u64) -> bool {
         bounded_reply(reply)
@@ -458,7 +478,12 @@ impl<T: Transport> Client<T> {
         }
         applied
     }
-    fn request(&mut self, request: Request, seq: u64, document: &mut impl Document) -> bool {
+    fn request(
+        &mut self,
+        request: Request,
+        seq: u64,
+        document: &mut impl Document,
+    ) -> Option<bool> {
         let response = self
             .transport
             .as_mut()
@@ -469,10 +494,10 @@ impl<T: Transport> Client<T> {
                 body: Some(response::Body::Key(reply)),
             }) if self.matches(&reply, seq) => {
                 if seq <= self.applied_seq {
-                    return reply.consumed;
+                    return Some(reply.consumed);
                 }
                 let applied = self.accept(&reply, seq, document);
-                reply.consumed || !applied
+                Some(reply.consumed || !applied)
             }
             other => {
                 record(match &other {
@@ -492,13 +517,18 @@ impl<T: Transport> Client<T> {
                     },
                     Ok(_) => Event::UnexpectedReply,
                 });
-                self.recover()
+                self.recover();
+                None
             }
         }
     }
     /// Kept for frontends that replace the client instead of reattaching.
     pub fn can_reconnect(&self) -> bool {
         !self.blocked && self.last_reading.is_empty() && self.transport.is_none()
+    }
+    /// Whether an idle, disconnected client still allows conversion starters.
+    pub fn can_start_offline(&self) -> bool {
+        self.can_reconnect() && self.policy.enabled && !self.held
     }
     /// The focus, input source or document is going away: end the composition
     /// by inserting the last acknowledged reading. Returns whether the

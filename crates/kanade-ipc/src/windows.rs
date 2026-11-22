@@ -495,10 +495,23 @@ impl Pipe {
     /// Connects to the installed engine after checking that `expected_server`
     /// serves it, as this user in this logon session.
     pub fn connect(expected_server: &Program) -> io::Result<Self> {
-        Self::connect_to(&endpoint()?, expected_server)
+        Self::connect_or_start(expected_server, || {})
+    }
+
+    /// Calls the supervisor hook only when opening the installed pipe itself
+    /// returns ERROR_FILE_NOT_FOUND. Peer verification never triggers it.
+    pub fn connect_or_start(expected_server: &Program, absent: impl FnOnce()) -> io::Result<Self> {
+        Self::open_verified(&endpoint()?, expected_server, absent)
     }
     /// Connects to a named endpoint, for an isolated instance.
     pub fn connect_to(endpoint: &str, expected_server: &Program) -> io::Result<Self> {
+        Self::open_verified(endpoint, expected_server, || {})
+    }
+    fn open_verified(
+        endpoint: &str,
+        expected_server: &Program,
+        absent: impl FnOnce(),
+    ) -> io::Result<Self> {
         let name = wide(endpoint);
         unsafe {
             WaitNamedPipeW(name.as_ptr(), 50);
@@ -513,6 +526,11 @@ impl Pipe {
                 0x40000000,
                 null_mut(),
             )
+        })
+        .inspect_err(|error| {
+            if error.raw_os_error() == Some(2) {
+                absent();
+            }
         })?;
         verify(handle.0, true, Some(expected_server))?;
         Ok(Self {
@@ -908,6 +926,34 @@ mod tests {
         drop(listener);
         assert!(Listener::bind_to(&name).is_ok());
     }
+    #[test]
+    fn only_a_missing_pipe_requests_a_supervisor() {
+        let name = private_endpoint();
+        let starts = std::cell::Cell::new(0);
+        let connect = |program: &Program| {
+            Pipe::open_verified(&name, program, || starts.set(starts.get() + 1))
+        };
+        assert_eq!(
+            connect(&this_process()).err().unwrap().raw_os_error(),
+            Some(2)
+        );
+        let mut listener = Listener::bind_to(&name).unwrap();
+        let wrong = Program::Win32(std::env::current_exe().unwrap().with_file_name("other.exe"));
+        assert_eq!(
+            connect(&wrong).err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(matches!(listener.accept(), Err(Refusal::Peer(_))));
+        let _client = connect(&this_process()).unwrap();
+        // The only offered instance is already open and accept has not
+        // created the next one yet (ERROR_PIPE_BUSY).
+        assert_eq!(
+            connect(&this_process()).err().unwrap().raw_os_error(),
+            Some(231)
+        );
+        assert_eq!(starts.get(), 1);
+    }
+
     #[test]
     fn a_peer_is_checked_against_the_expected_server_image() {
         let name = private_endpoint();

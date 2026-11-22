@@ -11,6 +11,7 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 use windows::{
     Win32::{
@@ -23,6 +24,12 @@ use windows::{
 use windows_core::IUnknownImpl;
 mod attributes;
 mod candidates;
+#[cfg(test)]
+mod host;
+#[cfg(test)]
+type SessionPipe = host::TestPipe;
+#[cfg(not(test))]
+type SessionPipe = Pipe;
 mod input_mode;
 mod language_bar;
 mod mode_hint;
@@ -67,7 +74,43 @@ fn module_path() -> Result<PathBuf> {
         String::from_utf16(value).map_err(|_| failure())?,
     ))
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct KeyMessage {
+    time: i32,
+    vk: usize,
+    flags: isize,
+    context: usize,
+}
+
+impl KeyMessage {
+    fn current(context: &ITfContext, w: WPARAM, l: LPARAM) -> Self {
+        Self {
+            time: unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageTime() },
+            vk: w.0,
+            flags: l.0,
+            context: context.as_raw() as usize,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyTest {
+    Passed,
+    Engine,
+    ConnectedStarter,
+    OfflineStarter { handshake_failed: bool },
+}
+
+#[derive(PartialEq, Eq)]
+enum Connection {
+    Unchanged,
+    Attached,
+    Unavailable,
+    HandshakeFailed,
+}
+
 struct Shared {
+    open_pipe: fn(bool) -> Option<Pipe>,
     observed: RefCell<ipc::Context>,
     attribute: Cell<u32>,
     ui_manager: RefCell<Option<ITfUIElementMgr>>,
@@ -75,14 +118,16 @@ struct Shared {
     page: RefCell<ipc::CandidatePage>,
     ui_native: Cell<bool>,
     ui_selection: Cell<u32>,
-    notified: Cell<Option<(i32, usize, isize, usize)>>,
+    tested: Cell<Option<(KeyMessage, KeyTest)>>,
     eaten_keys: RefCell<BTreeSet<usize>>,
-    client: RefCell<Option<Client<Pipe>>>,
+    client: RefCell<Option<Client<SessionPipe>>>,
     composition: RefCell<Option<ITfComposition>>,
     context: RefCell<Option<ITfContext>>,
     manager: RefCell<Option<ITfThreadMgr>>,
     tid: Cell<u32>,
     password: Cell<bool>,
+    secure: Cell<bool>,
+    outage_scope: Cell<bool>,
     preedit: RefCell<Preedit>,
     window: RefCell<Option<CandidateWindow>>,
     mode_hint: RefCell<Option<mode_hint::Hint>>,
@@ -92,6 +137,7 @@ struct Shared {
 impl Shared {
     fn new() -> Rc<Self> {
         Rc::new(Self {
+            open_pipe: programs::engine,
             observed: RefCell::new(ipc::Context::default()),
             attribute: Cell::new(0),
             ui_manager: RefCell::new(None),
@@ -99,7 +145,7 @@ impl Shared {
             page: RefCell::new(ipc::CandidatePage::default()),
             ui_native: Cell::new(true),
             ui_selection: Cell::new(0),
-            notified: Cell::new(None),
+            tested: Cell::new(None),
             eaten_keys: RefCell::new(BTreeSet::new()),
             client: RefCell::new(None),
             composition: RefCell::new(None),
@@ -107,6 +153,8 @@ impl Shared {
             manager: RefCell::new(None),
             tid: Cell::new(0),
             password: Cell::new(true),
+            secure: Cell::new(false),
+            outage_scope: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
             window: RefCell::new(None),
             mode_hint: RefCell::new(None),
@@ -116,21 +164,35 @@ impl Shared {
     }
     /// Gives the client a connection when it has none. An existing client is
     /// kept: it may hold a composition that the new session will restore.
-    fn connect(&self) {
-        if let Ok(mut c) = self.client.try_borrow_mut() {
-            if c.as_mut().is_some_and(|c| !c.needs_transport()) {
-                return;
-            }
-            let pipe = programs::installed_program("kanade-engine.exe")
-                .and_then(|engine| Pipe::connect(&engine).ok());
-            match (c.as_mut(), pipe) {
-                (Some(client), Some(pipe)) => {
-                    let _ = client.reattach(pipe);
-                }
-                (None, Some(pipe)) => *c = Client::connect(pipe).ok(),
-                (_, None) => {}
-            }
+    fn connect(&self, allow_start: bool) -> Connection {
+        let Ok(mut slot) = self.client.try_borrow_mut() else {
+            return Connection::Unavailable;
+        };
+        if slot.as_mut().is_some_and(|c| !c.needs_transport()) {
+            return Connection::Unchanged;
         }
+        let allow_start = allow_start && slot.as_ref().is_none_or(Client::can_start_offline);
+        let Some(pipe) = (self.open_pipe)(allow_start) else {
+            return Connection::Unavailable;
+        };
+        #[cfg(test)]
+        let pipe = host::TestPipe::new(pipe);
+        let result = match slot.as_mut() {
+            Some(client) => client.reattach(pipe),
+            None => Client::connect(pipe).map(|client| *slot = Some(client)),
+        };
+        if result.is_ok() {
+            Connection::Attached
+        } else {
+            Connection::HandshakeFailed
+        }
+    }
+    /// Only an idle session can drop a starter. A held reading or a
+    /// document that rejected an edit retains its existing key policy.
+    fn can_start_offline(&self) -> bool {
+        self.client
+            .try_borrow()
+            .is_ok_and(|slot| slot.as_ref().is_none_or(Client::can_start_offline))
     }
     fn hide(&self) {
         self.stop_refinement();
@@ -173,7 +235,7 @@ impl Shared {
         if let Ok(mut p) = self.preedit.try_borrow_mut() {
             *p = Preedit::default();
         }
-        self.notified.set(None);
+        self.tested.set(None);
         if let Ok(mut context) = self.context.try_borrow_mut() {
             context.take();
         }
@@ -185,6 +247,7 @@ impl Shared {
         }
     }
     fn suspend_secure(&self) {
+        self.tested.set(None);
         if let Ok(mut keys) = self.eaten_keys.try_borrow_mut() {
             keys.clear();
         }
@@ -207,7 +270,6 @@ impl Shared {
         if let Ok(mut page) = self.page.try_borrow_mut() {
             *page = ipc::CandidatePage::default();
         }
-        self.notified.set(None);
     }
     fn show(self: &Rc<Self>, page: &ipc::CandidatePage) {
         if let Ok(mut current) = self.page.try_borrow_mut() {
@@ -466,6 +528,7 @@ impl ITfTextInputProcessor_Impl for Tip_Impl {
 impl ITfTextInputProcessorEx_Impl for Tip_Impl {
     fn ActivateEx(&self, manager: Ref<ITfThreadMgr>, tid: u32, flags: u32) -> Result<()> {
         let manager = manager.ok()?;
+        self.shared.secure.set(flags & TF_TMAE_SECUREMODE != 0);
         self.show_mode_hint
             .set(flags & (TF_TMAE_UIELEMENTENABLEDONLY | TF_TMAE_SECUREMODE) == 0);
         if let Ok(mut ui) = self.shared.ui_manager.try_borrow_mut() {
@@ -509,7 +572,7 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
             *slot = button;
         }
         if self.japanese.get() {
-            self.shared.connect();
+            self.shared.connect(false);
         }
         Ok(())
     }
@@ -537,6 +600,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         Ok(())
     }
     fn OnTestKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        let previous = self.shared.tested.take();
         self.refresh_button();
         if input_mode::physical(w.0).is_some() {
             return Ok(true.into());
@@ -545,33 +609,57 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             return Ok(false.into());
         }
         let context = context.ok()?;
+        let message = KeyMessage::current(context, w, l);
+        if let Some((_, test)) = previous.filter(|(prior, _)| *prior == message) {
+            self.shared.tested.set(previous);
+            return Ok((test != KeyTest::Passed).into());
+        }
         let _ = refresh_scope(&self.shared, context);
         if self.shared.password.get() {
             self.shared.suspend_secure();
             return Ok(false.into());
         }
-        self.shared.connect();
+        let connection = self.shared.connect(false);
         let key = translate(w, l, true);
-        let consume = key.as_ref().is_some_and(|k| {
-            self.shared.client.try_borrow().ok().is_some_and(|c| {
+        let engine_owns = key.as_ref().is_some_and(|k| {
+            self.shared.client.try_borrow().is_ok_and(|c| {
                 c.as_ref()
                     .is_some_and(|c| c.would_consume(k, Privacy::Unknown))
             })
         });
-        // Unconsumed keys may not reach OnKeyDown. Record them once here.
-        let signature = (
-            unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageTime() },
-            w.0,
-            l.0,
-            context.as_raw() as usize,
-        );
-        if !consume && self.shared.notified.get() != Some(signature) {
-            self.process_key(context, w, l, true)?;
-            self.shared.notified.set(Some(signature));
-        }
-        Ok(consume.into())
+        let actual = translate(w, l, false);
+        let outage_starter =
+            self.shared.outage_scope.get() && actual.as_ref().is_some_and(|k| is_starter(w, k));
+        let test = if engine_owns {
+            if outage_starter {
+                KeyTest::ConnectedStarter
+            } else {
+                KeyTest::Engine
+            }
+        } else if outage_starter && self.shared.can_start_offline() {
+            KeyTest::OfflineStarter {
+                handshake_failed: connection == Connection::HandshakeFailed,
+            }
+        } else {
+            // An unconsumed key may never reach Down. Observe it once using
+            // the connection and learning policy already checked here.
+            if let Some(key) = actual
+                && !self.shared.can_start_offline()
+            {
+                let _ = refresh_scope(&self.shared, context);
+                if self.shared.password.get() {
+                    self.shared.suspend_secure();
+                } else {
+                    self.send_key(context, key, true, false);
+                }
+            }
+            KeyTest::Passed
+        };
+        self.shared.tested.set(Some((message, test)));
+        Ok((test != KeyTest::Passed).into())
     }
     fn OnTestKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, _: LPARAM) -> Result<BOOL> {
+        self.shared.tested.set(None);
         Ok(self
             .shared
             .eaten_keys
@@ -580,6 +668,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             .into())
     }
     fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        let previous = self.shared.tested.take();
         self.refresh_button();
         if let Some(command) = input_mode::physical(w.0) {
             if l.0 & (1 << 30) == 0 {
@@ -592,16 +681,14 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             return Ok(false.into());
         }
         let context = context.ok()?;
-        let signature = (
-            unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageTime() },
-            w.0,
-            l.0,
-            context.as_raw() as usize,
-        );
-        if self.shared.notified.get() == Some(signature) {
+        let message = KeyMessage::current(context, w, l);
+        let test = previous
+            .filter(|(prior, _)| *prior == message)
+            .map(|(_, test)| test);
+        if test == Some(KeyTest::Passed) {
             return Ok(false.into());
         }
-        let consumed = self.process_key(context, w, l, false)?;
+        let consumed = self.process_key(context, w, l, test);
         if w.0 <= 255
             && let Ok(mut keys) = self.shared.eaten_keys.try_borrow_mut()
         {
@@ -614,6 +701,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         Ok(consumed.into())
     }
     fn OnKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, _: LPARAM) -> Result<BOOL> {
+        self.shared.tested.set(None);
         Ok(self
             .shared
             .eaten_keys
@@ -655,29 +743,74 @@ impl Tip_Impl {
         context: &ITfContext,
         w: WPARAM,
         l: LPARAM,
-        passed: bool,
-    ) -> Result<bool> {
+        test: Option<KeyTest>,
+    ) -> bool {
+        let offline_claim = matches!(test, Some(KeyTest::OfflineStarter { .. }));
+        let claimed = offline_claim || test == Some(KeyTest::ConnectedStarter);
         let _ = refresh_scope(&self.shared, context);
         if self.shared.password.get() {
             self.shared.suspend_secure();
-            return Ok(false);
+            return claimed;
+        }
+        if offline_claim && !self.shared.outage_scope.get() {
+            return true;
         }
         let Some(key) = translate(w, l, false) else {
-            return Ok(false);
+            return claimed;
         };
-        self.shared.connect();
+        let starter = is_starter(w, &key);
+        if test
+            == Some(KeyTest::OfflineStarter {
+                handshake_failed: true,
+            })
+            && self.shared.can_start_offline()
+        {
+            // Test already waited for Hello. Check only for a missing pipe.
+            drop((self.shared.open_pipe)(true));
+            self.report_outage(context);
+            return true;
+        }
+        let connection = self
+            .shared
+            .connect(starter && self.shared.outage_scope.get());
+        if connection == Connection::Attached {
+            // The welcome supplied the app learning policy for this first key.
+            if refresh_scope(&self.shared, context).is_err() || self.shared.password.get() {
+                self.shared.suspend_secure();
+                return claimed;
+            }
+            if offline_claim && !self.shared.outage_scope.get() {
+                return true;
+            }
+        }
+        let eligible = starter && self.shared.outage_scope.get();
+        if self.shared.can_start_offline() {
+            if eligible {
+                self.report_outage(context);
+            }
+            return claimed || eligible;
+        }
+        let consumed = self
+            .send_key(context, key, false, eligible)
+            .unwrap_or(claimed);
+        consumed || offline_claim || (claimed && connection == Connection::Attached)
+    }
+    fn send_key(
+        &self,
+        context: &ITfContext,
+        key: Key,
+        passed: bool,
+        eligible: bool,
+    ) -> Option<bool> {
         if let Ok(mut saved) = self.shared.context.try_borrow_mut() {
             *saved = Some(context.clone());
         }
-        let client = self
+        let mut client = self
             .shared
             .client
             .try_borrow_mut()
             .ok()
-            .and_then(|mut c| c.take());
-        let Some(mut client) = client else {
-            return Ok(false);
-        };
+            .and_then(|mut c| c.take())?;
         let observed = self
             .shared
             .observed
@@ -685,7 +818,9 @@ impl Tip_Impl {
             .map(|c| c.clone())
             .unwrap_or_default();
         self.shared.stop_refinement();
-        let consumed = client.key(
+        let connected = client.is_connected();
+        let drop_on_loss = eligible && client.would_consume(&key, Privacy::Unknown);
+        let result = client.key_result(
             key,
             observed,
             passed,
@@ -702,7 +837,39 @@ impl Tip_Impl {
         if held {
             self.shared.hide();
         }
-        Ok(consumed)
+        if connected && result.is_some() {
+            // A handshake alone cannot tell whether the engine can process keys.
+            if let Ok(mut hint) = self.shared.mode_hint.try_borrow_mut() {
+                hint.take_if(|h| h.outage_shown_at.is_some());
+            }
+        } else if drop_on_loss && !held && result.is_none() {
+            // A missing pipe may need the supervisor. Leave the next Hello
+            // for the next key, even if the stalled peer still accepts opens.
+            drop((self.shared.open_pipe)(true));
+            self.report_outage(context);
+            return Some(true);
+        }
+        result.or(held.then_some(true))
+    }
+    fn report_outage(&self, context: &ITfContext) {
+        const REPEAT_AFTER: Duration = Duration::from_secs(10);
+        if !self.show_mode_hint.get()
+            || self
+                .shared
+                .mode_hint
+                .try_borrow()
+                .ok()
+                .and_then(|hint| hint.as_ref()?.outage_shown_at)
+                .is_some_and(|shown| shown.elapsed() < REPEAT_AFTER)
+        {
+            return;
+        }
+        let hint = mode_hint::Hint::for_outage(context, self.shared.tid.get());
+        if let Ok(hint) = hint
+            && let Ok(mut previous) = self.shared.mode_hint.try_borrow_mut()
+        {
+            *previous = Some(hint);
+        }
     }
 }
 impl ITfThreadMgrEventSink_Impl for Tip_Impl {
@@ -979,33 +1146,24 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
             .first_mut()
             .and_then(|s| unsafe { std::mem::ManuallyDrop::take(&mut s.range) })
             .ok_or_else(failure)?;
-        self.shared.password.set(false);
-        if unsafe { self.context.GetStatus() }.is_ok_and(|s| s.dwDynamicFlags & TS_SD_READONLY != 0)
-        {
+        let status = unsafe { self.context.GetStatus() };
+        let writable = status.is_ok();
+        if status.is_ok_and(|s| s.dwDynamicFlags & TS_SD_READONLY != 0) {
             self.shared.password.set(true);
             return Ok(());
         }
-        {
-            if let Ok(property) = unsafe { self.context.GetAppProperty(&GUID_PROP_INPUTSCOPE) }
-                && let Ok(value) = unsafe { property.GetValue(cookie, &range) }
-                && let Ok(unknown) = IUnknown::try_from(&value)
-                && let Ok(scope) = unknown.cast::<ITfInputScope>()
-            {
-                let mut scopes = std::ptr::null_mut();
-                let mut len = 0;
-                if unsafe { scope.GetInputScopes(&mut scopes, &mut len) }.is_ok() {
-                    if !scopes.is_null() && len <= 256 {
-                        self.shared.password.set(
-                            unsafe { std::slice::from_raw_parts(scopes, len as usize) }
-                                .contains(&IS_PASSWORD),
-                        );
-                    }
-                    unsafe {
-                        CoTaskMemFree(Some(scopes.cast()));
-                    }
-                }
-            }
-        }
+        let scope = input_scope(&self.context, cookie, &range);
+        // Connected conversion keeps its existing IS_PASSWORD check. Dropping
+        // a starter or launching the supervisor needs a known, enabled field.
+        self.shared
+            .password
+            .set(matches!(scope, Ok(Some(FieldScope::Password))));
+        self.shared.outage_scope.set(
+            !self.shared.secure.get()
+                && writable
+                && matches!(scope, Ok(Some(FieldScope::Ordinary)))
+                && keyboard_enabled(&self.context),
+        );
         let mut app_buffer = [0u16; 32768];
         let len = unsafe { GetModuleFileNameW(None, &mut app_buffer) } as usize;
         let app = app_buffer
@@ -1061,6 +1219,74 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
         Ok(())
     }
 }
+enum FieldScope {
+    Ordinary,
+    Password,
+    NumericPasswordOrPin,
+}
+
+fn keyboard_enabled(context: &ITfContext) -> bool {
+    use windows::Win32::System::Variant::{VT_EMPTY, VT_I4};
+    let value = context.cast::<ITfCompartmentMgr>().and_then(|mgr| unsafe {
+        mgr.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_DISABLED)?
+            .GetValue()
+    });
+    value.is_ok_and(|value| unsafe {
+        let inner = &value.Anonymous.Anonymous;
+        inner.vt == VT_EMPTY || (inner.vt == VT_I4 && inner.Anonymous.lVal == 0)
+    })
+}
+
+/// None for a selection whose scope cannot be determined. S_FALSE with
+/// a null property means the host does not supply input scopes.
+fn input_scope(context: &ITfContext, cookie: u32, range: &ITfRange) -> Result<Option<FieldScope>> {
+    use windows::Win32::System::Variant::VT_EMPTY;
+    unsafe {
+        let mut raw = std::ptr::null_mut();
+        let status =
+            (context.vtable().GetAppProperty)(context.as_raw(), &GUID_PROP_INPUTSCOPE, &mut raw);
+        if status == S_FALSE && raw.is_null() {
+            return Ok(Some(FieldScope::Ordinary));
+        }
+        status.ok()?;
+        if raw.is_null() {
+            return Err(failure());
+        }
+        let prop = ITfReadOnlyProperty::from_raw(raw);
+        let value = prop.GetValue(cookie, range)?;
+        if value.Anonymous.Anonymous.vt == VT_EMPTY {
+            // With a nonempty selection VT_EMPTY can mean mixed scopes.
+            return Ok(range
+                .IsEmpty(cookie)?
+                .as_bool()
+                .then_some(FieldScope::Ordinary));
+        }
+        let scope: ITfInputScope = IUnknown::try_from(&value)?.cast()?;
+        let mut scopes = std::ptr::null_mut();
+        let mut len = 0;
+        scope.GetInputScopes(&mut scopes, &mut len)?;
+        let result = (!scopes.is_null() && len <= 256).then(|| {
+            let scopes = std::slice::from_raw_parts(scopes, len as usize);
+            if scopes.contains(&IS_PASSWORD) {
+                FieldScope::Password
+            } else if scopes.iter().any(|s| {
+                matches!(
+                    *s,
+                    IS_NUMERIC_PASSWORD
+                        | IS_NUMERIC_PIN
+                        | IS_ALPHANUMERIC_PIN
+                        | IS_ALPHANUMERIC_PIN_SET
+                )
+            }) {
+                FieldScope::NumericPasswordOrPin
+            } else {
+                FieldScope::Ordinary
+            }
+        });
+        CoTaskMemFree(Some(scopes.cast()));
+        Ok(result)
+    }
+}
 fn refresh_scope(shared: &Rc<Shared>, context: &ITfContext) -> Result<()> {
     refresh_scope_with_text(shared, context, true)
 }
@@ -1070,6 +1296,7 @@ fn refresh_scope_with_text(
     read_text: bool,
 ) -> Result<()> {
     shared.password.set(true);
+    shared.outage_scope.set(false);
     let edit: ITfEditSession = ScopeEdit {
         shared: shared.clone(),
         context: context.clone(),
@@ -1084,6 +1311,12 @@ fn refresh_scope_with_text(
         shared.password.set(true);
     }
     result
+}
+fn starter_virtual_key(vk: u32) -> bool {
+    (0x30..=0x5a).contains(&vk) || (0xba..=0xe2).contains(&vk)
+}
+fn is_starter(w: WPARAM, key: &Key) -> bool {
+    starter_virtual_key(w.0 as u32) && ipc::frontend::starts_composition(key)
 }
 fn translate(w: WPARAM, l: LPARAM, test: bool) -> Option<Key> {
     let vk = w.0 as u32;
@@ -1122,7 +1355,7 @@ fn translate(w: WPARAM, l: LPARAM, test: bool) -> Option<Key> {
     } else if modifiers == ipc::MOD_CONTROL && matches!(vk, 0x55 | 0x49 | 0x4f | 0x50 | 0x54) {
         char::from_u32(vk)?.to_ascii_lowercase().to_string()
     } else if test {
-        if (0x30..=0x5a).contains(&vk) || (0xba..=0xe2).contains(&vk) {
+        if starter_virtual_key(vk) {
             "x".into()
         } else {
             return None;
