@@ -509,18 +509,31 @@ impl<C: ConversionEngine> Engine<C> {
                     self.refine(session, &mut reply, privacy, preceding);
                     if !was_converting
                         && self.settings.llm
-                        && self.llm.is_some()
                         && privacy == Privacy::Normal
+                        && let Some(llm) = self.llm.as_deref()
                         && let Some(pending) = sentence::Pending::prepare(
                             session,
                             preceding,
                             self.settings.calculated_dates,
                         )
                         && let Some(page) = &mut reply.candidates
-                        && page.refinement_outcome != RefinementOutcome::Unavailable as i32
+                        && !matches!(
+                            page.refinement_outcome(),
+                            RefinementOutcome::Unavailable | RefinementOutcome::SetupRequired
+                        )
                     {
-                        session.sentence = Some(pending);
-                        page.refinement_pending = true;
+                        // The focused segment may have had nothing to submit,
+                        // as at the beginning of a field. Ask here as well
+                        // whether the model waits for the user: nothing is
+                        // searched or scored for the text then, and the page
+                        // says why. A calendar year needs no model.
+                        if pending.needs_model() && !page.refinement_pending && llm.setup_required()
+                        {
+                            page.refinement_outcome = RefinementOutcome::SetupRequired as i32;
+                        } else {
+                            session.sentence = Some(pending);
+                            page.refinement_pending = true;
+                        }
                     }
                 }
                 session.last_request = Some(request.clone());

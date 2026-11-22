@@ -128,3 +128,23 @@ The worker must reproduce 373 independent tokenizer examples. On the 85 context-
 ```sh
 KANADE_LLM_MODEL=/path/to/tsumugi.gguf cargo test --release -p kanade-llm --features llama --test real_model -- --ignored --test-threads 1
 ```
+
+## After an update
+
+A qualification record names the worker binary that made it. Every release builds the worker again, so after an update the record names another worker and no longer applies (`runtime_changed`). The engine compares the worker before the profile, the prompt and the corpora. The reason therefore does not say that the worker is all that changed: the rest of the build may differ as well.
+
+When reranking is switched on, the engine qualifies the installed model again by itself. It needs no new consent for that. The engine has already established that the installed file is the registered one and that the stored consent covers the current terms; otherwise the reason is `model_changed` or `consent_changed`. The measurement uses the profile of the installed build and the fixtures compiled into it, reads no text of the user and stays on the computer. This holds whatever else of the build changed, so the engine does not try to tell a changed worker from a changed profile.
+
+The engine reserves this qualification in the step in which it reads the records, so the settings never show the model switched on, stale and idle. When an import was accepted before the records were read, the engine's own qualification follows once that job has ended, if the reason still applies. It starts once per engine process. A qualification that fails is not repeated, and one that is interrupted, for example by shutting the computer down, is not resumed: the record was cleared when it started. The user qualifies again from the settings then. While reranking is switched off, the engine measures nothing by itself, and the settings ask for a qualification before reranking can be switched on.
+
+A release that bundles another model needs that model imported again, with its terms (`model_changed`).
+
+`install.bat` waits for a qualification that the engine has started before it decides whether to import the bundled model.
+
+## Asking for the settings
+
+Reranking can be switched on while nothing is served and only the user can change that: the bundled model or its terms changed, a qualification failed, the installed model was removed while the setting stayed on, or the service stopped after the worker refused the model or failed repeatedly. The candidate window then says `AI は設定が必要・通常候補`, and the settings show the reason. `REFINEMENT_OUTCOME_SETUP_REQUIRED` carries this in `CandidatePage` and `CandidateUpdate`; a frontend that does not know the value shows the ordinary candidate status.
+
+The window says so for a conversion that would have been scored: one whose focused segment forms a job, or one whose whole text would be compared, as at the beginning of a field. For such a conversion no search is started and no further job is offered to the service. A calendar year needs no model and is still shown. A conversion that is not scored anyway, as in a private context, keeps the ordinary status.
+
+While an import or a qualification is running, the user is not asked for anything, and the window says `AI 評価できず・通常候補`.

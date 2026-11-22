@@ -467,6 +467,12 @@ impl Pending {
         })
     }
 
+    /// Whether nothing of this conversion can be shown without a score. A
+    /// calendar year needs none.
+    pub(super) fn needs_model(&self) -> bool {
+        self.year.is_none()
+    }
+
     // Past this point, changes already chosen are shown without further scoring.
     fn late(&self) -> bool {
         self.started.elapsed() > Duration::from_millis(SCAN_APPLY_MS)
@@ -1242,7 +1248,7 @@ impl<C: ConversionEngine> Engine<C> {
             }
         }
         if !pending.evaluated {
-            return Scan::Finished(None, RefinementOutcome::Unavailable);
+            return Scan::Finished(None, refine::unscored(Some(llm)));
         }
         Scan::Finished(
             Some(compose(&pending.base, &pending.edits)),

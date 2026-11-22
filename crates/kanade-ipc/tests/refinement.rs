@@ -212,6 +212,10 @@ fn status_updates_preserve_candidates_and_report_the_actual_outcome() {
         (RefinementOutcome::Evaluated, "AI 評価済み"),
         (RefinementOutcome::Unavailable, "AI 評価できず・通常候補"),
         (RefinementOutcome::TimedOut, "AI 時間切れ・通常候補"),
+        (
+            RefinementOutcome::SetupRequired,
+            "AI は設定が必要・通常候補",
+        ),
         (RefinementOutcome::Unspecified, "通常候補"),
     ] {
         let response = Response {
