@@ -16,7 +16,11 @@ use std::{
 use windows::{
     Win32::{
         Foundation::*,
-        System::{Com::*, LibraryLoader::GetModuleFileNameW},
+        System::{
+            Com::*,
+            LibraryLoader::GetModuleFileNameW,
+            Variant::{VARIANT, VT_BOOL, VT_EMPTY},
+        },
         UI::{Input::KeyboardAndMouse::*, TextServices::*},
     },
     core::{BOOL, Error, GUID, HRESULT, IUnknown, Interface, Ref, Result, implement},
@@ -101,6 +105,13 @@ enum KeyTest {
     OfflineStarter { handshake_failed: bool },
 }
 
+#[derive(Clone, Copy)]
+struct TestedKey {
+    message: KeyMessage,
+    decision: KeyTest,
+    field: FieldScope,
+}
+
 #[derive(PartialEq, Eq)]
 enum Connection {
     Unchanged,
@@ -118,16 +129,15 @@ struct Shared {
     page: RefCell<ipc::CandidatePage>,
     ui_native: Cell<bool>,
     ui_selection: Cell<u32>,
-    tested: Cell<Option<(KeyMessage, KeyTest)>>,
+    tested: Cell<Option<TestedKey>>,
     eaten_keys: RefCell<BTreeSet<usize>>,
     client: RefCell<Option<Client<SessionPipe>>>,
     composition: RefCell<Option<ITfComposition>>,
     context: RefCell<Option<ITfContext>>,
     manager: RefCell<Option<ITfThreadMgr>>,
     tid: Cell<u32>,
-    password: Cell<bool>,
+    field: Cell<FieldScope>,
     secure: Cell<bool>,
-    outage_scope: Cell<bool>,
     preedit: RefCell<Preedit>,
     window: RefCell<Option<CandidateWindow>>,
     mode_hint: RefCell<Option<mode_hint::Hint>>,
@@ -152,9 +162,8 @@ impl Shared {
             context: RefCell::new(None),
             manager: RefCell::new(None),
             tid: Cell::new(0),
-            password: Cell::new(true),
+            field: Cell::new(FieldScope::Bypass),
             secure: Cell::new(false),
-            outage_scope: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
             window: RefCell::new(None),
             mode_hint: RefCell::new(None),
@@ -186,6 +195,9 @@ impl Shared {
         } else {
             Connection::HandshakeFailed
         }
+    }
+    fn outage_scope(&self) -> bool {
+        self.field.get() != FieldScope::Bypass && !self.secure.get()
     }
     /// Only an idle session can drop a starter. A held reading or a
     /// document that rejected an edit retains its existing key policy.
@@ -366,7 +378,7 @@ impl Shared {
             return;
         };
         // Query input scope only: candidate polling never reads surrounding text.
-        if refresh_scope_with_text(self, &context, false).is_err() || self.password.get() {
+        if refresh_scope(self, &context, FieldScope::Ordinary, false) == FieldScope::Bypass {
             self.suspend_secure();
             return;
         }
@@ -418,7 +430,7 @@ impl Shared {
             self.suspend_secure();
             return;
         };
-        if refresh_scope(self, &context).is_err() || self.password.get() {
+        if refresh_scope(self, &context, FieldScope::Ordinary, false) == FieldScope::Bypass {
             self.suspend_secure();
             return;
         }
@@ -610,13 +622,18 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         }
         let context = context.ok()?;
         let message = KeyMessage::current(context, w, l);
-        if let Some((_, test)) = previous.filter(|(prior, _)| *prior == message) {
-            self.shared.tested.set(previous);
-            return Ok((test != KeyTest::Passed).into());
+        if let Some(tested) = previous.filter(|prior| prior.message == message) {
+            self.shared.tested.set(Some(tested));
+            return Ok((tested.decision != KeyTest::Passed).into());
         }
-        let _ = refresh_scope(&self.shared, context);
-        if self.shared.password.get() {
+        let field = refresh_scope(&self.shared, context, FieldScope::Ordinary, false);
+        if field == FieldScope::Bypass {
             self.shared.suspend_secure();
+            self.shared.tested.set(Some(TestedKey {
+                message,
+                decision: KeyTest::Passed,
+                field,
+            }));
             return Ok(false.into());
         }
         let connection = self.shared.connect(false);
@@ -629,7 +646,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         });
         let actual = translate(w, l, false);
         let outage_starter =
-            self.shared.outage_scope.get() && actual.as_ref().is_some_and(|k| is_starter(w, k));
+            self.shared.outage_scope() && actual.as_ref().is_some_and(|k| is_starter(w, k));
         let test = if engine_owns {
             if outage_starter {
                 KeyTest::ConnectedStarter
@@ -646,8 +663,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             if let Some(key) = actual
                 && !self.shared.can_start_offline()
             {
-                let _ = refresh_scope(&self.shared, context);
-                if self.shared.password.get() {
+                if refresh_scope(&self.shared, context, field, true) == FieldScope::Bypass {
                     self.shared.suspend_secure();
                 } else {
                     self.send_key(context, key, true, false);
@@ -655,7 +671,11 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             }
             KeyTest::Passed
         };
-        self.shared.tested.set(Some((message, test)));
+        self.shared.tested.set(Some(TestedKey {
+            message,
+            decision: test,
+            field,
+        }));
         Ok((test != KeyTest::Passed).into())
     }
     fn OnTestKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, _: LPARAM) -> Result<BOOL> {
@@ -682,10 +702,8 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         }
         let context = context.ok()?;
         let message = KeyMessage::current(context, w, l);
-        let test = previous
-            .filter(|(prior, _)| *prior == message)
-            .map(|(_, test)| test);
-        if test == Some(KeyTest::Passed) {
+        let test = previous.filter(|prior| prior.message == message);
+        if test.is_some_and(|key| key.decision == KeyTest::Passed) {
             return Ok(false.into());
         }
         let consumed = self.process_key(context, w, l, test);
@@ -743,16 +761,22 @@ impl Tip_Impl {
         context: &ITfContext,
         w: WPARAM,
         l: LPARAM,
-        test: Option<KeyTest>,
+        tested: Option<TestedKey>,
     ) -> bool {
+        let test = tested.map(|key| key.decision);
         let offline_claim = matches!(test, Some(KeyTest::OfflineStarter { .. }));
         let claimed = offline_claim || test == Some(KeyTest::ConnectedStarter);
-        let _ = refresh_scope(&self.shared, context);
-        if self.shared.password.get() {
+        let field = refresh_scope(
+            &self.shared,
+            context,
+            tested.map_or(FieldScope::Ordinary, |key| key.field),
+            true,
+        );
+        if field == FieldScope::Bypass {
             self.shared.suspend_secure();
-            return claimed;
+            return test.is_some();
         }
-        if offline_claim && !self.shared.outage_scope.get() {
+        if offline_claim && !self.shared.outage_scope() {
             return true;
         }
         let Some(key) = translate(w, l, false) else {
@@ -770,20 +794,18 @@ impl Tip_Impl {
             self.report_outage(context);
             return true;
         }
-        let connection = self
-            .shared
-            .connect(starter && self.shared.outage_scope.get());
+        let connection = self.shared.connect(starter && self.shared.outage_scope());
         if connection == Connection::Attached {
             // The welcome supplied the app learning policy for this first key.
-            if refresh_scope(&self.shared, context).is_err() || self.shared.password.get() {
+            if refresh_scope(&self.shared, context, field, true) == FieldScope::Bypass {
                 self.shared.suspend_secure();
-                return claimed;
+                return test.is_some();
             }
-            if offline_claim && !self.shared.outage_scope.get() {
+            if offline_claim && !self.shared.outage_scope() {
                 return true;
             }
         }
-        let eligible = starter && self.shared.outage_scope.get();
+        let eligible = starter && self.shared.outage_scope();
         if self.shared.can_start_offline() {
             if eligible {
                 self.report_outage(context);
@@ -805,18 +827,13 @@ impl Tip_Impl {
         if let Ok(mut saved) = self.shared.context.try_borrow_mut() {
             *saved = Some(context.clone());
         }
+        let observed = self.shared.observed.try_borrow().ok()?.clone();
         let mut client = self
             .shared
             .client
             .try_borrow_mut()
             .ok()
             .and_then(|mut c| c.take())?;
-        let observed = self
-            .shared
-            .observed
-            .try_borrow()
-            .map(|c| c.clone())
-            .unwrap_or_default();
         self.shared.stop_refinement();
         let connected = client.is_connected();
         let drop_on_loss = eligible && client.would_consume(&key, Privacy::Unknown);
@@ -935,7 +952,7 @@ struct NativeDocument {
 }
 impl Document for NativeDocument {
     fn apply(&mut self, reply: &KeyReply) -> bool {
-        if self.shared.password.get() {
+        if self.shared.field.get() == FieldScope::Bypass {
             return false;
         }
         if reply.commit.is_none()
@@ -1131,6 +1148,7 @@ fn write_composition(
 struct ScopeEdit {
     shared: Rc<Shared>,
     context: ITfContext,
+    limit: FieldScope,
     read_text: bool,
     _guard: ModuleGuard,
 }
@@ -1146,43 +1164,35 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
             .first_mut()
             .and_then(|s| unsafe { std::mem::ManuallyDrop::take(&mut s.range) })
             .ok_or_else(failure)?;
-        let status = unsafe { self.context.GetStatus() };
-        let writable = status.is_ok();
-        if status.is_ok_and(|s| s.dwDynamicFlags & TS_SD_READONLY != 0) {
-            self.shared.password.set(true);
+        if count != 1 {
+            return Err(failure());
+        }
+        let field = classify_field(&self.context, cookie, &range)?.min(self.limit);
+        if field == FieldScope::Bypass {
             return Ok(());
         }
-        let scope = input_scope(&self.context, cookie, &range);
-        // Connected conversion keeps its existing IS_PASSWORD check. Dropping
-        // a starter or launching the supervisor needs a known, enabled field.
-        self.shared
-            .password
-            .set(matches!(scope, Ok(Some(FieldScope::Password))));
-        self.shared.outage_scope.set(
-            !self.shared.secure.get()
-                && writable
-                && matches!(scope, Ok(Some(FieldScope::Ordinary)))
-                && keyboard_enabled(&self.context),
-        );
         let mut app_buffer = [0u16; 32768];
         let len = unsafe { GetModuleFileNameW(None, &mut app_buffer) } as usize;
         let app = app_buffer
             .get(..len)
             .and_then(|b| String::from_utf16(b).ok())
             .unwrap_or_default();
-        let privacy = self
-            .shared
-            .client
-            .try_borrow()
-            .ok()
-            .and_then(|c| c.as_ref().map(|c| c.privacy_for_app(&app)))
-            .unwrap_or(Privacy::Unknown);
+        let privacy = if field == FieldScope::Private {
+            Privacy::Private
+        } else {
+            self.shared
+                .client
+                .try_borrow()
+                .ok()
+                .and_then(|c| c.as_ref().map(|c| c.privacy_for_app(&app)))
+                .unwrap_or(Privacy::Unknown)
+        };
         let mut observed = ipc::Context {
             privacy: privacy as i32,
             app,
             ..Default::default()
         };
-        if self.read_text && privacy == Privacy::Normal && !self.shared.password.get() {
+        if self.read_text && privacy == Privacy::Normal {
             let before = if let Some(composition) = self
                 .shared
                 .composition
@@ -1213,20 +1223,25 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
                 observed.surrounding_available = true;
             }
         }
-        if let Ok(mut current) = self.shared.observed.try_borrow_mut() {
-            *current = observed;
-        }
+        *self
+            .shared
+            .observed
+            .try_borrow_mut()
+            .map_err(|_| failure())? = observed;
+        self.shared.field.set(field);
         Ok(())
     }
 }
+// A later check for the same key can only make its field policy stricter.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum FieldScope {
+    Bypass,
+    Private,
     Ordinary,
-    Password,
-    NumericPasswordOrPin,
 }
 
 fn keyboard_enabled(context: &ITfContext) -> bool {
-    use windows::Win32::System::Variant::{VT_EMPTY, VT_I4};
+    use windows::Win32::System::Variant::VT_I4;
     let value = context.cast::<ITfCompartmentMgr>().and_then(|mgr| unsafe {
         mgr.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_DISABLED)?
             .GetValue()
@@ -1237,80 +1252,106 @@ fn keyboard_enabled(context: &ITfContext) -> bool {
     })
 }
 
-/// None for a selection whose scope cannot be determined. S_FALSE with
-/// a null property means the host does not supply input scopes.
-fn input_scope(context: &ITfContext, cookie: u32, range: &ITfRange) -> Result<Option<FieldScope>> {
-    use windows::Win32::System::Variant::VT_EMPTY;
+fn range_attribute(
+    context: &ITfContext,
+    cookie: u32,
+    range: &ITfRange,
+    id: &GUID,
+) -> Result<Option<VARIANT>> {
     unsafe {
-        let mut raw = std::ptr::null_mut();
-        let status =
-            (context.vtable().GetAppProperty)(context.as_raw(), &GUID_PROP_INPUTSCOPE, &mut raw);
-        if status == S_FALSE && raw.is_null() {
-            return Ok(Some(FieldScope::Ordinary));
+        let Ok(prop) = context.GetAppProperty(id) else {
+            return Ok(None);
+        };
+        if !range.IsEmpty(cookie)?.as_bool() {
+            // GetValue can describe only the start of a mixed selection. Stores
+            // without FindNextAttrTransition can still supply a usable value.
+            let mut ranges = None;
+            if prop.EnumRanges(cookie, &mut ranges, range).is_ok()
+                && let Some(ranges) = ranges
+            {
+                let mut spans = [None, None];
+                let mut count = 0;
+                if ranges.Next(&mut spans, &mut count).is_ok() && count == 2 {
+                    return Err(failure());
+                }
+            }
         }
-        status.ok()?;
-        if raw.is_null() {
-            return Err(failure());
+        Ok(prop
+            .GetValue(cookie, range)
+            .ok()
+            .filter(|value| value.Anonymous.Anonymous.vt != VT_EMPTY))
+    }
+}
+
+fn classify_field(context: &ITfContext, cookie: u32, range: &ITfRange) -> Result<FieldScope> {
+    if unsafe { context.GetStatus()? }.dwDynamicFlags & TS_SD_READONLY != 0
+        || !keyboard_enabled(context)
+    {
+        return Ok(FieldScope::Bypass);
+    }
+    if let Some(value) = range_attribute(context, cookie, range, &TSATTRID_Text_ReadOnly)? {
+        let inner = unsafe { &value.Anonymous.Anonymous };
+        if inner.vt == VT_BOOL && unsafe { inner.Anonymous.boolVal } != VARIANT_FALSE {
+            return Ok(FieldScope::Bypass);
         }
-        let prop = ITfReadOnlyProperty::from_raw(raw);
-        let value = prop.GetValue(cookie, range)?;
-        if value.Anonymous.Anonymous.vt == VT_EMPTY {
-            // With a nonempty selection VT_EMPTY can mean mixed scopes.
-            return Ok(range
-                .IsEmpty(cookie)?
-                .as_bool()
-                .then_some(FieldScope::Ordinary));
-        }
-        let scope: ITfInputScope = IUnknown::try_from(&value)?.cast()?;
+    }
+    let Some(value) = range_attribute(context, cookie, range, &GUID_PROP_INPUTSCOPE)? else {
+        return Ok(FieldScope::Ordinary);
+    };
+    let scope: ITfInputScope = IUnknown::try_from(&value)?.cast()?;
+    unsafe {
         let mut scopes = std::ptr::null_mut();
         let mut len = 0;
         scope.GetInputScopes(&mut scopes, &mut len)?;
-        let result = (!scopes.is_null() && len <= 256).then(|| {
-            let scopes = std::slice::from_raw_parts(scopes, len as usize);
-            if scopes.contains(&IS_PASSWORD) {
-                FieldScope::Password
-            } else if scopes.iter().any(|s| {
+        let field = if len == 0 {
+            FieldScope::Ordinary
+        } else if scopes.is_null() {
+            FieldScope::Bypass
+        } else {
+            let scopes = std::slice::from_raw_parts(scopes, len.min(256) as usize);
+            if scopes.iter().any(|s| {
                 matches!(
                     *s,
-                    IS_NUMERIC_PASSWORD
+                    IS_PASSWORD
+                        | IS_NUMERIC_PASSWORD
                         | IS_NUMERIC_PIN
                         | IS_ALPHANUMERIC_PIN
                         | IS_ALPHANUMERIC_PIN_SET
                 )
             }) {
-                FieldScope::NumericPasswordOrPin
+                FieldScope::Bypass
+            } else if scopes.contains(&IS_PRIVATE) {
+                FieldScope::Private
             } else {
                 FieldScope::Ordinary
             }
-        });
+        };
         CoTaskMemFree(Some(scopes.cast()));
-        Ok(result)
+        Ok(field)
     }
 }
-fn refresh_scope(shared: &Rc<Shared>, context: &ITfContext) -> Result<()> {
-    refresh_scope_with_text(shared, context, true)
-}
-fn refresh_scope_with_text(
+
+fn refresh_scope(
     shared: &Rc<Shared>,
     context: &ITfContext,
+    limit: FieldScope,
     read_text: bool,
-) -> Result<()> {
-    shared.password.set(true);
-    shared.outage_scope.set(false);
+) -> FieldScope {
+    shared.field.set(FieldScope::Bypass);
     let edit: ITfEditSession = ScopeEdit {
         shared: shared.clone(),
         context: context.clone(),
+        limit,
         read_text,
         _guard: ModuleGuard::new(),
     }
     .into();
     let result =
-        unsafe { context.RequestEditSession(shared.tid.get(), &edit, TF_ES_SYNC | TF_ES_READ) }
-            .and_then(|status| status.ok());
-    if result.is_err() {
-        shared.password.set(true);
+        unsafe { context.RequestEditSession(shared.tid.get(), &edit, TF_ES_SYNC | TF_ES_READ) };
+    if !result.is_ok_and(|status| status == S_OK) {
+        shared.field.set(FieldScope::Bypass);
     }
-    result
+    shared.field.get()
 }
 fn starter_virtual_key(vk: u32) -> bool {
     (0x30..=0x5a).contains(&vk) || (0xba..=0xe2).contains(&vk)

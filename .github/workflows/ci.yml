@@ -130,6 +130,8 @@ jobs:
         run: python .github/scripts/bundled_model.py --fetch
       - name: Test Windows
         if: runner.os == 'Windows'
+        env:
+          KANADE_TEST_SKIP_CUAS_EDIT: "0"
         run: cargo test --locked --workspace --no-fail-fast
       - name: Build the Windows native frontends
         if: runner.os == 'Windows'
