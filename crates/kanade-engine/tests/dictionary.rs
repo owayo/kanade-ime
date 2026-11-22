@@ -70,6 +70,85 @@ fn learning_exclusions_migrate_and_round_trip_without_accepting_legacy_edits() {
     assert_eq!(settings["learning_excluded_apps"], json!([]));
 }
 
+#[test]
+#[ignore = "requires the locked worker and a debug engine; mise run contract"]
+fn unreadable_files_keep_features_off_stay_unwritten_and_settings_are_read_again() {
+    let temp = tempfile::Builder::new()
+        .prefix("kanade-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let directory = temp.path().join("data/kanade");
+    std::fs::create_dir_all(&directory).unwrap();
+    // Written by a newer version, and cut off in the middle of a record.
+    let settings = "font_size = 24.0\nfrom_a_newer_version = 1\n";
+    let learning = "{\"records\":[{\"id\":";
+    std::fs::write(directory.join("settings.toml"), settings).unwrap();
+    std::fs::write(directory.join("learning.json"), learning).unwrap();
+    let read = |name: &str| std::fs::read_to_string(directory.join(name)).unwrap();
+    let mut server = Server::start(temp);
+    let shown = server
+        .management(manage::Action::GetSettings, Value::Null, 0, 0)
+        .unwrap();
+    let unreadable = StoreState::Unreadable as i32;
+    assert_eq!((shown.settings, shown.learning), (unreadable, unreadable));
+    let current: Value = serde_json::from_str(&shown.json).unwrap();
+    for feature in [
+        "learning",
+        "llm",
+        "project_dictionary",
+        "calculated_dates",
+        "emoji_dictionary",
+        "punctuation_commit",
+    ] {
+        assert_eq!(current[feature], false, "{feature}");
+    }
+    assert_eq!(current["font_size"], 17.0);
+    // Conversion still works.
+    let mut input = Input::connect(&server.socket());
+    for ch in "kana".chars() {
+        input.key(&ch.to_string(), SpecialKey::None, Privacy::Normal);
+        input.ack();
+    }
+    let reply = input.key("", SpecialKey::Enter, Privacy::Normal);
+    input.ack();
+    assert_eq!(reply.commit.unwrap().value, "かな");
+    drop(input);
+    let mut edited = current.clone();
+    edited["font_size"] = json!(20.0);
+    assert!(
+        server
+            .manage(manage::Action::SetSettings, edited.clone(), 0, 0)
+            .is_err()
+    );
+    let records = server
+        .manage(manage::Action::ListLearning, Value::Null, 0, 0)
+        .unwrap();
+    assert_eq!(records["total"], 0);
+    assert!(
+        server
+            .manage(manage::Action::ClearLearning, Value::Null, 0, 0)
+            .is_err()
+    );
+    assert_eq!(read("settings.toml"), settings);
+    assert_eq!(read("learning.json"), learning);
+    // Repaired settings are taken up by the next request and can be saved.
+    std::fs::write(directory.join("settings.toml"), "font_size = 24.0\n").unwrap();
+    let shown = server
+        .management(manage::Action::GetSettings, Value::Null, 0, 0)
+        .unwrap();
+    assert_eq!(shown.settings, StoreState::Read as i32);
+    assert_eq!(
+        serde_json::from_str::<Value>(&shown.json).unwrap()["font_size"],
+        24.0
+    );
+    server
+        .manage(manage::Action::SetSettings, edited, 0, 0)
+        .unwrap();
+    assert!(read("settings.toml").contains("font_size = 20.0"));
+    server.stop();
+    assert_eq!(read("learning.json"), learning);
+}
+
 impl Server {
     fn start(temp: tempfile::TempDir) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_kanade-engine"))
@@ -103,6 +182,18 @@ impl Server {
         job_id: u64,
         record_id: u64,
     ) -> io::Result<Value> {
+        Ok(serde_json::from_str(
+            &self.management(action, value, job_id, record_id)?.json,
+        )?)
+    }
+    /// The whole reply, with what the engine could read at start.
+    fn management(
+        &self,
+        action: manage::Action,
+        value: Value,
+        job_id: u64,
+        record_id: u64,
+    ) -> io::Result<Management> {
         let mut input = Input::connect(&self.socket());
         send(
             &mut input.stream,
@@ -120,7 +211,12 @@ impl Server {
         let Some(response::Body::Management(response)) = response.body else {
             return Err(io::ErrorKind::InvalidData.into());
         };
-        Ok(serde_json::from_str(&response.json)?)
+        Ok(response)
+    }
+    /// Ends the engine, so it can write nothing more.
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
     fn submit(&self, edit: Value) -> u64 {
         self.manage(manage::Action::EditMozcDictionary, edit, 0, 0)

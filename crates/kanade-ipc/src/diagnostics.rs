@@ -78,10 +78,15 @@ pub enum Event {
     Panicked,
     /// The engine dropped every session after a panic and kept running.
     RecoveredFromPanic,
+    /// The settings file could not be read. The engine converts with every
+    /// optional feature off and leaves the file as it is.
+    SettingsUnreadable,
+    /// The learning store could not be read. The engine converts without
+    /// Kanade's correction learning and leaves the file as it is.
+    LearningStoreUnreadable,
     FatalAlreadyRunning,
     FatalSocketDirectory,
     FatalConfiguration,
-    FatalLearningStore,
     FatalWorkerStart,
     FatalListener,
     FatalThread,
@@ -143,10 +148,11 @@ impl Event {
             Self::SandboxedHostsUnreachable => "sandboxed-hosts-unreachable",
             Self::Panicked => "panicked",
             Self::RecoveredFromPanic => "recovered-from-panic",
+            Self::SettingsUnreadable => "settings-unreadable",
+            Self::LearningStoreUnreadable => "learning-store-unreadable",
             Self::FatalAlreadyRunning => "fatal-already-running",
             Self::FatalSocketDirectory => "fatal-socket-directory",
             Self::FatalConfiguration => "fatal-configuration",
-            Self::FatalLearningStore => "fatal-learning-store",
             Self::FatalWorkerStart => "fatal-worker-start",
             Self::FatalListener => "fatal-listener",
             Self::FatalThread => "fatal-thread",

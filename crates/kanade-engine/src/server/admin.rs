@@ -6,7 +6,8 @@ use std::{
 };
 pub(super) struct Administration {
     data: PathBuf,
-    settings: Mutex<config::Config>,
+    settings: Mutex<Settings>,
+    /// `None` when the learning store could not be read at start.
     learning: Option<LearningService>,
     project_reload: Arc<Mutex<Arc<kanade_indexer::Catalog>>>,
     project_jobs: OnceLock<io::Result<Arc<kanade_indexer::workflow::Service>>>,
@@ -14,17 +15,38 @@ pub(super) struct Administration {
     dictionary: OnceLock<io::Result<dictionary::Service>>,
     llm: kanade_llm::Manager,
 }
+/// The settings in force.
+struct Settings {
+    config: config::Config,
+    /// The settings file exists but could not be read, so `config` is
+    /// `Config::unreadable()`. Nothing writes the file while this holds: it may
+    /// carry settings from a newer version, or a repair in progress.
+    unreadable: bool,
+}
+impl Settings {
+    fn state(&self) -> StoreState {
+        if self.unreadable {
+            StoreState::Unreadable
+        } else {
+            StoreState::Read
+        }
+    }
+}
 impl Administration {
+    /// `settings` is `None` when the settings file could not be read.
     pub(super) fn new(
         data: PathBuf,
-        settings: config::Config,
+        settings: Option<config::Config>,
         learning: Option<LearningService>,
         projects: Arc<kanade_indexer::Catalog>,
         llm: kanade_llm::Manager,
     ) -> Self {
         Self {
             data,
-            settings: Mutex::new(settings),
+            settings: Mutex::new(Settings {
+                unreadable: settings.is_none(),
+                config: settings.unwrap_or_else(config::Config::unreadable),
+            }),
             learning,
             project_reload: Arc::new(Mutex::new(projects)),
             project_jobs: OnceLock::new(),
@@ -33,7 +55,12 @@ impl Administration {
             llm,
         }
     }
-    pub(super) fn handle(&self, request: &Manage, tx: &SyncSender<Work>) -> io::Result<String> {
+    /// Answers a request, with whether the settings file and the learning
+    /// store could be read.
+    pub(super) fn handle(&self, request: &Manage, tx: &SyncSender<Work>) -> io::Result<Management> {
+        // Read under the same lock as the settings it describes, so settings
+        // kept off for a file that could not be read never pass as read.
+        let mut settings_state = None;
         use manage::Action;
         let action = Action::try_from(request.action).map_err(|_| io::ErrorKind::InvalidInput)?;
         let value = match action {
@@ -91,9 +118,20 @@ impl Administration {
                 self.reload_projects(tx)?;
                 serde_json::json!({"reloaded":true})
             }
-            Action::GetSettings => serde_json::to_value(
-                &*self.settings.lock().map_err(|_| io::ErrorKind::Other)?
-            )?,
+            Action::GetSettings => {
+                let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
+                // The file may have been repaired or removed since. Reading it
+                // again writes nothing; settings that can be read take effect.
+                // Settings the engine could not be handed are retried by the
+                // next request; until then they are still reported unreadable.
+                if current.unreadable
+                    && let Ok(settings) = config::Config::load(&self.settings_file())
+                {
+                    let _ = self.adopt(&mut current, settings, tx);
+                }
+                settings_state = Some(current.state());
+                serde_json::to_value(&current.config)?
+            }
             Action::SetSettings => {
                 let settings: config::Config = serde_json::from_str(&request.json)
                     .map_err(|_| io::ErrorKind::InvalidInput)?;
@@ -101,7 +139,7 @@ impl Administration {
                 let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
                 // Switching the model on needs a qualified model and runtime.
                 // Other settings stay editable while `llm` is already on.
-                if settings.llm && !current.llm && !self.llm.ready() {
+                if settings.llm && !current.config.llm && !self.llm.ready() {
                     return Err(io::ErrorKind::Unsupported.into());
                 }
                 self.apply_settings(&mut current, settings, tx)?;
@@ -113,9 +151,9 @@ impl Administration {
                 let edit: config::LearningExclusionsEdit = serde_json::from_str(&request.json)
                     .map_err(|_| io::ErrorKind::InvalidInput)?;
                 let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
-                let settings = edit.apply(&current)?;
+                let settings = edit.apply(&current.config)?;
                 self.apply_settings(&mut current, settings, tx)?;
-                serde_json::to_value(&*current)?
+                serde_json::to_value(&current.config)?
             }
             Action::LlmStatus => serde_json::to_value(self.llm.status())?,
             Action::LlmImport => {
@@ -128,8 +166,9 @@ impl Administration {
                 let result = self.llm.remove();
                 if result != kanade_llm::manager::RemoveResult::Busy {
                     let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
-                    if current.llm {
-                        let mut settings = current.clone();
+                    // Settings that could not be read already have the model off.
+                    if current.config.llm {
+                        let mut settings = current.config.clone();
                         settings.llm = false;
                         self.apply_settings(&mut current, settings, tx)?;
                     }
@@ -229,7 +268,24 @@ impl Administration {
                 }
             }
         };
-        serde_json::to_string(&value).map_err(Into::into)
+        let (settings, learning) = self.stores();
+        let settings = settings_state.unwrap_or(settings);
+        // The settings application may run with another data directory, so
+        // it shows the file the engine opened rather than one of its own.
+        let named = |state, file: PathBuf| {
+            if state == StoreState::Unreadable {
+                file.to_string_lossy().into_owned()
+            } else {
+                String::new()
+            }
+        };
+        Ok(Management {
+            json: serde_json::to_string(&value)?,
+            settings: settings as i32,
+            learning: learning as i32,
+            settings_file: named(settings, self.settings_file()),
+            learning_file: named(learning, self.learning_file()),
+        })
     }
     pub(super) fn reload_projects(&self, tx: &SyncSender<Work>) -> io::Result<bool> {
         reload_catalog(&self.data, &self.project_reload, tx)
@@ -267,21 +323,60 @@ impl Administration {
             .as_ref()
             .map_err(|_| io::ErrorKind::Other.into())
     }
-    /// Saves, applies to the engine and updates the model service, in that order.
+    /// Whether the settings file and the learning store could be read.
+    fn stores(&self) -> (StoreState, StoreState) {
+        let settings = self
+            .settings
+            .lock()
+            .map_or(StoreState::Unspecified, |current| current.state());
+        let learning = if self.learning.is_some() {
+            StoreState::Read
+        } else {
+            StoreState::Unreadable
+        };
+        (settings, learning)
+    }
+    fn settings_file(&self) -> PathBuf {
+        super::settings_file(&self.data)
+    }
+    fn learning_file(&self) -> PathBuf {
+        super::learning_file(&self.data)
+    }
+    /// Saves, applies to the engine and updates the model service, in that
+    /// order. A settings file that could not be read is refused rather than
+    /// written over.
     fn apply_settings(
         &self,
-        current: &mut config::Config,
+        current: &mut Settings,
         settings: config::Config,
         tx: &SyncSender<Work>,
     ) -> io::Result<()> {
-        settings.save(&self.data.join("kanade/settings.toml"))?;
+        if current.unreadable {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        settings.save(&self.settings_file())?;
+        self.adopt(current, settings, tx)
+    }
+    /// Applies settings to the engine and the model service without saving.
+    /// Settings handed to the engine are the ones in force from then on: it
+    /// applies its work in order, even after the wait for its answer ends, so
+    /// a late answer leaves no report of the settings it replaced.
+    fn adopt(
+        &self,
+        current: &mut Settings,
+        settings: config::Config,
+        tx: &SyncSender<Work>,
+    ) -> io::Result<()> {
         let (ack, done) = mpsc::sync_channel(1);
         tx.send(Work::Configure(settings.clone(), ack))
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        self.llm.set_enabled(settings.llm);
+        *current = Settings {
+            config: settings,
+            unreadable: false,
+        };
         done.recv_timeout(Duration::from_secs(5))
             .map_err(|_| io::ErrorKind::TimedOut)?;
-        self.llm.set_enabled(settings.llm);
-        *current = settings;
         Ok(())
     }
     fn learner(&self) -> io::Result<&LearningService> {

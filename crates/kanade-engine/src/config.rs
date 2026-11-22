@@ -69,6 +69,22 @@ impl Default for Config {
     }
 }
 impl Config {
+    /// What the engine uses while its settings file exists but cannot be read.
+    /// The file may say that a feature is off, so every feature a user
+    /// switches stays off rather than taking its default. Learning off also
+    /// keeps Mozc from learning. The candidate count and the text size, which
+    /// switch nothing on, keep their defaults.
+    pub fn unreadable() -> Self {
+        Self {
+            learning: false,
+            llm: false,
+            project_dictionary: false,
+            calculated_dates: false,
+            emoji_dictionary: false,
+            punctuation_commit: false,
+            ..Self::default()
+        }
+    }
     pub fn learning_allowed(&self, app: &str) -> bool {
         self.learning && kanade_ipc::learning_app_allowed(app, &self.learning_excluded_apps)
     }
@@ -214,6 +230,18 @@ mod tests {
         std::fs::write(&path, "learning_excluded_app = []").unwrap();
         assert!(Config::load(&path).is_err());
         assert!(serde_json::from_str::<Config>(r#"{"learning_apps":[]}"#).is_err());
+    }
+    #[test]
+    fn unreadable_settings_switch_every_feature_off() {
+        let config = Config::unreadable();
+        // Every switch, including any added later, so none takes its default.
+        for (key, value) in toml::Table::try_from(&config).unwrap() {
+            assert_ne!(value.as_bool(), Some(true), "{key}");
+        }
+        assert!(!config.learning_allowed("com.example.Editor"));
+        assert_eq!(config.page_size, Config::default().page_size);
+        assert_eq!(config.font_size, Config::default().font_size);
+        config.validate().unwrap();
     }
     #[test]
     fn app_scope_is_bound_to_its_snapshot_and_preserves_other_settings() {

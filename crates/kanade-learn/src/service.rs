@@ -41,7 +41,10 @@ impl Drop for Worker {
 }
 impl LearningService {
     pub fn start(path: PathBuf, dict: PathBuf) -> io::Result<Self> {
-        let store = Store::load(&path)?;
+        Self::with_store(Store::load(&path)?, path, dict)
+    }
+    /// Starts with a store already read from `path`, which it then writes.
+    pub fn with_store(store: Store, path: PathBuf, dict: PathBuf) -> io::Result<Self> {
         let snapshot = Arc::new(RwLock::new(store.clone()));
         let shared = snapshot.clone();
         let (tx, rx) = mpsc::sync_channel::<Job>(64);
