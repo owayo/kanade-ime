@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Keeps one engine running for this user and logon session.
 //!
-//! The engine is started at sign-in and must outlive every failure of its
-//! own: a frontend that cannot reach it passes keys on as plain letters. The
-//! supervisor is the same executable in another mode. It starts the engine as
-//! its child, waits for it to end, records the exit code and starts it again.
+//! The sign-in entry starts the supervisor. The Windows text service can also
+//! start it when the engine pipe is missing. The supervisor runs the same
+//! executable as its child, records the exit code and restarts the engine.
 //! It has no console and no window, does not read input and holds no
 //! conversion state, so there is little in it that can fail.
 use kanade_ipc::diagnostics::{Detail, Event};

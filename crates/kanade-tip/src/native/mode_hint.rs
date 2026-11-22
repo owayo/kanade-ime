@@ -1,5 +1,6 @@
 //! A short-lived Windows tracking tooltip. Only caret geometry leaves the edit session.
 use super::*;
+use std::time::Instant;
 use windows::{
     Win32::{
         Graphics::Gdi::{
@@ -101,9 +102,36 @@ unsafe extern "system" fn tooltip_proc(
     }
 }
 
-pub(super) struct Hint(HWND);
+pub(super) struct Hint {
+    window: HWND,
+    // The timer only hides the window. Replacing or dropping it ends the cooldown.
+    pub(super) outage_shown_at: Option<Instant>,
+}
 impl Hint {
     pub(super) fn at_selection(context: &ITfContext, tid: u32, japanese: bool) -> Result<Self> {
+        let label = if japanese {
+            w!("あ  ひらがな")
+        } else {
+            w!("A  半角英数")
+        };
+        Self::with_label(context, tid, label, 1000)
+    }
+    pub(super) fn for_outage(context: &ITfContext, tid: u32) -> Result<Self> {
+        let mut hint = Self::with_label(
+            context,
+            tid,
+            w!("変換エンジンに接続できません。少し待って入力し直してください"),
+            5000,
+        )?;
+        hint.outage_shown_at = Some(Instant::now());
+        Ok(hint)
+    }
+    fn with_label(
+        context: &ITfContext,
+        tid: u32,
+        label: windows::core::PCWSTR,
+        duration_ms: u32,
+    ) -> Result<Self> {
         let result = Rc::new(Cell::new(None));
         let edit: ITfEditSession = SelectionRect {
             context: context.clone(),
@@ -124,7 +152,7 @@ impl Hint {
             })
             .ok()?;
             // Unowned so an editor destroying its child window cannot invalidate our handle.
-            let hint = Self(CreateWindowExW(
+            let hwnd = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
                 TOOLTIPS_CLASSW,
                 None,
@@ -137,14 +165,12 @@ impl Hint {
                 None,
                 None,
                 None,
-            )?);
-            let hwnd = hint.0;
-            SetWindowSubclass(hwnd, Some(tooltip_proc), TIMER, 0).ok()?;
-            let label = if japanese {
-                w!("あ  ひらがな")
-            } else {
-                w!("A  半角英数")
+            )?;
+            let hint = Self {
+                window: hwnd,
+                outage_shown_at: None,
             };
+            SetWindowSubclass(hwnd, Some(tooltip_proc), TIMER, 0).ok()?;
             let info = TTTOOLINFOW {
                 // Hosts without a v6 common-controls manifest accept the v2 layout.
                 // The reserved trailing pointer is unused by tracking tools.
@@ -193,9 +219,14 @@ impl Hint {
                 0,
                 SWP_NOACTIVATE | SWP_NOSIZE,
             )?;
-            if SetTimer(Some(hwnd), TIMER, 1000, None) == 0 {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return Err(failure());
+            }
+            if SetTimer(Some(hwnd), TIMER, duration_ms, None) == 0 {
                 return Err(Error::from_thread());
             }
+            #[cfg(test)]
+            host::hinted(hwnd);
             Ok(hint)
         }
     }
@@ -203,7 +234,7 @@ impl Hint {
 impl Drop for Hint {
     fn drop(&mut self) {
         unsafe {
-            let _ = DestroyWindow(self.0);
+            let _ = DestroyWindow(self.window);
         }
     }
 }
