@@ -196,11 +196,31 @@ impl Shared {
             Connection::HandshakeFailed
         }
     }
+    fn put_client(&self, client: Client<SessionPipe>) {
+        if !client.edit_rejected()
+            && let Ok(mut slot) = self.client.try_borrow_mut()
+        {
+            *slot = Some(client);
+        }
+    }
+    fn composition_terminated(&self, composition: Ref<ITfComposition>) {
+        let Some(ended) = composition.as_ref() else {
+            return;
+        };
+        if self.composition.borrow().as_ref() != Some(ended) {
+            return;
+        }
+        self.composition.borrow_mut().take();
+        // The host already decided what stays in the document.
+        self.client.borrow_mut().take();
+        *self.preedit.borrow_mut() = Preedit::default();
+        *self.page.borrow_mut() = ipc::CandidatePage::default();
+        self.hide();
+    }
     fn outage_scope(&self) -> bool {
         self.field.get() != FieldScope::Bypass && !self.secure.get()
     }
-    /// Only an idle session can drop a starter. A held reading or a
-    /// document that rejected an edit retains its existing key policy.
+    /// Only an idle, disconnected session can drop a starter.
     fn can_start_offline(&self) -> bool {
         self.client
             .try_borrow()
@@ -410,9 +430,7 @@ impl Shared {
                 context,
             },
         );
-        if let Ok(mut stored) = self.client.try_borrow_mut() {
-            *stored = Some(client);
-        }
+        self.put_client(client);
         match update {
             Ok(Some(page)) => self.show(&page),
             Ok(None) if expired => {
@@ -444,9 +462,7 @@ impl Shared {
                     context,
                 },
             );
-            if let Ok(mut c) = self.client.try_borrow_mut() {
-                *c = Some(client);
-            }
+            self.put_client(client);
         }
     }
 }
@@ -848,9 +864,7 @@ impl Tip_Impl {
         );
         // Candidates of a lost session cannot be chosen any more.
         let held = client.is_held();
-        if let Ok(mut c) = self.shared.client.try_borrow_mut() {
-            *c = Some(client);
-        }
+        self.shared.put_client(client);
         if held {
             self.shared.hide();
         }
@@ -911,11 +925,8 @@ impl ITfThreadMgrEventSink_Impl for Tip_Impl {
     }
 }
 impl ITfCompositionSink_Impl for Tip_Impl {
-    fn OnCompositionTerminated(&self, _: u32, _: Ref<ITfComposition>) -> Result<()> {
-        self.shared.reset();
-        if let Ok(mut c) = self.shared.composition.try_borrow_mut() {
-            c.take();
-        }
+    fn OnCompositionTerminated(&self, _: u32, composition: Ref<ITfComposition>) -> Result<()> {
+        self.shared.composition_terminated(composition);
         Ok(())
     }
 }
@@ -936,12 +947,9 @@ struct CompositionObserver {
     _guard: ModuleGuard,
 }
 impl ITfCompositionSink_Impl for CompositionObserver_Impl {
-    fn OnCompositionTerminated(&self, _: u32, _: Ref<ITfComposition>) -> Result<()> {
-        if let Some(s) = self.shared.upgrade() {
-            s.hide();
-            if let Ok(mut c) = s.composition.try_borrow_mut() {
-                c.take();
-            }
+    fn OnCompositionTerminated(&self, _: u32, composition: Ref<ITfComposition>) -> Result<()> {
+        if let Some(shared) = self.shared.upgrade() {
+            shared.composition_terminated(composition);
         }
         Ok(())
     }
@@ -949,6 +957,44 @@ impl ITfCompositionSink_Impl for CompositionObserver_Impl {
 struct NativeDocument {
     shared: Rc<Shared>,
     context: ITfContext,
+}
+impl NativeDocument {
+    fn request_write(
+        &self,
+        edit: &ITfEditSession,
+        mode: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
+    ) -> Result<HRESULT> {
+        unsafe {
+            self.context
+                .RequestEditSession(self.shared.tid.get(), edit, mode | TF_ES_READWRITE)
+        }
+    }
+
+    // Capture the original composition: a deferred end must never touch a
+    // composition started by a later key.
+    fn end_owned(&self, reading: Option<&str>) -> bool {
+        let Some(composition) = self.shared.composition.borrow_mut().take() else {
+            return true;
+        };
+        let finish = reading.map(|r| (ipc::surface(&self.shared.preedit.borrow()), r.to_owned()));
+        let end = |finish| -> ITfEditSession {
+            EndEdit {
+                composition: composition.clone(),
+                finish,
+                _guard: ModuleGuard::new(),
+            }
+            .into()
+        };
+        let success = self
+            .request_write(&end(finish), TF_ES_SYNC)
+            .is_ok_and(|hr| hr == S_OK);
+        if !success {
+            // A store may deny synchronous writes while it owns the lock.
+            // Only ending the mark can be deferred, never the text edit.
+            let _ = self.request_write(&end(None), TF_ES_ASYNC);
+        }
+        success
+    }
 }
 impl Document for NativeDocument {
     fn apply(&mut self, reply: &KeyReply) -> bool {
@@ -977,35 +1023,54 @@ impl Document for NativeDocument {
             _guard: ModuleGuard::new(),
         }
         .into();
-        let success = unsafe {
-            self.context.RequestEditSession(
-                self.shared.tid.get(),
-                &edit,
-                TF_ES_SYNC | TF_ES_READWRITE,
-            )
-        }
-        .is_ok_and(|hr| hr.is_ok());
+        let success = self
+            .request_write(&edit, TF_ES_SYNC)
+            .is_ok_and(|hr| hr == S_OK);
         if success {
             if let Some(page) = &reply.candidates {
                 self.shared.show(page);
             } else {
                 self.shared.hide();
             }
+        } else {
+            self.end_owned(None);
+            *self.shared.preedit.borrow_mut() = Preedit::default();
+            *self.shared.page.borrow_mut() = ipc::CandidatePage::default();
+            self.shared.hide();
         }
         success
     }
     fn finish_reading(&mut self, reading: &str) -> bool {
-        self.apply(&KeyReply {
-            preedit: Some(Preedit::default()),
-            commit: Some(ipc::Commit {
-                reading: reading.into(),
-                value: reading.into(),
-                synthetic: true,
-                transient: false,
-                words: vec![],
-            }),
-            ..Default::default()
-        })
+        let writable = self.shared.field.get() != FieldScope::Bypass;
+        self.end_owned(writable.then_some(reading)) && writable
+    }
+}
+#[implement(ITfEditSession)]
+struct EndEdit {
+    composition: ITfComposition,
+    finish: Option<(String, String)>,
+    _guard: ModuleGuard,
+}
+impl ITfEditSession_Impl for EndEdit_Impl {
+    fn DoEditSession(&self, cookie: u32) -> Result<()> {
+        if let Some((surface, reading)) = &self.finish {
+            let range = unsafe { self.composition.GetRange()? };
+            // An extra unit distinguishes an exact match from a matching prefix.
+            let expected: Vec<_> = surface.encode_utf16().collect();
+            let mut actual = vec![0; expected.len() + 1];
+            let mut count = 0;
+            if unsafe { range.GetText(cookie, 0, &mut actual, &mut count) }.is_ok()
+                && actual.get(..count as usize) == Some(expected.as_slice())
+            {
+                if surface != reading {
+                    unsafe {
+                        range.SetText(cookie, 0, &reading.encode_utf16().collect::<Vec<_>>())?
+                    };
+                }
+                return end_at_caret(&self.composition, &range, cookie);
+            }
+        }
+        unsafe { self.composition.EndComposition(cookie) }
     }
 }
 #[implement(ITfEditSession)]
@@ -1023,53 +1088,28 @@ impl ITfEditSession_Impl for ApplyEdit_Impl {
         let preedit = self.reply.preedit.clone().unwrap_or_default();
         let text = ipc::surface(&preedit);
         if !text.is_empty() {
-            write_composition(&self.shared, &self.context, cookie, &text, false)?;
-            if let Some(composition) = self
-                .shared
-                .composition
-                .try_borrow()
-                .ok()
-                .and_then(|c| c.clone())
-            {
-                let range = unsafe { composition.GetRange()? };
-                let caret = unsafe { range.Clone()? };
-                unsafe {
-                    caret.Collapse(cookie, TF_ANCHOR_START)?;
+            let range = write_composition(&self.shared, &self.context, cookie, &text, false)?;
+            // SetText succeeded. Layout and selection are best effort.
+            let _ = set_preedit_caret(&self.context, &range, cookie, preedit.cursor_utf16);
+            if let Ok(view) = unsafe { self.context.GetActiveView() } {
+                let mut rect = RECT::default();
+                let mut clipped = BOOL::default();
+                if unsafe { view.GetTextExt(cookie, &range, &mut rect, &mut clipped) }.is_ok() {
+                    self.shared.caret.set(rect);
                 }
-                let mut shifted = 0;
-                unsafe {
-                    caret.ShiftStart(
-                        cookie,
-                        preedit.cursor_utf16 as i32,
-                        &mut shifted,
-                        std::ptr::null(),
-                    )?;
-                    caret.Collapse(cookie, TF_ANCHOR_START)?;
-                }
-                set_caret(&self.context, cookie, caret)?;
-                if let Ok(view) = unsafe { self.context.GetActiveView() } {
-                    let mut rect = RECT::default();
-                    let mut clipped = BOOL::default();
-                    if unsafe { view.GetTextExt(cookie, &range, &mut rect, &mut clipped) }.is_ok() {
-                        self.shared.caret.set(rect);
-                    }
-                    if let Ok(owner) = unsafe { view.GetWnd() } {
-                        self.shared.owner.set(owner);
-                    }
+                if let Ok(owner) = unsafe { view.GetWnd() } {
+                    self.shared.owner.set(owner);
                 }
             }
-        } else if self.reply.commit.is_none()
-            && let Some(composition) = self
-                .shared
-                .composition
-                .try_borrow_mut()
-                .ok()
-                .and_then(|mut c| c.take())
-        {
-            unsafe {
-                let range = composition.GetRange()?;
-                range.SetText(cookie, 0, &[])?;
-                composition.EndComposition(cookie)?;
+        } else if self.reply.commit.is_none() {
+            let composition = self.shared.composition.borrow().clone();
+            if let Some(composition) = composition {
+                unsafe {
+                    let range = composition.GetRange()?;
+                    range.SetText(cookie, 0, &[])?;
+                    composition.EndComposition(cookie)?;
+                }
+                self.shared.composition.borrow_mut().take();
             }
         }
         if let Ok(mut current) = self.shared.preedit.try_borrow_mut() {
@@ -1078,6 +1118,40 @@ impl ITfEditSession_Impl for ApplyEdit_Impl {
         Ok(())
     }
 }
+fn set_preedit_caret(
+    context: &ITfContext,
+    range: &ITfRange,
+    cookie: u32,
+    cursor: u32,
+) -> Result<()> {
+    unsafe {
+        let caret = range.Clone()?;
+        caret.Collapse(cookie, TF_ANCHOR_START)?;
+        let mut shifted = 0;
+        caret.ShiftStart(cookie, cursor as i32, &mut shifted, std::ptr::null())?;
+        caret.Collapse(cookie, TF_ANCHOR_START)?;
+        set_caret(context, cookie, caret)
+    }
+}
+
+fn end_at_caret(composition: &ITfComposition, range: &ITfRange, cookie: u32) -> Result<()> {
+    unsafe {
+        // SetText can move the selection back to the start. Keep the endpoint
+        // across EndComposition even when the host refuses to move the caret.
+        let caret = range.Clone().and_then(|r| {
+            r.Collapse(cookie, TF_ANCHOR_END)?;
+            Ok(r)
+        });
+        composition.EndComposition(cookie)?;
+        if let Ok(caret) = caret
+            && let Ok(context) = range.GetContext()
+        {
+            let _ = set_caret(&context, cookie, caret);
+        }
+        Ok(())
+    }
+}
+
 fn set_caret(context: &ITfContext, cookie: u32, caret: ITfRange) -> Result<()> {
     let mut selection = TF_SELECTION {
         range: std::mem::ManuallyDrop::new(Some(caret)),
@@ -1098,7 +1172,7 @@ fn write_composition(
     cookie: u32,
     text: &str,
     commit: bool,
-) -> Result<()> {
+) -> Result<ITfRange> {
     let existing = shared.composition.try_borrow().ok().and_then(|c| c.clone());
     let composition = if let Some(c) = existing {
         c
@@ -1111,7 +1185,15 @@ fn write_composition(
             _guard: ModuleGuard::new(),
         }
         .into();
-        let c = unsafe { owner.StartComposition(cookie, &range, &observer)? };
+        // A veto returns S_OK with a null interface. windows-rs represents
+        // that as an Error with a success code, which cannot cross a COM sink.
+        let c = unsafe { owner.StartComposition(cookie, &range, &observer) }.map_err(|e| {
+            if e.code().is_ok() {
+                TF_E_COMPOSITION_REJECTED.into()
+            } else {
+                e
+            }
+        })?;
         if let Ok(mut slot) = shared.composition.try_borrow_mut() {
             *slot = Some(c.clone());
         }
@@ -1130,19 +1212,10 @@ fn write_composition(
         let _ = unsafe { property.SetValue(cookie, &range, &value) };
     }
     if commit {
-        // SetText can pull the host's selection back to the start of the
-        // replaced text. Keep the endpoint across EndComposition.
-        let caret = unsafe { range.Clone()? };
-        unsafe {
-            caret.Collapse(cookie, TF_ANCHOR_END)?;
-            composition.EndComposition(cookie)?;
-        }
-        if let Ok(mut slot) = shared.composition.try_borrow_mut() {
-            slot.take();
-        }
-        set_caret(context, cookie, caret)?;
+        end_at_caret(&composition, &range, cookie)?;
+        shared.composition.borrow_mut().take();
     }
-    Ok(())
+    Ok(range)
 }
 #[implement(ITfEditSession)]
 struct ScopeEdit {
