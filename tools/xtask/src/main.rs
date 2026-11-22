@@ -25,13 +25,69 @@ fn output(command: &mut Command) -> Result<String> {
     ensure!(out.status.success(), "command failed");
     Ok(String::from_utf8(out.stdout)?.trim().to_owned())
 }
-fn root() -> PathBuf {
-    // Cargo provides an absolute path. Keep its ordinary Windows spelling for protoc.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace")
-        .to_owned()
+/// The checkout every task reads, writes and runs Cargo in.
+///
+/// `.cargo/config.toml` sets `KANADE_WORKSPACE_ROOT` to the checkout Cargo was
+/// started in, and reading it at compile time makes Cargo rebuild xtask when
+/// it changes. Freshness is otherwise judged by modification times, so a
+/// target directory shared with or copied from another checkout could run that
+/// checkout's xtask, with its own root compiled in, against this one.
+fn root() -> Result<PathBuf> {
+    let started = std::env::var_os("CARGO_MANIFEST_DIR");
+    checkout(
+        option_env!("KANADE_WORKSPACE_ROOT"),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        started.as_deref().map(Path::new),
+    )
+}
+/// Confirms that xtask was compiled from the sources of the checkout that
+/// `.cargo/config.toml` named (`configured`), and that Cargo started it for
+/// that checkout. `built` is the manifest directory compiled in; `started` is
+/// the one Cargo sets for `cargo run`, absent when xtask is started directly.
+fn checkout(configured: Option<&str>, built: &Path, started: Option<&Path>) -> Result<PathBuf> {
+    let configured = configured.context(
+        "KANADE_WORKSPACE_ROOT was not set when xtask was compiled; run `cargo xtask` inside the checkout",
+    )?;
+    // Cargo gives an absolute path ending in `.`. Keep its ordinary Windows
+    // spelling for protoc rather than the canonical one.
+    let root: PathBuf = Path::new(configured).components().collect();
+    let canonical = fs::canonicalize(&root)
+        .with_context(|| format!("xtask was compiled for {}", root.display()))?;
+    let workspace = |manifest: &Path| {
+        manifest
+            .ancestors()
+            .nth(2)
+            .map(Path::to_owned)
+            .context("xtask manifest outside a workspace")
+    };
+    let same = |workspace: &Path| fs::canonicalize(workspace).is_ok_and(|path| path == canonical);
+    let built = workspace(built)?;
+    ensure!(
+        same(&built),
+        "xtask was compiled from {} to check {}; run `cargo xtask` inside the checkout to check",
+        built.display(),
+        root.display()
+    );
+    if let Some(started) = started {
+        let started = workspace(started)?;
+        ensure!(
+            same(&started),
+            "Cargo started an xtask compiled for {} to check {}; run `cargo xtask` inside the checkout to check",
+            root.display(),
+            started.display()
+        );
+    }
+    Ok(root)
+}
+/// Where `check` builds Clippy and test output: a directory of its own for
+/// each checkout. Output that Cargo judges fresh by modification time was then
+/// built from this checkout, even in a target directory shared with or copied
+/// from another one. On Windows it also keeps the tests, which build the xtask
+/// executable, from replacing the copy that is running.
+fn check_target(target: &Path, root: &Path) -> Result<PathBuf> {
+    let digest = Sha256::digest(fs::canonicalize(root)?.as_os_str().as_encoded_bytes());
+    let name: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+    Ok(target.join("xtask-check").join(name))
 }
 fn hash(path: &Path) -> Result<String> {
     use std::io::Read;
@@ -409,7 +465,7 @@ fn lock(root: &Path) -> Result<()> {
     Ok(())
 }
 fn main() -> Result<()> {
-    let root = root();
+    let root = root()?;
     match std::env::args().nth(1).as_deref() {
         Some("version") => {
             println!("{}", version::check(&root)?);
@@ -452,29 +508,24 @@ fn main() -> Result<()> {
         Some("check") => {
             version::check(&root)?;
             emoji::verify(&root)?;
-            run(Command::new("cargo").args(["fmt", "--all", "--", "--check"]))?;
-            run(Command::new("cargo").args([
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ]))?;
-            let mut tests = Command::new("cargo");
-            tests.args(["test", "--workspace"]);
-            // Integration tests also build the xtask executable. Windows holds
-            // the running copy open until this command returns.
-            #[cfg(windows)]
-            {
-                let target = std::env::var_os("CARGO_TARGET_DIR")
+            run(Command::new("cargo")
+                .args(["fmt", "--all", "--", "--check"])
+                .current_dir(&root))?;
+            let target = check_target(
+                &std::env::var_os("CARGO_TARGET_DIR")
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join("target"));
-                tests
-                    .arg("--target-dir")
-                    .arg(target.join("workspace-tests"));
-            }
-            run(&mut tests)?;
+                    .unwrap_or_else(|| root.join("target")),
+                &root,
+            )?;
+            run(Command::new("cargo")
+                .args(["clippy", "--workspace", "--all-targets", "--target-dir"])
+                .arg(&target)
+                .args(["--", "-D", "warnings"])
+                .current_dir(&root))?;
+            run(Command::new("cargo")
+                .args(["test", "--workspace", "--target-dir"])
+                .arg(&target)
+                .current_dir(&root))?;
             verify(&root)
         }
         _ => bail!(
@@ -520,5 +571,97 @@ mod worker_path_tests {
         ] {
             assert_eq!(windows_tool_path(path), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod checkout_tests {
+    use super::{check_target, checkout, root};
+    use std::{
+        fs,
+        path::{MAIN_SEPARATOR, Path, PathBuf},
+    };
+
+    /// Two checkouts, each with the xtask manifest directory.
+    struct Checkouts(PathBuf);
+    impl Checkouts {
+        fn new(test: &str) -> Self {
+            let base = std::env::temp_dir().join(format!("xtask-{test}-{}", std::process::id()));
+            for name in ["first", "second"] {
+                fs::create_dir_all(base.join(name).join("tools/xtask")).unwrap();
+            }
+            Self(base)
+        }
+        fn root(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+        fn manifest(&self, name: &str) -> PathBuf {
+            self.root(name).join("tools/xtask")
+        }
+    }
+    impl Drop for Checkouts {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_checkout_is_the_one_cargo_runs_in() {
+        let expected = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        assert_eq!(
+            fs::canonicalize(root().unwrap()).unwrap(),
+            fs::canonicalize(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_configured_checkout_keeps_its_spelling_without_the_trailing_dot() {
+        let checkouts = Checkouts::new("spelling");
+        let first = checkouts.root("first");
+        let configured = format!("{}{MAIN_SEPARATOR}.", first.display());
+        let manifest = checkouts.manifest("first");
+        assert_eq!(
+            checkout(Some(&configured), &manifest, Some(&manifest)).unwrap(),
+            first
+        );
+    }
+
+    #[test]
+    fn an_xtask_compiled_or_started_for_another_checkout_is_refused() {
+        let checkouts = Checkouts::new("refused");
+        let first = checkouts.root("first").display().to_string();
+        let (own, other) = (checkouts.manifest("first"), checkouts.manifest("second"));
+        assert!(checkout(Some(&first), &own, None).is_ok());
+        assert!(checkout(Some(&first), &other, Some(&own)).is_err());
+        assert!(checkout(Some(&first), &own, Some(&other)).is_err());
+        assert!(checkout(None, &own, Some(&own)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checkouts_are_compared_as_directories_rather_than_spellings() {
+        let checkouts = Checkouts::new("case");
+        let configured = checkouts.root("first").display().to_string().to_uppercase();
+        let manifest = checkouts.manifest("first");
+        assert!(checkout(Some(&configured), &manifest, Some(&manifest)).is_ok());
+    }
+
+    #[test]
+    fn each_checkout_builds_its_checks_apart() {
+        let checkouts = Checkouts::new("target");
+        let target = Path::new("shared-target");
+        let first = check_target(target, &checkouts.root("first")).unwrap();
+        assert!(first.starts_with(target.join("xtask-check")));
+        assert_eq!(
+            first,
+            check_target(target, &checkouts.root("first").join(".")).unwrap()
+        );
+        assert_ne!(
+            first,
+            check_target(target, &checkouts.root("second")).unwrap()
+        );
     }
 }

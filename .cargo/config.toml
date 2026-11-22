@@ -7,3 +7,9 @@ xtask = "run --locked --package xtask --"
 # if any accelerator backend is present.
 [env]
 GGML_METAL = "OFF"
+# The checkout Cargo runs in. xtask reads it when it is compiled, so Cargo
+# rebuilds xtask whenever it changes. Cargo otherwise judges freshness by
+# modification times, and a target directory shared with or copied from another
+# checkout could run that checkout's xtask here. `force` keeps an environment
+# variable of the same name from replacing it.
+KANADE_WORKSPACE_ROOT = { value = ".", relative = true, force = true }
