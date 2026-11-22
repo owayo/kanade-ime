@@ -55,6 +55,14 @@ impl ITfInputScope_Impl for Scope_Impl {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    WriteLock,
+    Start,
+    SetText,
+    SetSelection,
+}
+
 #[implement(ITextStoreACP, ITfContextOwnerCompositionSink)]
 struct Store {
     text: RefCell<Vec<u16>>,
@@ -74,12 +82,22 @@ struct Store {
     readonly_asked: Cell<Option<bool>>,
     preceding_reads: Cell<u32>,
     reject_lock_after: Cell<Option<u32>>,
+    refusal: Cell<Option<Refusal>>,
+    compositions: Cell<u32>,
     no_layout: Cell<bool>,
     busy: Cell<bool>,
     readonly: Cell<bool>,
 }
 
 impl Store {
+    fn refuses(&self, operation: Refusal) -> bool {
+        if self.refusal.get() == Some(operation) {
+            self.refusal.set(None);
+            true
+        } else {
+            false
+        }
+    }
     fn set_scope(&self, scope: InputScope) {
         self.scopes.replace(vec![scope]);
     }
@@ -164,12 +182,17 @@ fn units(text: &PCWSTR, len: u32) -> &[u16] {
 
 impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
     fn OnStartComposition(&self, _: Ref<ITfCompositionView>) -> Result<BOOL> {
+        if self.refuses(Refusal::Start) {
+            return Ok(false.into());
+        }
+        self.compositions.set(self.compositions.get() + 1);
         Ok(true.into())
     }
     fn OnUpdateComposition(&self, _: Ref<ITfCompositionView>, _: Ref<ITfRange>) -> Result<()> {
         Ok(())
     }
     fn OnEndComposition(&self, _: Ref<ITfCompositionView>) -> Result<()> {
+        self.compositions.set(self.compositions.get() - 1);
         Ok(())
     }
 }
@@ -184,6 +207,9 @@ impl ITextStoreACP_Impl for Store_Impl {
         Ok(())
     }
     fn RequestLock(&self, flags: u32) -> Result<HRESULT> {
+        if flags & TS_LF_READWRITE.0 == TS_LF_READWRITE.0 && self.refuses(Refusal::WriteLock) {
+            return Ok(TS_E_SYNCHRONOUS);
+        }
         if let Some(remaining) = self.reject_lock_after.get() {
             self.reject_lock_after.set(remaining.checked_sub(1));
             if remaining == 0 {
@@ -249,6 +275,9 @@ impl ITextStoreACP_Impl for Store_Impl {
     }
     fn SetSelection(&self, count: u32, selection: *const TS_SELECTION_ACP) -> Result<()> {
         self.require_write()?;
+        if self.refuses(Refusal::SetSelection) {
+            return Err(failure());
+        }
         if count > 0 {
             let selection = unsafe { *selection };
             self.selection.set((selection.acpStart, selection.acpEnd));
@@ -314,6 +343,9 @@ impl ITextStoreACP_Impl for Store_Impl {
         text: &PCWSTR,
         len: u32,
     ) -> Result<TS_TEXTCHANGE> {
+        if self.refuses(Refusal::SetText) {
+            return Err(failure());
+        }
         self.replace(start, end, units(text, len))
     }
     fn GetFormattedText(&self, _: i32, _: i32) -> Result<IDataObject> {
@@ -660,6 +692,8 @@ fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
             readonly_asked: Cell::new(None),
             preceding_reads: Cell::new(0),
             reject_lock_after: Cell::new(None),
+            refusal: Cell::new(None),
+            compositions: Cell::new(0),
             no_layout: Cell::new(false),
             busy: Cell::new(false),
             readonly: Cell::new(false),
@@ -805,6 +839,8 @@ fn down_consumes_a_claim_without_sending_it_to_a_newly_protected_field() -> Resu
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Reply {
     Compose,
+    Converted,
+    Cancel,
     Commit,
     PrivateCommit,
     NormalCommit,
@@ -830,6 +866,13 @@ fn listener() -> Result<Listener> {
 }
 
 fn serve(steps: &'static [Reply]) -> Result<std::thread::JoinHandle<std::io::Result<()>>> {
+    serve_edits(steps, None)
+}
+
+fn serve_edits(
+    steps: &'static [Reply],
+    rejected: Option<u64>,
+) -> Result<std::thread::JoinHandle<std::io::Result<()>>> {
     let mut listener = listener()?;
     Ok(std::thread::spawn(move || {
         let mut pipe = listener
@@ -899,6 +942,12 @@ fn serve(steps: &'static [Reply]) -> Result<std::thread::JoinHandle<std::io::Res
                         .is_some_and(|k| k.special == SpecialKey::Backspace as i32)
                 );
             }
+            let composing = matches!(step, Reply::Compose | Reply::Converted);
+            let (reading, surface, width) = if step == Reply::Converted {
+                ("かんじ", "漢字", 2)
+            } else {
+                ("じ", "じ", 1)
+            };
             let commit = matches!(
                 step,
                 Reply::Commit | Reply::PrivateCommit | Reply::NormalCommit
@@ -909,15 +958,15 @@ fn serve(steps: &'static [Reply]) -> Result<std::thread::JoinHandle<std::io::Res
                     body: Some(ipc::response::Body::Key(KeyReply {
                         revision: key.revision,
                         event_seq: key.event_seq,
-                        consumed: commit || step == Reply::Compose,
-                        preedit: (step == Reply::Compose).then(|| Preedit {
+                        consumed: commit || composing || step == Reply::Cancel,
+                        preedit: composing.then(|| Preedit {
                             segments: vec![ipc::Segment {
-                                reading: "じ".into(),
-                                value: "じ".into(),
-                                value_utf16: 1,
+                                reading: reading.into(),
+                                value: surface.into(),
+                                value_utf16: width,
                                 ..Default::default()
                             }],
-                            cursor_utf16: 1,
+                            cursor_utf16: width,
                         }),
                         commit: commit.then(|| ipc::Commit {
                             value: "字".into(),
@@ -925,7 +974,7 @@ fn serve(steps: &'static [Reply]) -> Result<std::thread::JoinHandle<std::io::Res
                         }),
                         key_policy: Some(ipc::KeyPolicySummary {
                             enabled: true,
-                            composing: step == Reply::Compose,
+                            composing,
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -933,9 +982,11 @@ fn serve(steps: &'static [Reply]) -> Result<std::thread::JoinHandle<std::io::Res
                 },
             )?;
             let request: ipc::Request = ipc::receive(&mut pipe)?;
-            assert!(
-                matches!(request.body, Some(ipc::request::Body::Ack(ack)) if ack.applied && ack.event_seq == key.event_seq)
-            );
+            let Some(ipc::request::Body::Ack(ack)) = request.body else {
+                return Err(std::io::Error::other("expected edit acknowledgement"));
+            };
+            assert_eq!(ack.event_seq, key.event_seq);
+            assert_eq!(ack.applied, rejected != Some(key.event_seq));
         }
         // The client closes the connection when the test is done.
         // Another request here would be a duplicate.
@@ -957,18 +1008,166 @@ fn finish(server: std::thread::JoinHandle<std::io::Result<()>>) -> Result<()> {
 fn check_connected_commit(tip: &ComObject<Tip>, context: &ITfContext) -> Result<()> {
     let server = serve(&[Reply::Compose, Reply::Commit])?;
     assert!(tip.shared.connect(false) == Connection::Attached);
-    let keys: ITfKeyEventSink = tip.to_interface();
     for (vk, composing) in [(starter()?, true), (0x0d, false)] {
-        let key = WPARAM(vk);
-        unsafe {
-            assert!(keys.OnTestKeyDown(context, key, LPARAM(1))?.as_bool());
-            assert!(keys.OnKeyDown(context, key, LPARAM(1))?.as_bool());
-            assert!(keys.OnKeyUp(context, key, LPARAM(0))?.as_bool());
-        }
+        press(tip, context, vk)?;
         assert_eq!(tip.shared.composition.borrow().is_some(), composing);
     }
     tip.shared.client.borrow_mut().take();
     finish(server)
+}
+
+fn press(tip: &ComObject<Tip>, context: &ITfContext, vk: usize) -> Result<()> {
+    let keys: ITfKeyEventSink = tip.to_interface();
+    unsafe {
+        assert!(
+            keys.OnTestKeyDown(context, WPARAM(vk), LPARAM(1))?
+                .as_bool()
+        );
+        assert!(keys.OnKeyDown(context, WPARAM(vk), LPARAM(1))?.as_bool());
+        assert!(keys.OnKeyUp(context, WPARAM(vk), LPARAM(0))?.as_bool());
+    }
+    Ok(())
+}
+
+fn check_rejected_edit(refusal: Refusal, steps: &'static [Reply]) -> Result<()> {
+    with_host(|host| {
+        let server = serve_edits(steps, Some(steps.len() as u64))?;
+        let vk = starter()?;
+        let composing = steps.len() == 2;
+        if composing {
+            press(&host.tip, &host.context, vk)?;
+            assert_eq!(host.store.compositions.get(), 1);
+        }
+        host.store.refusal.set(Some(refusal));
+        let rejected_key = match steps.last() {
+            Some(Reply::Cancel) => 0x1b,
+            Some(Reply::Commit) => 0x0d,
+            _ => vk,
+        };
+        press(&host.tip, &host.context, rejected_key)?;
+        assert!(host.store.refusal.get().is_none());
+        assert_eq!(host.store.compositions.get(), 0);
+        assert_eq!(host.store.end(), if composing { 3 } else { 2 });
+        // The negative ACK ends the failed session. The next key opens its own.
+        finish(server)?;
+        let fresh = serve(&[Reply::Commit])?;
+        press(&host.tip, &host.context, vk)?;
+        assert_eq!(HELLOS.get(), 2);
+        assert!(host.store.text.borrow().ends_with(&['字' as u16]));
+        assert_eq!(host.store.compositions.get(), 0);
+        host.tip.shared.client.borrow_mut().take();
+        finish(fresh)
+    })
+}
+
+#[test]
+fn edit_recovery_after_write_lock_refusal() -> Result<()> {
+    check_rejected_edit(Refusal::WriteLock, &[Reply::Compose])?;
+    check_rejected_edit(Refusal::WriteLock, &[Reply::Compose, Reply::Commit])
+}
+
+#[test]
+fn edit_recovery_after_start_refusal() -> Result<()> {
+    check_rejected_edit(Refusal::Start, &[Reply::Compose])
+}
+
+#[test]
+fn edit_recovery_after_text_refusal() -> Result<()> {
+    check_rejected_edit(Refusal::SetText, &[Reply::Compose])
+}
+
+#[test]
+fn edit_recovery_after_cancel_refusal() -> Result<()> {
+    check_rejected_edit(Refusal::SetText, &[Reply::Compose, Reply::Cancel])
+}
+
+#[test]
+fn edit_recovery_acknowledges_text_despite_caret_failure() -> Result<()> {
+    with_host(|host| {
+        let server = serve(&[Reply::Compose, Reply::Commit])?;
+        for (vk, composing) in [(starter()?, true), (0x0d, false)] {
+            host.store.refusal.set(Some(Refusal::SetSelection));
+            press(&host.tip, &host.context, vk)?;
+            assert!(host.store.refusal.get().is_none());
+            assert_eq!(host.store.compositions.get(), u32::from(composing));
+        }
+        assert!(*host.store.text.borrow() == [65, 66, '字' as u16]);
+        host.tip.shared.client.borrow_mut().take();
+        finish(server)
+    })
+}
+
+#[test]
+fn edit_recovery_after_owner_termination() -> Result<()> {
+    for focus_loss in [false, true] {
+        with_host(|host| unsafe {
+            let server = serve(&[Reply::Compose])?;
+            let vk = starter()?;
+            press(&host.tip, &host.context, vk)?;
+            host.context
+                .cast::<ITfContextOwnerCompositionServices>()?
+                .TerminateComposition(None)?;
+            assert_eq!(host.store.compositions.get(), 0);
+            if focus_loss {
+                let keys: ITfKeyEventSink = host.tip.to_interface();
+                keys.OnSetFocus(false)?;
+                keys.OnSetFocus(true)?;
+            }
+            assert!(*host.store.text.borrow() == [65, 66, 'じ' as u16]);
+            let fresh = serve(&[Reply::Commit])?;
+            press(&host.tip, &host.context, vk)?;
+            assert!(*host.store.text.borrow() == [65, 66, 'じ' as u16, '字' as u16]);
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)?;
+            finish(fresh)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn edit_recovery_preserves_owner_changes_on_focus_loss() -> Result<()> {
+    for changed in [false, true] {
+        with_host(|host| {
+            let server = serve(&[Reply::Converted])?;
+            press(&host.tip, &host.context, starter()?)?;
+            assert!(*host.store.text.borrow() == [65, 66, '漢' as u16, '字' as u16]);
+            if changed {
+                *host
+                    .store
+                    .text
+                    .borrow_mut()
+                    .last_mut()
+                    .ok_or_else(failure)? = 67;
+                let sink = host.store.sink.borrow().clone().ok_or_else(failure)?;
+                unsafe {
+                    sink.OnTextChange(
+                        TEXT_STORE_TEXT_CHANGE_FLAGS(0),
+                        &TS_TEXTCHANGE {
+                            acpStart: 3,
+                            acpOldEnd: 4,
+                            acpNewEnd: 4,
+                        },
+                    )?;
+                }
+                assert_eq!(host.store.compositions.get(), 1);
+            }
+            let keys: ITfKeyEventSink = host.tip.to_interface();
+            unsafe { keys.OnSetFocus(false)? };
+            let expected = if changed { "AB漢C" } else { "ABかんじ" };
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq(expected.encode_utf16())
+            );
+            assert_eq!(host.store.compositions.get(), 0);
+            finish(server)
+        })?;
+    }
+    Ok(())
 }
 
 // An application can use TSF's own store and supply attributes through a
@@ -1075,7 +1274,7 @@ fn cuas_context(manager: &ITfThreadMgr, edit: HWND) -> Result<Option<ITfContext>
     }
 }
 
-fn check_cuas_edit() -> Result<()> {
+fn with_cuas_edit(check: fn(HWND, &ComObject<Tip>, &ITfContext) -> Result<()>) -> Result<()> {
     unsafe {
         // Let IMM32 create the TSF document for the EDIT through CUAS.
         let edit = CreateWindowExW(
@@ -1116,40 +1315,133 @@ fn check_cuas_edit() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(10));
             };
             SetKeyboardState(&[0; 256])?;
-            check_connected_commit(&test_tip(&manager)?, &context)?;
-            let start = std::time::Instant::now();
-            loop {
-                dispatch_pending();
-                let mut text = [0; 3];
-                if GetWindowTextW(edit, &mut text) == 1 && text[0] == '字' as u16 {
-                    break;
-                }
-                assert!(
-                    start.elapsed() < Duration::from_secs(1),
-                    "EDIT did not receive the commit"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(())
+            check(edit, &test_tip(&manager)?, &context)
         })();
         DestroyWindow(edit)?;
         result
     }
 }
 
+// CUAS posts messages to update the window after the TSF edit session.
+#[track_caller]
+fn wait_for_text(window: HWND, expected: &str) {
+    let expected: Vec<_> = expected.encode_utf16().collect();
+    let start = std::time::Instant::now();
+    // Room for text the control should not hold, so a failure shows it.
+    let mut text = vec![0; expected.len() + 32];
+    loop {
+        dispatch_pending();
+        let count = unsafe { GetWindowTextW(window, &mut text) } as usize;
+        if text.get(..count) == Some(expected.as_slice()) {
+            return;
+        }
+        // The control holds fixed test strings only.
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "unexpected control text: {:?}, expected {:?}",
+            String::from_utf16_lossy(text.get(..count).unwrap_or_default()),
+            String::from_utf16_lossy(&expected)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether the application's end of the composition reached the text service
+/// within a short wait.
+fn ended_by_application(tip: &ComObject<Tip>) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        dispatch_pending();
+        if tip.shared.composition.borrow().is_none() {
+            return true;
+        }
+        if start.elapsed() >= Duration::from_millis(500) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn ordinary_win32_edit_converts_through_cuas_on_a_hidden_desktop() -> Result<()> {
     use std::io::Write;
-    use windows::Win32::System::StationsAndDesktops::*;
+    use windows::Win32::UI::Input::Ime::{CPS_CANCEL, CPS_COMPLETE};
     if std::env::var_os("KANADE_TEST_SKIP_CUAS_EDIT").as_deref() == Some("1".as_ref()) {
-        // Write directly so the reason is visible with libtest's default capture.
         writeln!(
             std::io::stderr().lock(),
             "Skipping Win32 EDIT conversion: KANADE_TEST_SKIP_CUAS_EDIT=1"
         )?;
         return Ok(());
     }
-    let name = windows::core::HSTRING::from(format!("KanadeTipTest-{}", std::process::id()));
+    // CUAS keeps process-wide desktop resources. Exercise the same EDIT for
+    // all three scenarios, clearing the committed text between them.
+    hidden_desktop(|| {
+        with_cuas_edit(|edit, tip, context| {
+            check_connected_commit(tip, context)?;
+            wait_for_text(edit, "字");
+            for action in [CPS_COMPLETE, CPS_CANCEL] {
+                unsafe { SetWindowTextW(edit, windows::core::w!(""))? };
+                dispatch_pending();
+                check_imm_termination(edit, tip, context, action)?;
+            }
+            Ok(())
+        })
+    })
+}
+
+fn check_imm_termination(
+    edit: HWND,
+    tip: &ComObject<Tip>,
+    context: &ITfContext,
+    action: windows::Win32::UI::Input::Ime::NOTIFY_IME_INDEX,
+) -> Result<()> {
+    use windows::Win32::UI::Input::Ime::*;
+    let server = serve(&[Reply::Compose])?;
+    press(tip, context, starter()?)?;
+    dispatch_pending();
+    unsafe {
+        let imc = ImmGetContext(edit);
+        assert!(!imc.is_invalid());
+        let notified = ImmNotifyIME(imc, NI_COMPOSITIONSTR, action, 0);
+        ImmReleaseContext(edit, imc).ok()?;
+        notified.ok()?;
+    }
+    let complete = action == CPS_COMPLETE;
+    wait_for_text(edit, if complete { "じ" } else { "" });
+    // Windows 11 tells the text service that the application ended the
+    // composition; Windows Server 2022 does not. What the user sees is the
+    // text, so the checks below look at the control and not at the service.
+    if !ended_by_application(tip) {
+        let mut err = std::io::stderr().lock();
+        let _ = std::io::Write::write_all(
+            &mut err,
+            b"The IMM completion did not reach the text service as an ended composition\n",
+        );
+    }
+    // Also exercise a focus notification arriving after the app cancelled.
+    if !complete {
+        let keys: ITfKeyEventSink = tip.to_interface();
+        unsafe {
+            keys.OnSetFocus(false)?;
+            keys.OnSetFocus(true)?;
+        }
+    }
+    let fresh = serve(&[Reply::Commit])?;
+    press(tip, context, starter()?)?;
+    wait_for_text(edit, if complete { "じ字" } else { "字" });
+    tip.shared.client.borrow_mut().take();
+    finish(server)?;
+    finish(fresh)
+}
+
+fn hidden_desktop(check: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
+    use windows::Win32::System::StationsAndDesktops::*;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = windows::core::HSTRING::from(format!(
+        "KanadeTipTest-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let desktop = unsafe {
         CreateDesktopW(
             &name,
@@ -1176,13 +1468,96 @@ fn ordinary_win32_edit_converts_through_cuas_on_a_hidden_desktop() -> Result<()>
             )
         })?;
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let result = check_cuas_edit();
+        let result = check();
         CoUninitialize();
         result
     })
     .join();
-    unsafe { CloseDesktop(desktop)? };
-    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    let closed = unsafe { CloseDesktop(desktop) }
+        .map_err(|e| Error::new(e.code(), "could not close the hidden desktop"));
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+    closed
+}
+
+#[test]
+#[ignore = "TSF RichEdit loads the system IME"]
+fn edit_recovery_richedit_text_limit() -> Result<()> {
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+    use windows::Win32::UI::Controls::{EM_SETSEL, RichEdit::*};
+    hidden_desktop(|| unsafe {
+        let manager: ITfThreadMgr =
+            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+        let mut tid = 0;
+        manager
+            .cast::<ITfThreadMgrEx>()?
+            .ActivateEx(&mut tid, TF_TMAE_NOACTIVATETIP)?;
+        let library = LoadLibraryW(windows::core::w!("msftedit.dll"))?;
+        let parent = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            windows::core::w!("STATIC"),
+            None,
+            WS_POPUP | WS_VISIBLE,
+            0,
+            0,
+            320,
+            80,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        let edit = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            MSFTEDIT_CLASS,
+            windows::core::w!("AB"),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            0,
+            0,
+            160,
+            40,
+            Some(parent),
+            None,
+            None,
+            None,
+        )?;
+        let result = (|| {
+            let style = SendMessageW(
+                edit,
+                EM_SETEDITSTYLE,
+                Some(WPARAM(SES_USECTF as usize)),
+                Some(LPARAM(SES_USECTF as isize)),
+            );
+            assert_ne!(style.0 & SES_USECTF as isize, 0);
+            let _ = SetFocus(Some(edit));
+            dispatch_pending();
+            // RichEdit also exposes a CUAS document for this HWND. Its
+            // focused document is the native TSF text store.
+            let context = manager.GetFocus()?.GetTop()?;
+            assert!(context.GetActiveView()?.GetWnd()? == edit);
+            SendMessageW(edit, EM_SETSEL, Some(WPARAM(2)), Some(LPARAM(2)));
+            SendMessageW(edit, EM_EXLIMITTEXT, None, Some(LPARAM(3)));
+            SetKeyboardState(&[0; 256])?;
+            let tip = test_tip(&manager)?;
+            let server = serve_edits(&[Reply::Compose, Reply::Commit, Reply::Compose], Some(3))?;
+            press(&tip, &context, starter()?)?;
+            press(&tip, &context, 0x0d)?;
+            wait_for_text(edit, "AB字");
+            press(&tip, &context, starter()?)?;
+            wait_for_text(edit, "AB字");
+            assert!(tip.shared.composition.borrow().is_none());
+            finish(server)?;
+            SendMessageW(edit, EM_EXLIMITTEXT, None, Some(LPARAM(4)));
+            let fresh = serve(&[Reply::Commit])?;
+            press(&tip, &context, starter()?)?;
+            wait_for_text(edit, "AB字字");
+            tip.shared.client.borrow_mut().take();
+            finish(fresh)
+        })();
+        DestroyWindow(parent)?;
+        manager.Deactivate()?;
+        FreeLibrary(library)?;
+        result
+    })
 }
 
 #[test]

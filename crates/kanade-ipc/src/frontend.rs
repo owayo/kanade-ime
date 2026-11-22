@@ -275,6 +275,11 @@ impl<T: Transport> Client<T> {
     pub fn is_connected(&self) -> bool {
         self.transport.is_some()
     }
+    /// The document rejected an edit. A frontend that has ended the native
+    /// composition can drop this client and start the next key in a new session.
+    pub fn edit_rejected(&self) -> bool {
+        self.blocked
+    }
     /// A composition is displayed without an engine session.
     pub fn is_held(&self) -> bool {
         self.held
