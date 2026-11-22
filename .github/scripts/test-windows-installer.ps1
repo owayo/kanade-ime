@@ -38,6 +38,42 @@ function Invoke-Msi([string[]]$Arguments, [int[]]$Expected) {
 function Invoke-Setup([string[]]$Arguments, [int[]]$Expected) {
     Invoke-Installer $setup $Arguments $Expected
 }
+function Get-MsiProperty($Installer, [string]$Path, [string]$Name) {
+    $database = $Installer.OpenDatabase($Path, 0)
+    $view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$Name'")
+    # A function returns everything its statements emit, and these COM calls
+    # emit a value: the property alone must be the result.
+    [void]$view.Execute()
+    $value = $view.Fetch().StringData(1)
+    [void]$view.Close()
+    return $value
+}
+function New-SameVersionMsi([string]$Version) {
+    # Another build of the same package and payload: the same version and
+    # upgrade code, and a product code of its own.
+    $saved = $env:DOTNET_ROLL_FORWARD
+    try {
+        $env:DOTNET_ROLL_FORWARD = 'Major'
+        & ./artifacts/wix/wix.exe build packaging/windows/Package.wxs artifacts/windows/Payload.wxs -arch x64 -d "Version=$Version" -o artifacts/windows/same-version.msi | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'Could not build the same-version installer fixture' }
+    } finally { $env:DOTNET_ROLL_FORWARD = $saved }
+    return (Resolve-Path artifacts/windows/same-version.msi).Path
+}
+function New-SameVersionSetup([string]$Version, [string]$Package) {
+    # A setup like the installed one, carrying the other build of its package.
+    [xml]$bundle = Get-Content packaging/windows/Bundle.wxs -Raw
+    $names = [Xml.XmlNamespaceManager]::new($bundle.NameTable)
+    $names.AddNamespace('w', $bundle.DocumentElement.NamespaceURI)
+    $bundle.SelectSingleNode('/w:Wix/w:Bundle/w:Chain/w:MsiPackage', $names).SetAttribute('SourceFile', $Package)
+    $bundle.Save((Join-Path (Get-Location) 'artifacts/windows/same-version-bundle.wxs'))
+    $saved = $env:DOTNET_ROLL_FORWARD
+    try {
+        $env:DOTNET_ROLL_FORWARD = 'Major'
+        & ./artifacts/wix/wix.exe build artifacts/windows/same-version-bundle.wxs -ext WixToolset.Bal.wixext -arch x64 -d "Version=$Version" -o artifacts/windows/same-version-setup.exe | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'Could not build the same-version setup fixture' }
+    } finally { $env:DOTNET_ROLL_FORWARD = $saved }
+    return (Resolve-Path artifacts/windows/same-version-setup.exe).Path
+}
 function New-LegacyMsi {
     # Recreate the cached uninstall that ran before packages disabled Restart Manager.
     [xml]$legacy = Get-Content packaging/windows/Package.wxs -Raw
@@ -61,6 +97,8 @@ function New-LegacyMsi {
 $failure = $null
 $cleanupFailure = $null
 $legacyMsi = $null
+$sameMsi = $null
+$sameSetup = $null
 $editor = $null
 try {
     Invoke-Msi @('/i', $msi, '/qn', '/norestart', 'KANADE_TEST_ROLLBACK=1', '/l*v', 'artifacts/windows/rollback.log') @(1603)
@@ -81,11 +119,7 @@ try {
     Invoke-Setup @('/install', '/quiet', '/norestart', '/log', 'artifacts/windows/install.log') @(0, 3010)
     if ($editor.HasExited) { throw 'Silent major upgrade closed the running editor' }
     $installer = New-Object -ComObject WindowsInstaller.Installer
-    $legacyDb = $installer.OpenDatabase($legacyMsi, 0)
-    $view = $legacyDb.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductCode'")
-    $view.Execute()
-    $legacyCode = $view.Fetch().StringData(1)
-    $view.Close()
+    $legacyCode = Get-MsiProperty $installer $legacyMsi 'ProductCode'
     if ($installer.ProductState($legacyCode) -eq 5) { throw 'Legacy product was not removed by the upgrade' }
     Write-Output 'Silent upgrade removed the legacy product and preserved the original TIP host process'
     if (-not (Test-Registered)) { throw 'COM registration is missing' }
@@ -98,6 +132,23 @@ try {
             finally { $key.Dispose() }
         } finally { $registry.Dispose() }
     }
+    # Windows Installer compares three fields of a version, which builds that
+    # differ only in their preview number share. Another build with the same
+    # version replaces the installed one instead of being installed beside it,
+    # and removing the setup it replaced leaves the TIP registered.
+    $installedCode = Get-MsiProperty $installer $msi 'ProductCode'
+    $version = Get-MsiProperty $installer $msi 'ProductVersion'
+    $sameMsi = New-SameVersionMsi $version
+    if ((Get-MsiProperty $installer $sameMsi 'ProductCode') -eq $installedCode) { throw 'The same-version fixture has the installed product code' }
+    $sameSetup = New-SameVersionSetup $version $sameMsi
+    Invoke-Installer $sameSetup @('/install', '/quiet', '/norestart', '/log', 'artifacts/windows/same-version.log') @(0, 3010)
+    if ($installer.ProductState($installedCode) -eq 5) { throw 'A build with the same version did not replace the installed one' }
+    if ($installer.ProductState((Get-MsiProperty $installer $sameMsi 'ProductCode')) -ne 5) { throw 'The same-version build is not installed' }
+    $products = @($installer.RelatedProducts((Get-MsiProperty $installer $msi 'UpgradeCode')))
+    if ($products.Count -ne 1) { throw "Expected one installed Kanade product, found $($products.Count)" }
+    if (-not (Test-Registered)) { throw 'The same-version replacement left the TIP unregistered' }
+    if ($editor.HasExited) { throw 'The same-version replacement closed the running editor' }
+    Write-Output 'A build with the same version replaced the installed one and kept the TIP registered'
     $previousData = $env:KANADE_DATA_DIR
     $previousUnsigned = $env:KANADE_ALLOW_UNSIGNED
     $temporaryData = Join-Path $env:RUNNER_TEMP ('kanade-installer-test-' + [Guid]::NewGuid().ToString('N'))
@@ -157,10 +208,18 @@ try {
 } catch { $failure = $_ }
 finally {
     if ($editor -and -not $editor.HasExited) { $editor.Kill(); $editor.WaitForExit() }
+    if ($sameSetup) {
+        try { Invoke-Installer $sameSetup @('/uninstall', '/quiet', '/norestart', '/log', 'artifacts/windows/same-version-uninstall.log') @(0, 1605, 3010) }
+        catch { $cleanupFailure = $_ }
+    }
     try { Invoke-Setup @('/uninstall', '/quiet', '/norestart', '/log', 'artifacts/windows/bundle-uninstall.log') @(0, 1605, 3010) }
-    catch { $cleanupFailure = $_ }
+    catch { if (-not $cleanupFailure) { $cleanupFailure = $_ } }
     try { Invoke-Msi @('/x', $msi, '/qn', '/norestart', '/l*v', 'artifacts/windows/uninstall.log') @(0, 1605, 3010) }
     catch { if (-not $cleanupFailure) { $cleanupFailure = $_ } }
+    if ($sameMsi) {
+        try { Invoke-Msi @('/x', $sameMsi, '/qn', '/norestart', '/l*v', 'artifacts/windows/same-version-msi-uninstall.log') @(0, 1605, 3010) }
+        catch { if (-not $cleanupFailure) { $cleanupFailure = $_ } }
+    }
     if ($legacyMsi) {
         try { Invoke-Msi @('/x', $legacyMsi, '/qn', '/norestart', 'MSIRESTARTMANAGERCONTROL=Disable') @(0, 1605, 3010) }
         catch { if (-not $cleanupFailure) { $cleanupFailure = $_ } }
