@@ -692,11 +692,20 @@ impl ConversionEngine for Mozc {
         config.session_keymap = Some(mozc::config::config::SessionKeymap::Msime as i32);
         config.history_learning_level = Some(if privacy == Privacy::Normal { 0 } else { 1 });
         config.incognito_mode = Some(privacy != Privacy::Normal);
+        // Mozc reads its learning from disk again whenever the configuration
+        // changes, but keeps the prediction history in memory until a sync
+        // writes it. Without this sync the reload discards everything learned
+        // since the last one.
+        self.sync()?;
         self.call(pb::Input {
             r#type: Op::SetConfig as i32,
             config: Some(config),
             ..Default::default()
         })?;
+        // The prediction history is read back on a background thread. Until
+        // that finishes, predictions leave it out and the file being read
+        // replaces anything learned meanwhile. A sync waits for the read.
+        self.sync()?;
         self.privacy = Some(privacy);
         Ok(())
     }
@@ -1019,6 +1028,14 @@ mod deadline_tests {
             ..Default::default()
         }
     }
+    /// A successful reply that carries nothing else. It still names its error
+    /// code: an empty frame is no reply at all.
+    fn done() -> pb::Output {
+        pb::Output {
+            error_code: Some(0),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn a_slow_reply_is_delivered_and_the_worker_survives() {
@@ -1086,13 +1103,21 @@ mod deadline_tests {
             config: Some(Default::default()),
             ..Default::default()
         };
+        let done = done();
         // The first process goes silent. Its replacement is slow to answer the
         // configuration calls made during restart, as a cold process is.
         let binary = worker(
             temp.path(),
-            &[version(), configured, session(1), session(9)],
+            &[
+                version(),
+                configured,
+                done.clone(),
+                done.clone(),
+                done,
+                session(9),
+            ],
             "marker=\"$(dirname \"$0\")/started\"\n\
-             if [ -e \"$marker\" ]; then sleep 0.12; reply 1; reply 2; reply 3; fi\n\
+             if [ -e \"$marker\" ]; then sleep 0.12; reply 1; reply 2; reply 3; reply 4; reply 5; fi\n\
              : > \"$marker\"",
         );
         let mut mozc = Mozc::start(&binary, &temp.path().join("profile")).unwrap();
@@ -1101,6 +1126,47 @@ mod deadline_tests {
         mozc.set_deadline(None);
         mozc.restart().unwrap();
         assert_eq!(mozc.create_session().unwrap(), SessionId(9));
+    }
+    #[test]
+    fn a_privacy_change_writes_learning_before_mozc_reloads_it_and_waits_for_the_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let configured = pb::Output {
+            config: Some(Default::default()),
+            ..Default::default()
+        };
+        let done = done();
+        // Records the type of each request read. The version request was
+        // already answered by `reply 0`; every later one gets the next reply.
+        let binary = worker(
+            temp.path(),
+            &[version(), configured, done.clone(), done.clone(), done],
+            "log=\"$(dirname \"$0\")/requests\"\n\
+             request() {\n\
+               n=$(dd bs=1 count=4 2>/dev/null | od -An -tu1 | awk 'NF == 4 { print $1 + 256 * ($2 + 256 * ($3 + 256 * $4)) }')\n\
+               [ -n \"$n\" ] || exit 0\n\
+               dd bs=1 count=\"$n\" 2>/dev/null | od -An -tu1 | awk 'NR == 1 { print $2 }' >> \"$log\"\n\
+             }\n\
+             request\n\
+             for i in 1 2 3 4; do request; reply $i; done",
+        );
+        let mut mozc = Mozc::start(&binary, &temp.path().join("profile")).unwrap();
+        mozc.set_privacy(Privacy::Normal).unwrap();
+        let requests: Vec<i32> = fs::read_to_string(temp.path().join("requests"))
+            .unwrap()
+            .split_whitespace()
+            .map(|kind| kind.parse().unwrap())
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                Op::GetServerVersion,
+                Op::GetConfig,
+                Op::SyncData,
+                Op::SetConfig,
+                Op::SyncData,
+            ]
+            .map(|op| op as i32)
+        );
     }
 }
 
