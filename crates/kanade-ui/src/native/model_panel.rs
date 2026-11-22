@@ -152,14 +152,10 @@ impl Settings {
             .as_ref()
             .and_then(|status| self.model_selection.selected(status));
         let installed = self.models.as_ref().and_then(|status| {
-            status.installed.as_ref().map(|installed| {
-                status
-                    .catalog
-                    .iter()
-                    .find(|model| model.id == installed.id)
-                    .map(|model| model.name.clone())
-                    .unwrap_or_else(|| installed.id.clone())
-            })
+            status
+                .installed
+                .as_ref()
+                .map(crate::models::InstalledModel::label)
         });
         section("ローカルAI").child(
             card().p_3().gap_3()

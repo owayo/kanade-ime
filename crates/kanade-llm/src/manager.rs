@@ -105,9 +105,12 @@ pub struct InstalledModel {
     pub size: u64,
     pub license: String,
     pub accepted_at: u64,
-    /// Display name and profile, when this build registers the model.
+    /// Display name and profile, when the installed file is a model this
+    /// build registers. A file of the same ID that is not that model, such as
+    /// one a previous version shipped, has neither.
     pub name: Option<&'static str>,
     pub profile: Option<&'static str>,
+    /// The installed file is a model this build registers and can serve.
     pub supported: bool,
 }
 #[derive(Serialize)]
@@ -292,15 +295,19 @@ impl Manager {
             state: lifecycle,
             reason,
             catalog,
-            installed: state.install.as_ref().map(|install| InstalledModel {
-                id: install.model.clone(),
-                sha256: install.sha256.clone(),
-                size: install.size,
-                license: install.license.clone(),
-                accepted_at: install.accepted_at,
-                name: state.model.map(|model| model.name),
-                profile: state.model.map(|model| model.profile.id),
-                supported: state.model.is_some(),
+            installed: state.install.as_ref().map(|install| {
+                // The registered model of that ID, only if the file is it.
+                let model = state.model.filter(|model| install.names(model));
+                InstalledModel {
+                    id: install.model.clone(),
+                    sha256: install.sha256.clone(),
+                    size: install.size,
+                    license: install.license.clone(),
+                    accepted_at: install.accepted_at,
+                    name: model.map(|model| model.name),
+                    profile: model.map(|model| model.profile.id),
+                    supported: model.is_some(),
+                }
             }),
             qualification: state
                 .qualification
@@ -874,6 +881,13 @@ mod tests {
         f.write("install.json", &install.to_string());
         let (manager, status) = f.open(true);
         assert_eq!((status.reason, status.ready), (Reason::ModelChanged, false));
+        // The file is not the registered model of its ID: it carries neither
+        // that model's name nor its profile.
+        let installed = status.installed.as_ref().unwrap();
+        assert_eq!(
+            (installed.name, installed.profile, installed.supported),
+            (None, None, false)
+        );
         assert_eq!(manager.qualify().result, StartResult::Started);
         assert_eq!(
             finished(&manager).job.unwrap().error,
