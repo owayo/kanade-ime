@@ -63,6 +63,16 @@ enum Refusal {
     SetSelection,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DuringEdit {
+    Start,
+    SetText,
+    AfterReadLock,
+    AfterWriteLock,
+}
+
+type Callback = Box<dyn FnOnce() -> Result<()>>;
+
 #[implement(ITextStoreACP, ITfContextOwnerCompositionSink)]
 struct Store {
     text: RefCell<Vec<u16>>,
@@ -83,13 +93,26 @@ struct Store {
     preceding_reads: Cell<u32>,
     reject_lock_after: Cell<Option<u32>>,
     refusal: Cell<Option<Refusal>>,
+    callback: Cell<Option<(DuringEdit, Callback)>>,
+    refuse_nested_lock: Cell<bool>,
     compositions: Cell<u32>,
+    ends: Cell<u32>,
     no_layout: Cell<bool>,
     busy: Cell<bool>,
     readonly: Cell<bool>,
 }
 
 impl Store {
+    fn interrupt(&self, point: DuringEdit) -> Result<()> {
+        if let Some((at, callback)) = self.callback.take() {
+            if at == point {
+                callback()?;
+            } else {
+                self.callback.set(Some((at, callback)));
+            }
+        }
+        Ok(())
+    }
     fn refuses(&self, operation: Refusal) -> bool {
         if self.refusal.get() == Some(operation) {
             self.refusal.set(None);
@@ -186,6 +209,7 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
             return Ok(false.into());
         }
         self.compositions.set(self.compositions.get() + 1);
+        self.interrupt(DuringEdit::Start)?;
         Ok(true.into())
     }
     fn OnUpdateComposition(&self, _: Ref<ITfCompositionView>, _: Ref<ITfRange>) -> Result<()> {
@@ -193,6 +217,7 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
     }
     fn OnEndComposition(&self, _: Ref<ITfCompositionView>) -> Result<()> {
         self.compositions.set(self.compositions.get() - 1);
+        self.ends.set(self.ends.get() + 1);
         Ok(())
     }
 }
@@ -223,6 +248,14 @@ impl ITextStoreACP_Impl for Store_Impl {
         self.lock.set(flags & TS_LF_READWRITE.0);
         let result = unsafe { sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(self.lock.get())) };
         self.lock.set(0);
+        if flags & TS_LF_READWRITE.0 == TS_LF_READWRITE.0 {
+            self.busy.set(self.refuse_nested_lock.get());
+            let callback = self.interrupt(DuringEdit::AfterWriteLock);
+            self.busy.set(false);
+            callback?;
+        } else {
+            self.interrupt(DuringEdit::AfterReadLock)?;
+        }
         Ok(result.map_or_else(|err| err.code(), |()| S_OK))
     }
     fn GetStatus(&self) -> Result<TS_STATUS> {
@@ -346,7 +379,9 @@ impl ITextStoreACP_Impl for Store_Impl {
         if self.refuses(Refusal::SetText) {
             return Err(failure());
         }
-        self.replace(start, end, units(text, len))
+        let change = self.replace(start, end, units(text, len))?;
+        self.interrupt(DuringEdit::SetText)?;
+        Ok(change)
     }
     fn GetFormattedText(&self, _: i32, _: i32) -> Result<IDataObject> {
         Err(E_NOTIMPL.into())
@@ -541,6 +576,7 @@ thread_local! {
     static START_PROBES: Cell<usize> = const { Cell::new(0) };
     static HINTS: Cell<usize> = const { Cell::new(0) };
     static LAST_HINT: Cell<HWND> = Cell::new(HWND::default());
+    static FAIL_ACK: Cell<bool> = const { Cell::new(false) };
     static CLOSE_AFTER_PROBE: Cell<bool> = const { Cell::new(false) };
     static HELLOS: Cell<usize> = const { Cell::new(0) };
 }
@@ -575,6 +611,9 @@ impl Transport for TestPipe {
         self.pipe()?.exchange(request)
     }
     fn notify(&mut self, request: &ipc::Request) -> std::io::Result<()> {
+        if FAIL_ACK.replace(false) {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
         self.pipe()?.notify(request)
     }
 }
@@ -604,6 +643,28 @@ struct Host {
 }
 
 impl Host {
+    fn composition_ranges(&self) -> Result<Vec<(i32, i32)>> {
+        unsafe {
+            let views = self
+                .context
+                .cast::<ITfContextComposition>()?
+                .EnumCompositions()?;
+            let mut ranges = Vec::new();
+            loop {
+                let mut slot = [None];
+                let mut fetched = 0;
+                views.Next(&mut slot, &mut fetched)?;
+                let Some(view) = slot[0].take() else {
+                    return Ok(ranges);
+                };
+                let range: ITfRangeACP = view.GetRange()?.cast()?;
+                let (mut start, mut length) = (0, 0);
+                range.GetExtent(&mut start, &mut length)?;
+                ranges.push((start, length));
+            }
+        }
+    }
+
     fn check_scope_value(&self, expected: std::result::Result<VARENUM, HRESULT>) -> Result<()> {
         unsafe {
             let start = self.context.GetStart(self.owner_cookie)?;
@@ -660,19 +721,16 @@ fn test_tip(manager: &ITfThreadMgr) -> Result<ComObject<Tip>> {
     tip.shared
         .tid
         .set(unsafe { manager.cast::<ITfClientId>()?.GetClientId(&CLSID)? });
-    tip.japanese.set(true);
+    tip.shared.japanese.set(true);
     Ok(ComObject::new(tip))
 }
 
-fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
-    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
-    let result = (|| unsafe {
-        let manager: ITfThreadMgr =
-            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
-        let mut id = 0;
-        manager
-            .cast::<ITfThreadMgrEx>()?
-            .ActivateEx(&mut id, TF_TMAE_NOACTIVATETIP)?;
+fn test_document(
+    manager: &ITfThreadMgr,
+    id: u32,
+    tip: ComObject<Tip>,
+) -> Result<(ITfDocumentMgr, Host)> {
+    unsafe {
         let documents = manager.CreateDocumentMgr()?;
         let store = ComObject::new(Store {
             text: RefCell::new(vec![65, 66]),
@@ -693,7 +751,10 @@ fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
             preceding_reads: Cell::new(0),
             reject_lock_after: Cell::new(None),
             refusal: Cell::new(None),
+            callback: Cell::new(None),
+            refuse_nested_lock: Cell::new(false),
             compositions: Cell::new(0),
+            ends: Cell::new(0),
             no_layout: Cell::new(false),
             busy: Cell::new(false),
             readonly: Cell::new(false),
@@ -710,12 +771,26 @@ fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
         let context = context.ok_or_else(failure)?;
         documents.Push(&context)?;
         let host = Host {
-            tip: test_tip(&manager)?,
+            tip,
             owner_id: id,
             owner_cookie: cookie,
             context,
             store,
         };
+        Ok((documents, host))
+    }
+}
+
+fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+    let result = (|| unsafe {
+        let manager: ITfThreadMgr =
+            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+        let mut id = 0;
+        manager
+            .cast::<ITfThreadMgrEx>()?
+            .ActivateEx(&mut id, TF_TMAE_NOACTIVATETIP)?;
+        let (documents, host) = test_document(&manager, id, test_tip(&manager)?)?;
         let mut keyboard = [0; 256];
         GetKeyboardState(&mut keyboard)?;
         SetKeyboardState(&[0; 256])?;
@@ -805,7 +880,7 @@ fn protected_or_unreadable_field_passes_the_key_without_a_start_or_hint() -> Res
                 0 => host.store.set_scope(IS_PASSWORD),
                 1 => host.store.readonly.set(true),
                 2 => host.store.busy.set(true),
-                3 => host.tip.japanese.set(false),
+                3 => host.tip.shared.japanese.set(false),
                 4 => host.tip.shared.secure.set(true),
                 _ => host.store.scope_fails.set(true),
             }
@@ -838,11 +913,20 @@ fn down_consumes_a_claim_without_sending_it_to_a_newly_protected_field() -> Resu
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Reply {
+    Candidates,
+    Select,
+    Poll,
     Compose,
+    CommitAndCompose,
+    Restore,
+    UnackedCompose,
+    ConvertedWithoutAck,
     Converted,
+    CommitConverted,
     Cancel,
     Commit,
     PrivateCommit,
+    PrivateCompose,
     NormalCommit,
     PassBackspace,
     Decline,
@@ -873,131 +957,237 @@ fn serve_edits(
     steps: &'static [Reply],
     rejected: Option<u64>,
 ) -> Result<std::thread::JoinHandle<std::io::Result<()>>> {
+    serve_keys(steps, rejected, &[])
+}
+
+fn serve_keys(
+    steps: &'static [Reply],
+    rejected: Option<u64>,
+    expected: &'static [SpecialKey],
+) -> Result<std::thread::JoinHandle<std::io::Result<()>>> {
     let mut listener = listener()?;
     Ok(std::thread::spawn(move || {
-        let mut pipe = listener
-            .accept()
-            .map_err(|_| std::io::Error::other("accept failed"))?;
+        let pipe = accept_session(&mut listener)?;
         drop(listener);
+        reply_to_session(pipe, steps.iter().copied(), rejected, expected)
+    }))
+}
+
+fn accept_session(listener: &mut Listener) -> std::io::Result<Pipe> {
+    listener
+        .accept()
+        .map_err(|_| std::io::Error::other("accept failed"))
+}
+
+fn reply_to_session(
+    mut pipe: Pipe,
+    steps: impl IntoIterator<Item = Reply>,
+    rejected: Option<u64>,
+    expected: &[SpecialKey],
+) -> std::io::Result<()> {
+    pipe.begin(ipc::KEY_TIMEOUT);
+    let hello: ipc::Request = ipc::receive(&mut pipe)?;
+    assert!(matches!(hello.body, Some(ipc::request::Body::Hello(_))));
+    ipc::send(
+        &mut pipe,
+        &ipc::Response {
+            body: Some(ipc::response::Body::Welcome(ipc::Welcome {
+                version: ipc::CURRENT_VERSION,
+                connection: 1,
+                learning_policy: Some(ipc::LearningPolicy {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        },
+    )?;
+    let mut seq = 0;
+    for (i, step) in steps.into_iter().enumerate() {
         pipe.begin(ipc::KEY_TIMEOUT);
-        let hello: ipc::Request = ipc::receive(&mut pipe)?;
-        assert!(matches!(hello.body, Some(ipc::request::Body::Hello(_))));
+        let request: ipc::Request = ipc::receive(&mut pipe)?;
+        if step == Reply::Poll {
+            let Some(ipc::request::Body::Poll(poll)) = request.body else {
+                return Err(std::io::Error::other("expected candidate poll"));
+            };
+            assert_eq!(poll.candidate_revision, 1);
+            ipc::send(
+                &mut pipe,
+                &ipc::Response {
+                    body: Some(ipc::response::Body::Candidates(ipc::CandidateUpdate {
+                        revision: poll.revision,
+                        pending: true,
+                        ..Default::default()
+                    })),
+                },
+            )?;
+            continue;
+        }
+        seq += 1;
+        let key = match request.body {
+            Some(ipc::request::Body::Restore(r)) if step == Reply::Restore => {
+                assert!(r.reading == "じ");
+                ipc::KeyRequest {
+                    event_seq: r.event_seq,
+                    revision: r.revision,
+                    ..Default::default()
+                }
+            }
+            Some(ipc::request::Body::Select(r)) if step == Reply::Select => {
+                assert!(r.submit && r.handle == Some(test_candidate()));
+                ipc::KeyRequest {
+                    event_seq: r.event_seq,
+                    revision: r.revision,
+                    ..Default::default()
+                }
+            }
+            Some(ipc::request::Body::Key(key))
+                if !matches!(step, Reply::Restore | Reply::Select) =>
+            {
+                key
+            }
+            _ => return Err(std::io::Error::other("unexpected session request")),
+        };
+        assert_eq!(key.event_seq, seq);
+        if let Some(expected) = expected.get(i) {
+            assert!(
+                key.key
+                    .as_ref()
+                    .is_some_and(|k| k.special == *expected as i32)
+            );
+        }
+        assert_eq!(key.passed_through, step == Reply::PassBackspace);
+        if matches!(
+            step,
+            Reply::PrivateCommit | Reply::PrivateCompose | Reply::NormalCommit
+        ) {
+            let observed = key
+                .context
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("missing field context"))?;
+            let private = step != Reply::NormalCommit;
+            assert_eq!(
+                observed.privacy,
+                if private {
+                    Privacy::Private
+                } else {
+                    Privacy::Normal
+                } as i32
+            );
+            assert_eq!(observed.surrounding_available, !private);
+            if private {
+                assert!(observed.preceding_text.is_empty());
+            }
+        }
+        if step == Reply::Lose {
+            return Ok(());
+        }
+        if step == Reply::Stall {
+            // The peer sends no reply. Its client must close on timeout.
+            match pipe.read_idle_frame(ipc::FRAME_TIMEOUT) {
+                Ok(None) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => (),
+                _ => return Err(std::io::Error::other("expected disconnect after timeout")),
+            }
+            return Ok(());
+        }
+        if step == Reply::PassBackspace {
+            assert!(
+                key.key
+                    .as_ref()
+                    .is_some_and(|k| k.special == SpecialKey::Backspace as i32)
+            );
+        }
+        let composing = matches!(
+            step,
+            Reply::Compose
+                | Reply::PrivateCompose
+                | Reply::Converted
+                | Reply::CommitAndCompose
+                | Reply::Restore
+                | Reply::UnackedCompose
+                | Reply::ConvertedWithoutAck
+                | Reply::Candidates
+        );
+        let (reading, surface, width) =
+            if matches!(step, Reply::Converted | Reply::ConvertedWithoutAck) {
+                ("かんじ", "漢字", 2)
+            } else {
+                ("じ", "じ", 1)
+            };
+        let commit = matches!(
+            step,
+            Reply::Commit
+                | Reply::CommitConverted
+                | Reply::Select
+                | Reply::PrivateCommit
+                | Reply::NormalCommit
+                | Reply::CommitAndCompose
+        );
         ipc::send(
             &mut pipe,
             &ipc::Response {
-                body: Some(ipc::response::Body::Welcome(ipc::Welcome {
-                    version: ipc::CURRENT_VERSION,
-                    connection: 1,
-                    learning_policy: Some(ipc::LearningPolicy {
+                body: Some(ipc::response::Body::Key(KeyReply {
+                    revision: key.revision,
+                    event_seq: key.event_seq,
+                    consumed: commit || composing || step == Reply::Cancel,
+                    preedit: composing.then(|| Preedit {
+                        segments: vec![ipc::Segment {
+                            reading: reading.into(),
+                            value: surface.into(),
+                            value_utf16: width,
+                            ..Default::default()
+                        }],
+                        cursor_utf16: width,
+                    }),
+                    commit: commit.then(|| ipc::Commit {
+                        value: if step == Reply::CommitConverted {
+                            "漢字"
+                        } else {
+                            "字"
+                        }
+                        .into(),
+                        ..Default::default()
+                    }),
+                    candidates: (step == Reply::Candidates).then(|| ipc::CandidatePage {
+                        items: vec![ipc::CandidateItem {
+                            handle: Some(test_candidate()),
+                            number: 1,
+                            ..Default::default()
+                        }],
+                        candidate_revision: 1,
+                        total: 1,
+                        refinement_pending: true,
+                        ..Default::default()
+                    }),
+                    key_policy: Some(ipc::KeyPolicySummary {
                         enabled: true,
+                        composing,
                         ..Default::default()
                     }),
                     ..Default::default()
                 })),
             },
         )?;
-        for (i, &step) in steps.iter().enumerate() {
-            pipe.begin(ipc::KEY_TIMEOUT);
-            let request: ipc::Request = ipc::receive(&mut pipe)?;
-            let Some(ipc::request::Body::Key(key)) = request.body else {
-                return Err(std::io::Error::other("expected key"));
-            };
-            assert_eq!(key.event_seq, i as u64 + 1);
-            assert_eq!(key.passed_through, step == Reply::PassBackspace);
-            if matches!(step, Reply::PrivateCommit | Reply::NormalCommit) {
-                let observed = key
-                    .context
-                    .as_ref()
-                    .ok_or_else(|| std::io::Error::other("missing field context"))?;
-                let private = step == Reply::PrivateCommit;
-                assert_eq!(
-                    observed.privacy,
-                    if private {
-                        Privacy::Private
-                    } else {
-                        Privacy::Normal
-                    } as i32
-                );
-                assert_eq!(observed.surrounding_available, !private);
-                if private {
-                    assert!(observed.preceding_text.is_empty());
-                }
-            }
-            if step == Reply::Lose {
-                return Ok(());
-            }
-            if step == Reply::Stall {
-                // The peer sends no reply. Its client must close on timeout.
-                match pipe.read_idle_frame(ipc::FRAME_TIMEOUT) {
-                    Ok(None) => (),
-                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => (),
-                    _ => return Err(std::io::Error::other("expected disconnect after timeout")),
-                }
-                return Ok(());
-            }
-            if step == Reply::PassBackspace {
-                assert!(
-                    key.key
-                        .as_ref()
-                        .is_some_and(|k| k.special == SpecialKey::Backspace as i32)
-                );
-            }
-            let composing = matches!(step, Reply::Compose | Reply::Converted);
-            let (reading, surface, width) = if step == Reply::Converted {
-                ("かんじ", "漢字", 2)
-            } else {
-                ("じ", "じ", 1)
-            };
-            let commit = matches!(
-                step,
-                Reply::Commit | Reply::PrivateCommit | Reply::NormalCommit
-            );
-            ipc::send(
-                &mut pipe,
-                &ipc::Response {
-                    body: Some(ipc::response::Body::Key(KeyReply {
-                        revision: key.revision,
-                        event_seq: key.event_seq,
-                        consumed: commit || composing || step == Reply::Cancel,
-                        preedit: composing.then(|| Preedit {
-                            segments: vec![ipc::Segment {
-                                reading: reading.into(),
-                                value: surface.into(),
-                                value_utf16: width,
-                                ..Default::default()
-                            }],
-                            cursor_utf16: width,
-                        }),
-                        commit: commit.then(|| ipc::Commit {
-                            value: "字".into(),
-                            ..Default::default()
-                        }),
-                        key_policy: Some(ipc::KeyPolicySummary {
-                            enabled: true,
-                            composing,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                },
-            )?;
-            let request: ipc::Request = ipc::receive(&mut pipe)?;
-            let Some(ipc::request::Body::Ack(ack)) = request.body else {
-                return Err(std::io::Error::other("expected edit acknowledgement"));
-            };
-            assert_eq!(ack.event_seq, key.event_seq);
-            assert_eq!(ack.applied, rejected != Some(key.event_seq));
+        if matches!(step, Reply::UnackedCompose | Reply::ConvertedWithoutAck) {
+            break;
         }
-        // The client closes the connection when the test is done.
-        // Another request here would be a duplicate.
-        assert!(
-            pipe.read_idle_frame(ipc::FRAME_TIMEOUT)
-                .ok()
-                .flatten()
-                .is_none()
-        );
-        Ok(())
-    }))
+        let request: ipc::Request = ipc::receive(&mut pipe)?;
+        let Some(ipc::request::Body::Ack(ack)) = request.body else {
+            return Err(std::io::Error::other("expected edit acknowledgement"));
+        };
+        assert_eq!(ack.event_seq, key.event_seq);
+        assert_eq!(ack.applied, rejected != Some(key.event_seq));
+    }
+    // The client closes the connection when the test is done.
+    // Another request here would be a duplicate.
+    assert!(
+        pipe.read_idle_frame(ipc::FRAME_TIMEOUT)
+            .ok()
+            .flatten()
+            .is_none()
+    );
+    Ok(())
 }
 
 fn finish(server: std::thread::JoinHandle<std::io::Result<()>>) -> Result<()> {
@@ -1027,6 +1217,1262 @@ fn press(tip: &ComObject<Tip>, context: &ITfContext, vk: usize) -> Result<()> {
         assert!(keys.OnKeyUp(context, WPARAM(vk), LPARAM(0))?.as_bool());
     }
     Ok(())
+}
+
+// These callbacks cross a COM boundary. Return their result to the test
+// before asserting anything about key ownership or document contents.
+fn deliver(keys: &ITfKeyEventSink, context: &ITfContext, vk: usize) -> Result<bool> {
+    unsafe {
+        Ok(keys
+            .OnTestKeyDown(context, WPARAM(vk), LPARAM(1))?
+            .as_bool()
+            && keys.OnKeyDown(context, WPARAM(vk), LPARAM(1))?.as_bool())
+    }
+}
+
+fn compare_interrupted_keys(at: DuringEdit) -> Result<()> {
+    let mut reference = None;
+    for nested in [false, true] {
+        with_host(|host| {
+            let manager: ITfThreadMgr =
+                unsafe { CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)? };
+            unsafe { manager.SetFocus(&host.context.GetDocumentMgr()?)? };
+            host.tip.shared.manager.replace(Some(manager));
+            let server = serve_keys(
+                &[
+                    Reply::Converted,
+                    Reply::Compose,
+                    Reply::Commit,
+                    Reply::Compose,
+                ],
+                None,
+                &[
+                    SpecialKey::None,
+                    SpecialKey::Backspace,
+                    SpecialKey::Enter,
+                    SpecialKey::None,
+                ],
+            )?;
+            let vk = starter()?;
+            let keys = host.tip.to_interface();
+            let context = host.context.clone();
+            let accepted = Rc::new(Cell::new(false));
+            let result = accepted.clone();
+            let more = move || {
+                let mut all = true;
+                for key in [8, 0x0d, vk] {
+                    all &= deliver(&keys, &context, key)?;
+                }
+                result.set(all);
+                Ok(())
+            };
+            if nested {
+                host.store.refuse_nested_lock.set(true);
+                host.store.callback.set(Some((at, Box::new(more))));
+                press(&host.tip, &host.context, vk)?;
+            } else {
+                press(&host.tip, &host.context, vk)?;
+                more()?;
+            }
+            assert!(accepted.get());
+            assert_eq!(HELLOS.get(), 1);
+            assert_eq!(OPENS.get(), 1);
+            let state = (
+                host.store.text.borrow().clone(),
+                host.composition_ranges()?,
+                host.store.ends.get(),
+            );
+            if nested {
+                assert!(reference.as_ref() == Some(&state));
+            } else {
+                assert_eq!(state.1.len(), 1);
+                reference = Some(state);
+            }
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_in_set_text_preserves_keys_and_ack_order() -> Result<()> {
+    compare_interrupted_keys(DuringEdit::SetText)
+}
+
+#[test]
+fn reentry_after_write_lock_preserves_keys_and_ack_order() -> Result<()> {
+    compare_interrupted_keys(DuringEdit::AfterWriteLock)
+}
+
+#[test]
+fn reentry_commands_follow_a_queued_starter_during_commit() -> Result<()> {
+    for during_delivery in [false, true] {
+        with_host(|host| {
+            let server = serve_keys(
+                &[
+                    Reply::Compose,
+                    Reply::Commit,
+                    Reply::Compose,
+                    Reply::Compose,
+                    Reply::Converted,
+                    Reply::Compose,
+                    Reply::Commit,
+                ],
+                None,
+                &[
+                    SpecialKey::None,
+                    SpecialKey::Enter,
+                    SpecialKey::None,
+                    SpecialKey::Backspace,
+                    SpecialKey::Space,
+                    SpecialKey::Left,
+                    SpecialKey::Enter,
+                ],
+            )?;
+            let vk = starter()?;
+            press(&host.tip, &host.context, vk)?;
+            let keys = host.tip.to_interface();
+            let context = host.context.clone();
+            let claimed = Rc::new(Cell::new(false));
+            let nested = claimed.clone();
+            let store = host.store.clone();
+            let shared = host.tip.shared.clone();
+            host.store.callback.set(Some((
+                DuringEdit::AfterWriteLock,
+                Box::new(move || {
+                    deliver(&keys, &context, vk)?
+                        .then_some(())
+                        .ok_or_else(failure)?;
+                    let commands = move || {
+                        let mut all = !during_delivery || shared.pending.borrow().is_empty();
+                        for key in [8, 0x20, 0x25, 0x0d] {
+                            all &= deliver(&keys, &context, key)?;
+                        }
+                        nested.set(all);
+                        Ok(())
+                    };
+                    if during_delivery {
+                        // The starter has left the queue for its scope check.
+                        store
+                            .callback
+                            .set(Some((DuringEdit::AfterReadLock, Box::new(commands))));
+                        Ok(())
+                    } else {
+                        commands()
+                    }
+                }),
+            )));
+            press(&host.tip, &host.context, 0x0d)?;
+            assert!(claimed.get(), "a command overtook the queued starter");
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq("AB字字".encode_utf16())
+            );
+            assert!(host.composition_ranges()?.is_empty());
+            assert_eq!(HINTS.get(), 0);
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_mode_queue_passes_modifiers_and_untranslated_keys() -> Result<()> {
+    with_host(|host| unsafe {
+        let server = serve(&[Reply::Commit])?;
+        let keys = host.tip.to_interface();
+        let context = host.context.clone();
+        let passed = Rc::new(Cell::new(false));
+        let nested = passed.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                let mut all = deliver(&keys, &context, 0x16)?;
+                for vk in [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN, VK_F1] {
+                    let w = WPARAM(vk.0 as usize);
+                    all &= !keys.OnTestKeyDown(&context, w, LPARAM(1))?.as_bool();
+                    all &= !keys.OnKeyDown(&context, w, LPARAM(1))?.as_bool();
+                    all &= !keys.OnKeyDown(&context, w, LPARAM(1))?.as_bool(); // No preceding Test.
+                    all &= !keys.OnKeyUp(&context, w, LPARAM(0))?.as_bool();
+                }
+                nested.set(all);
+                Ok(())
+            }),
+        )));
+        press(&host.tip, &host.context, starter()?)?;
+        assert!(passed.get(), "a non-input key was claimed after IME ON");
+        // Only the mode indicator.
+        assert_eq!(HINTS.get(), 1);
+        host.tip.shared.client.borrow_mut().take();
+        finish(server)
+    })
+}
+
+#[test]
+fn reentry_discard_notice_handles_mouse_input() -> Result<()> {
+    use windows::Win32::UI::Controls::*;
+    with_host(|_| unsafe {
+        let _hint = mode_hint::Hint::for_discard(mode_hint::input_rect())?;
+        let window = LAST_HINT.get();
+        let mut tool = TTTOOLINFOW {
+            cbSize: std::mem::offset_of!(TTTOOLINFOW, lpReserved) as u32,
+            ..Default::default()
+        };
+        assert_ne!(
+            SendMessageW(
+                window,
+                TTM_ENUMTOOLSW,
+                Some(WPARAM(0)),
+                Some(LPARAM((&raw mut tool) as isize))
+            )
+            .0,
+            0
+        );
+        assert!(
+            tool.hwnd != window || !tool.uFlags.contains(TTF_TRANSPARENT),
+            "the notice would forward mouse input to itself"
+        );
+        SendMessageW(window, WM_MOUSEMOVE, None, None);
+        SendMessageW(window, WM_LBUTTONDOWN, Some(WPARAM(1)), None);
+        SendMessageW(window, WM_LBUTTONUP, None, None);
+        assert!(IsWindow(Some(window)).as_bool());
+        Ok(())
+    })
+}
+
+fn check_discard_position(screen: windows::Win32::Graphics::Gdi::HMONITOR) -> Result<()> {
+    use windows::Win32::Graphics::Gdi::*;
+    unsafe {
+        let mut monitor = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(screen, &mut monitor).ok()?;
+        let mut notice = RECT::default();
+        GetWindowRect(LAST_HINT.get(), &mut notice)?;
+        let gap =
+            (windows::Win32::UI::HiDpi::GetDpiForWindow(LAST_HINT.get()).max(96) * 5 / 96) as i32;
+        assert_eq!(notice.right + gap, monitor.rcWork.right);
+        assert_eq!(notice.bottom + gap, monitor.rcWork.bottom);
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_discard_notice_uses_the_input_monitor_after_focus_loss() -> Result<()> {
+    use windows::Win32::Graphics::Gdi::*;
+    unsafe extern "system" fn collect(
+        screen: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        unsafe { (*(data.0 as *mut Vec<HMONITOR>)).push(screen) };
+        true.into()
+    }
+    with_host(|_| unsafe {
+        let field = GetFocus();
+        let mut screens: Vec<HMONITOR> = Vec::new();
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect),
+            LPARAM((&raw mut screens) as isize),
+        )
+        .ok()?;
+        assert!(!screens.is_empty());
+        for screen in screens {
+            let mut monitor = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            GetMonitorInfoW(screen, &mut monitor).ok()?;
+            SetWindowPos(
+                field,
+                None,
+                monitor.rcWork.left + 16,
+                monitor.rcWork.top + 16,
+                80,
+                40,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            )?;
+            let _ = SetFocus(Some(field));
+            let mut window_rect = RECT::default();
+            GetWindowRect(field, &mut window_rect)?;
+            assert_eq!(mode_hint::input_rect(), window_rect);
+
+            CreateCaret(field, None, 2, 12)?;
+            SetCaretPos(8, 6)?;
+            let caret = mode_hint::input_rect();
+            assert_eq!(
+                (caret.left, caret.top),
+                (window_rect.left + 8, window_rect.top + 6)
+            );
+            DestroyCaret()?;
+            let _ = SetFocus(None);
+            for rect in [window_rect, caret] {
+                let _notice = mode_hint::Hint::for_discard(rect)?;
+                check_discard_position(screen)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn reentry_rechecks_scope_before_sending_queued_key() -> Result<()> {
+    for (private, readonly, native_ui) in [
+        (true, false, true),
+        (false, false, true),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        with_host(|host| {
+            host.tip.shared.show_mode_hint.set(native_ui);
+            let server = serve(if private {
+                &[Reply::Compose, Reply::PrivateCommit]
+            } else {
+                &[Reply::Compose]
+            })?;
+            let store = host.store.clone();
+            let context = host.context.clone();
+            let keys = host.tip.to_interface();
+            let taken = Rc::new(Cell::new(false));
+            let nested = taken.clone();
+            store.refuse_nested_lock.set(true);
+            host.store.callback.set(Some((
+                DuringEdit::AfterWriteLock,
+                Box::new(move || {
+                    nested.set(deliver(&keys, &context, 0x0d)?);
+                    if readonly {
+                        store.readonly.set(true);
+                    } else {
+                        store.set_scope(if private { IS_PRIVATE } else { IS_PASSWORD });
+                    }
+                    Ok(())
+                }),
+            )));
+            press(&host.tip, &host.context, starter()?)?;
+            assert!(taken.get());
+            assert_eq!(HINTS.get(), usize::from(!private && native_ui));
+            assert_eq!(HELLOS.get(), 1);
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_denied_scope_lock_keeps_the_acknowledged_mark() -> Result<()> {
+    with_host(|host| {
+        let server = serve_keys(
+            &[Reply::Compose, Reply::Commit],
+            None,
+            &[SpecialKey::None, SpecialKey::Enter],
+        )?;
+        let context = host.context.clone();
+        let keys = host.tip.to_interface();
+        let store = host.store.clone();
+        let accepted = Rc::new(Cell::new(false));
+        let queued = accepted.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                queued.set(deliver(&keys, &context, 8)?);
+                store.reject_lock_after.set(Some(0));
+                Ok(())
+            }),
+        )));
+        press(&host.tip, &host.context, starter()?)?;
+        assert!(accepted.get());
+        assert_eq!(host.composition_ranges()?.len(), 1);
+        press(&host.tip, &host.context, 0x0d)?;
+        assert!(*host.store.text.borrow() == [65, 66, '字' as u16]);
+        assert_eq!(HELLOS.get(), 1);
+        host.tip.shared.client.borrow_mut().take();
+        finish(server)
+    })
+}
+
+#[test]
+fn reentry_declined_enter_and_backspace_report_one_discard() -> Result<()> {
+    for (vk, replies, expected, text) in [
+        (
+            0x0d,
+            &[Reply::Compose, Reply::Commit, Reply::Decline][..],
+            &[SpecialKey::None, SpecialKey::Enter, SpecialKey::Enter][..],
+            "AB字",
+        ),
+        (
+            8,
+            &[
+                Reply::Compose,
+                Reply::Compose,
+                Reply::Cancel,
+                Reply::Decline,
+            ][..],
+            &[
+                SpecialKey::None,
+                SpecialKey::Backspace,
+                SpecialKey::Backspace,
+                SpecialKey::Backspace,
+            ][..],
+            "AB",
+        ),
+    ] {
+        with_host(|host| {
+            let server = serve_keys(replies, None, expected)?;
+            let keys = host.tip.to_interface();
+            let context = host.context.clone();
+            host.store.callback.set(Some((
+                DuringEdit::AfterWriteLock,
+                Box::new(move || {
+                    // Neither the key nor the discard notice has a focused HWND.
+                    let _ = unsafe { SetFocus(None) };
+                    for _ in 1..replies.len() {
+                        deliver(&keys, &context, vk)?
+                            .then_some(())
+                            .ok_or_else(failure)?;
+                    }
+                    Ok(())
+                }),
+            )));
+            press(&host.tip, &host.context, starter()?)?;
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq(text.encode_utf16())
+            );
+            assert_eq!(HINTS.get(), 1);
+            unsafe {
+                use windows::Win32::Graphics::Gdi::*;
+                check_discard_position(MonitorFromPoint(
+                    POINT::default(),
+                    MONITOR_DEFAULTTOPRIMARY,
+                ))?;
+            }
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_focus_finishes_the_original_document_once() -> Result<()> {
+    for point in [
+        DuringEdit::Start,
+        DuringEdit::SetText,
+        DuringEdit::AfterWriteLock,
+    ] {
+        with_host(|host| unsafe {
+            let manager: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            let old = host.context.GetDocumentMgr()?;
+            let (new, other) = test_document(&manager, host.owner_id, host.tip.clone())?;
+            other.store.text.borrow_mut().clear();
+            other.store.selection.set((0, 0));
+            manager.SetFocus(&old)?;
+            let sink: ITfThreadMgrEventSink = host.tip.to_interface();
+            let focused = new.clone();
+            let keys = host.tip.to_interface();
+            let prior = host.context.clone();
+            let shared = host.tip.shared.clone();
+            let accepted = Rc::new(Cell::new(false));
+            let queued = accepted.clone();
+            host.store.callback.set(Some((
+                point,
+                Box::new(move || {
+                    shared.poll_refinement(false);
+                    queued.set(deliver(&keys, &prior, 0x0d)?);
+                    manager.SetFocus(&focused)?;
+                    sink.OnSetFocus(&focused, &old)
+                }),
+            )));
+            let server = serve_keys(
+                &[Reply::Converted, Reply::CommitConverted],
+                None,
+                &[SpecialKey::None, SpecialKey::Enter],
+            )?;
+            let vk = starter()?;
+            assert!(host.test(vk)? && host.down(vk)?);
+            assert!(accepted.get());
+            assert_eq!(host.store.compositions.get(), 0);
+            assert_eq!(host.store.ends.get(), 1);
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq("AB漢字".encode_utf16())
+            );
+            assert!(other.store.text.borrow().is_empty());
+            finish(server)?;
+            check_connected_commit(&other.tip, &other.context)?;
+            assert!(*other.store.text.borrow() == ['字' as u16]);
+            new.Pop(TF_POPF_ALL)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_starters_before_and_after_termination_use_a_fresh_session() -> Result<()> {
+    with_host(|host| unsafe {
+        let original = serve(&[Reply::Compose])?;
+        let vk = starter()?;
+        assert!(host.test(vk)?);
+        let fresh = serve_keys(
+            &[Reply::Compose, Reply::Commit],
+            None,
+            &[SpecialKey::None; 2],
+        )?;
+        let owner: ITfContextOwnerCompositionServices = host.context.cast()?;
+        let keys = host.tip.to_interface();
+        let context = host.context.clone();
+        let taken = Rc::new(Cell::new((false, false)));
+        let nested = taken.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                let first = deliver(&keys, &context, vk)?;
+                owner.TerminateComposition(None)?;
+                nested.set((first, deliver(&keys, &context, vk)?));
+                Ok(())
+            }),
+        )));
+        assert!(host.down(vk)?);
+        assert_eq!(taken.get(), (true, true));
+        assert_eq!(HELLOS.get(), 2);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("ABじ字".encode_utf16())
+        );
+        host.tip.shared.client.borrow_mut().take();
+        finish(original)?;
+        finish(fresh)
+    })
+}
+
+#[test]
+fn reentry_rejected_edit_processes_unsubmitted_key() -> Result<()> {
+    with_host(|host| {
+        let original = serve_edits(&[Reply::Compose], Some(1))?;
+        let vk = starter()?;
+        assert!(host.test(vk)?);
+        let fresh = serve(&[Reply::Commit])?;
+        let keys = host.tip.to_interface();
+        let context = host.context.clone();
+        host.store.refusal.set(Some(Refusal::SetText));
+        host.store.callback.set(Some((
+            DuringEdit::Start,
+            Box::new(move || {
+                deliver(&keys, &context, vk)?
+                    .then_some(())
+                    .ok_or_else(failure)
+            }),
+        )));
+        assert!(host.down(vk)?);
+        assert_eq!(HELLOS.get(), 2);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB字".encode_utf16())
+        );
+        host.tip.shared.client.borrow_mut().take();
+        finish(original)?;
+        finish(fresh)
+    })
+}
+
+#[test]
+fn reentry_foreground_loss_drains_the_attached_store() -> Result<()> {
+    with_host(|host| unsafe {
+        let original = serve_keys(
+            &[Reply::Compose, Reply::Converted, Reply::Commit],
+            None,
+            &[SpecialKey::None, SpecialKey::None, SpecialKey::Enter],
+        )?;
+        let vk = starter()?;
+        let keys: ITfKeyEventSink = host.tip.to_interface();
+        let context = host.context.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                deliver(&keys, &context, vk)?
+                    .then_some(())
+                    .ok_or_else(failure)?;
+                deliver(&keys, &context, 0x0d)?
+                    .then_some(())
+                    .ok_or_else(failure)?;
+                keys.OnSetFocus(false)
+            }),
+        )));
+        assert!(host.test(vk)? && host.down(vk)?);
+        assert_eq!(HINTS.get(), 0);
+        assert_eq!(HELLOS.get(), 1);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB字".encode_utf16())
+        );
+        finish(original)
+    })
+}
+
+#[test]
+fn reentry_failed_ack_restores_before_the_unsubmitted_key() -> Result<()> {
+    with_host(|host| {
+        let original = serve(&[Reply::UnackedCompose])?;
+        let vk = starter()?;
+        assert!(host.test(vk)?);
+        let fresh = serve(&[Reply::Restore, Reply::Commit])?;
+        let keys = host.tip.to_interface();
+        let context = host.context.clone();
+        host.store.callback.set(Some((
+            DuringEdit::SetText,
+            Box::new(move || {
+                FAIL_ACK.set(true);
+                deliver(&keys, &context, vk)?
+                    .then_some(())
+                    .ok_or_else(failure)
+            }),
+        )));
+        assert!(host.down(vk)?);
+        assert_eq!(HELLOS.get(), 2);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB字".encode_utf16())
+        );
+        host.tip.shared.client.borrow_mut().take();
+        finish(original)?;
+        finish(fresh)
+    })
+}
+
+#[test]
+fn reentry_enter_keeps_the_conversion_after_a_lost_ack() -> Result<()> {
+    with_host(|host| {
+        let original = serve(&[Reply::ConvertedWithoutAck])?;
+        let vk = starter()?;
+        assert!(host.test(vk)?);
+        let fresh = serve(&[])?;
+        let keys = host.tip.to_interface();
+        let context = host.context.clone();
+        host.store.callback.set(Some((
+            DuringEdit::SetText,
+            Box::new(move || {
+                FAIL_ACK.set(true);
+                deliver(&keys, &context, 0x0d)?
+                    .then_some(())
+                    .ok_or_else(failure)
+            }),
+        )));
+        assert!(host.down(vk)?);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB漢字".encode_utf16())
+        );
+        assert!(host.composition_ranges()?.is_empty());
+        host.tip.shared.client.borrow_mut().take();
+        finish(original)?;
+        finish(fresh)
+    })
+}
+
+#[test]
+fn reentry_lost_reply_shows_hint_and_the_next_success_clears_it() -> Result<()> {
+    with_host(|host| {
+        let original = serve(&[Reply::Commit, Reply::Lose])?;
+        let vk = starter()?;
+        assert!(host.test(vk)?);
+        let keys = host.tip.to_interface();
+        let context = host.context.clone();
+        host.store.callback.set(Some((
+            DuringEdit::SetText,
+            Box::new(move || {
+                deliver(&keys, &context, vk)?
+                    .then_some(())
+                    .ok_or_else(failure)
+            }),
+        )));
+        assert!(host.down(vk)?);
+        assert_eq!(HINTS.get(), 1);
+        assert_eq!(START_PROBES.get(), 1);
+        finish(original)?;
+        let fresh = serve(&[Reply::Commit])?;
+        assert!(host.tip.shared.connect(false) == Connection::Attached);
+        let keys = host.tip.to_interface();
+        host.tip
+            .shared
+            .with_client(&host.context, |_, _| deliver(&keys, &host.context, vk))
+            .ok_or_else(failure)??
+            .then_some(())
+            .ok_or_else(failure)?;
+        assert!(!unsafe { IsWindowVisible(LAST_HINT.get()) }.as_bool());
+        host.tip.shared.client.borrow_mut().take();
+        finish(fresh)
+    })
+}
+
+#[test]
+fn reentry_mode_switch_follows_queued_text() -> Result<()> {
+    for (mode_key, turn_on_again) in [
+        (0xf3, false),
+        (0xf4, false),
+        (0x19, false),
+        (0x1a, false),
+        (0xc0, false),
+        (0x1a, true),
+    ] {
+        with_host(|host| unsafe {
+            let manager: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            let mode = input_mode::Mode::attach(
+                &manager,
+                host.tip.shared.tid.get(),
+                &host.tip.to_interface(),
+            )?;
+            let switch = mode.switch();
+            let original = switch.japanese();
+            host.tip.mode.replace(Some(mode));
+            switch.apply(host.tip.shared.tid.get(), input_mode::Command::On)?;
+            let keys: ITfKeyEventSink = host.tip.to_interface();
+            let context = host.context.clone();
+            let vk = starter()?;
+            let claimed = Rc::new(Cell::new(false));
+            let after_mode = claimed.clone();
+            host.store.callback.set(Some((
+                DuringEdit::SetText,
+                Box::new(move || {
+                    deliver(&keys, &context, vk)?
+                        .then_some(())
+                        .ok_or_else(failure)?;
+                    if mode_key == 0xc0 {
+                        let toggle = GUID::from_u128(0x8a1c7f52_9027_4b3d_833d_c2bbf31000c0);
+                        keys.OnPreservedKey(&context, &toggle)?.ok()
+                    } else {
+                        deliver(&keys, &context, mode_key)?
+                            .then_some(())
+                            .ok_or_else(failure)
+                    }?;
+                    after_mode
+                        .set(deliver(&keys, &context, vk)? && deliver(&keys, &context, 0x0d)?);
+                    if turn_on_again {
+                        for key in [0x16, vk] {
+                            deliver(&keys, &context, key)?
+                                .then_some(())
+                                .ok_or_else(failure)?;
+                        }
+                    }
+                    Ok(())
+                }),
+            )));
+            let server = serve(&[Reply::Compose, Reply::Commit])?;
+            assert!(host.tip.shared.connect(false) == Connection::Attached);
+            let second = turn_on_again
+                .then(|| serve(&[Reply::CommitConverted]))
+                .transpose()?;
+            press(&host.tip, &host.context, vk)?;
+            let off = !switch.japanese();
+            let expected = if turn_on_again {
+                "AB字漢字"
+            } else {
+                "AB字"
+            };
+            let correct = host
+                .store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq(expected.encode_utf16());
+            let post_queue_claim = host.test(vk)?;
+            host.check_up(0x0d, true)?;
+            switch.apply(
+                host.tip.shared.tid.get(),
+                if original {
+                    input_mode::Command::On
+                } else {
+                    input_mode::Command::Off
+                },
+            )?;
+            assert_eq!(off, !turn_on_again);
+            assert!(correct);
+            assert!(
+                claimed.get(),
+                "keys following the mode switch overtook the queue"
+            );
+            assert_eq!(HINTS.get(), 2 + usize::from(turn_on_again));
+            assert_eq!(post_queue_claim, turn_on_again);
+            if let Some(second) = second {
+                host.tip.shared.client.borrow_mut().take();
+                finish(second)?;
+            }
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_focus_drains_each_fields_starter_in_its_session() -> Result<()> {
+    for terminate_on_move in [false, true] {
+        with_host(|host| unsafe {
+            let manager: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            let previous = host.context.GetDocumentMgr()?;
+            let (next, other) = test_document(&manager, host.owner_id, host.tip.clone())?;
+            manager.SetFocus(&previous)?;
+            host.tip.shared.manager.replace(Some(manager.clone()));
+            let mut endpoint = listener()?;
+            let (focus_result, moved) = std::sync::mpsc::channel::<bool>();
+            let server = std::thread::spawn(move || {
+                // SetFocus can end the composition itself. Only that case needs a
+                // new connection for the unsubmitted key in the original field.
+                let mut owner_ended = false;
+                let next = moved.into_iter().take(1).filter_map(|ended| {
+                    owner_ended = ended;
+                    (!ended).then_some(Reply::NormalCommit)
+                });
+                reply_to_session(
+                    accept_session(&mut endpoint)?,
+                    std::iter::once(Reply::Converted).chain(next),
+                    None,
+                    &[],
+                )?;
+                if owner_ended {
+                    reply_to_session(
+                        accept_session(&mut endpoint)?,
+                        [Reply::NormalCommit],
+                        None,
+                        &[],
+                    )?;
+                }
+                reply_to_session(
+                    accept_session(&mut endpoint)?,
+                    [Reply::PrivateCompose, Reply::Commit],
+                    None,
+                    &[SpecialKey::None, SpecialKey::Enter],
+                )
+            });
+            let vk = starter()?;
+            assert!(host.test(vk)?);
+            let keys = host.tip.to_interface();
+            let events: ITfThreadMgrEventSink = host.tip.to_interface();
+            let old = host.context.clone();
+            let new = other.context.clone();
+            let store = other.store.clone();
+            let old_store = host.store.clone();
+            let owner_ended = Rc::new(Cell::new(false));
+            let ended = owner_ended.clone();
+            let ownership = Rc::new(Cell::new((true, false)));
+            let new_field = ownership.clone();
+            other.store.set_scope(IS_PRIVATE);
+            host.store.callback.set(Some((
+                DuringEdit::AfterWriteLock,
+                Box::new(move || {
+                    deliver(&keys, &old, vk)?
+                        .then_some(())
+                        .ok_or_else(failure)?;
+                    let focused = new.GetDocumentMgr()?;
+                    manager.SetFocus(&focused)?;
+                    if terminate_on_move && old_store.ends.get() == 0 {
+                        old.cast::<ITfContextOwnerCompositionServices>()?
+                            .TerminateComposition(None)?;
+                    }
+                    events.OnSetFocus(&focused, &previous)?;
+                    ended.set(old_store.ends.get() != 0);
+                    focus_result.send(ended.get()).map_err(|_| failure())?;
+                    let before = deliver(&keys, &new, 0x0d)?;
+                    deliver(&keys, &new, vk)?
+                        .then_some(())
+                        .ok_or_else(failure)?;
+                    new_field.set((before, deliver(&keys, &new, 0x0d)?));
+                    store.set_scope(IS_DEFAULT);
+                    // Cleanup of the previous document can follow the new key test.
+                    events.OnUninitDocumentMgr(&previous)
+                }),
+            )));
+            assert!(host.down(vk)?);
+            assert_eq!(ownership.get(), (false, true));
+            assert_eq!(host.store.ends.get(), 1 + u32::from(owner_ended.get()));
+            let expected = if owner_ended.get() {
+                "AB漢字字"
+            } else {
+                "AB字"
+            };
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq(expected.encode_utf16())
+            );
+            assert!(
+                other
+                    .store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq("AB字".encode_utf16())
+            );
+            assert_eq!(HELLOS.get(), 2 + usize::from(owner_ended.get()));
+            assert_eq!(HINTS.get(), 0);
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)?;
+            next.Pop(TF_POPF_ALL)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_departing_edit_preserves_the_hosts_replacement() -> Result<()> {
+    with_host(|host| unsafe {
+        let server = serve_edits(&[Reply::Converted, Reply::Commit], Some(2))?;
+        let vk = starter()?;
+        let keys: ITfKeyEventSink = host.tip.to_interface();
+        let context = host.context.clone();
+        let store = host.store.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                deliver(&keys, &context, vk)?
+                    .then_some(())
+                    .ok_or_else(failure)?;
+                keys.OnSetFocus(false)?;
+                // The owner edits the marked range without ending the composition.
+                *store.text.borrow_mut().last_mut().ok_or_else(failure)? = 67;
+                let sink = store.sink.borrow().clone().ok_or_else(failure)?;
+                sink.OnTextChange(
+                    TEXT_STORE_TEXT_CHANGE_FLAGS(0),
+                    &TS_TEXTCHANGE {
+                        acpStart: 3,
+                        acpOldEnd: 4,
+                        acpNewEnd: 4,
+                    },
+                )
+            }),
+        )));
+        assert!(host.test(vk)? && host.down(vk)?);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB漢C".encode_utf16())
+        );
+        assert_eq!(host.store.compositions.get(), 0);
+        assert_eq!(HINTS.get(), 1);
+        finish(server)
+    })
+}
+
+fn test_candidate() -> ipc::CandidateHandle {
+    ipc::CandidateHandle {
+        session_epoch: 1,
+        candidate_revision: 1,
+        slot: 0,
+    }
+}
+
+#[test]
+fn reentry_stale_candidate_click_reports_discard() -> Result<()> {
+    with_host(|host| {
+        let server = serve(&[Reply::Candidates, Reply::Commit])?;
+        let vk = starter()?;
+        press(&host.tip, &host.context, vk)?;
+        let shared = host.tip.shared.clone();
+        host.store.callback.set(Some((
+            DuringEdit::SetText,
+            Box::new(move || {
+                shared.choose(test_candidate());
+                Ok(())
+            }),
+        )));
+        press(&host.tip, &host.context, vk)?;
+        assert_eq!(HINTS.get(), 1);
+        host.tip.shared.client.borrow_mut().take();
+        finish(server)
+    })
+}
+
+#[test]
+fn reentry_departing_candidate_click_precedes_enter() -> Result<()> {
+    with_host(|host| {
+        let server = serve(&[
+            Reply::Candidates,
+            Reply::Candidates,
+            Reply::Select,
+            Reply::Decline,
+        ])?;
+        let vk = starter()?;
+        press(&host.tip, &host.context, vk)?;
+        let keys: ITfKeyEventSink = host.tip.to_interface();
+        let context = host.context.clone();
+        let shared = host.tip.shared.clone();
+        host.store.callback.set(Some((
+            DuringEdit::SetText,
+            Box::new(move || {
+                shared.choose(test_candidate());
+                deliver(&keys, &context, 0x0d)?
+                    .then_some(())
+                    .ok_or_else(failure)?;
+                unsafe { keys.OnSetFocus(false) }
+            }),
+        )));
+        assert!(host.test(vk)? && host.down(vk)?);
+        assert!(
+            host.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB字".encode_utf16())
+        );
+        assert_eq!(HINTS.get(), 1); // Enter was declined after the click committed.
+        assert_eq!(HELLOS.get(), 1);
+        finish(server)
+    })
+}
+
+#[test]
+fn reentry_candidate_click_finalize_and_expired_poll_follow_the_ack() -> Result<()> {
+    #[derive(Clone, Copy)]
+    enum Callback {
+        Click,
+        Finalize,
+        Timeout,
+    }
+    for action in [Callback::Click, Callback::Finalize, Callback::Timeout] {
+        with_host(|host| unsafe {
+            let manager: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            manager.SetFocus(&host.context.GetDocumentMgr()?)?;
+            host.tip.shared.manager.replace(Some(manager));
+            let server = serve(if matches!(action, Callback::Timeout) {
+                &[Reply::Candidates, Reply::Candidates, Reply::Poll]
+            } else {
+                &[Reply::Candidates, Reply::Candidates, Reply::Select]
+            })?;
+            let vk = starter()?;
+            press(&host.tip, &host.context, vk)?;
+            let shared = host.tip.shared.clone();
+            host.store.callback.set(Some((
+                DuringEdit::SetText,
+                Box::new(move || {
+                    match action {
+                        Callback::Click => shared.choose(test_candidate()),
+                        Callback::Finalize => {
+                            let behavior: ITfCandidateListUIElementBehavior =
+                                uiless::Element::new(&shared).into();
+                            behavior.Finalize()?;
+                        }
+                        Callback::Timeout => shared.poll_refinement(true),
+                    }
+                    Ok(())
+                }),
+            )));
+            press(&host.tip, &host.context, vk)?;
+            if matches!(action, Callback::Timeout) {
+                let page = host.tip.shared.page.borrow();
+                assert!(!page.refinement_pending);
+                assert_eq!(
+                    page.refinement_outcome,
+                    ipc::RefinementOutcome::TimedOut as i32
+                );
+            } else {
+                assert!(
+                    host.store
+                        .text
+                        .borrow()
+                        .iter()
+                        .copied()
+                        .eq("AB字".encode_utf16())
+                );
+            }
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_owner_termination_discards_the_checked_out_client() -> Result<()> {
+    for point in [DuringEdit::SetText, DuringEdit::AfterWriteLock] {
+        with_host(|host| unsafe {
+            let owner: ITfContextOwnerCompositionServices = host.context.cast()?;
+            let store = host.store.clone();
+            host.store.callback.set(Some((
+                point,
+                Box::new(move || {
+                    match owner.TerminateComposition(None) {
+                        Err(e) if point == DuringEdit::SetText && e.code() == TF_E_NOLOCK => {
+                            // The owner can regain its lock before the TIP's
+                            // RequestEditSession returns.
+                            store.callback.set(Some((
+                                DuringEdit::AfterWriteLock,
+                                Box::new(move || owner.TerminateComposition(None)),
+                            )));
+                            Ok(())
+                        }
+                        result => result,
+                    }
+                }),
+            )));
+            let server = serve(&[Reply::Converted])?;
+            press(&host.tip, &host.context, starter()?)?;
+            assert_eq!(host.store.compositions.get(), 0);
+            assert!(host.tip.shared.client.borrow().is_none());
+            assert!(host.tip.shared.preedit.borrow().segments.is_empty());
+            finish(server)?;
+            check_connected_commit(&host.tip, &host.context)?;
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq("AB漢字字".encode_utf16())
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reentry_pop_discards_the_detached_document() -> Result<()> {
+    with_host(|host| unsafe {
+        let manager: ITfThreadMgr =
+            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+        let (docs, old) = test_document(&manager, host.owner_id, host.tip.clone())?;
+        manager.SetFocus(&docs)?;
+        host.tip.shared.manager.replace(Some(manager.clone()));
+        let sink: ITfThreadMgrEventSink = host.tip.to_interface();
+        let source: ITfSource = manager.cast()?;
+        let cookie = source.AdviseSink(&ITfThreadMgrEventSink::IID, &sink)?;
+        let keys = old.tip.to_interface();
+        let context = old.context.clone();
+        let vk = starter()?;
+        let popping = docs.clone();
+        let pop_succeeded = Rc::new(Cell::new(false));
+        let popped = pop_succeeded.clone();
+        old.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                deliver(&keys, &context, vk)?
+                    .then_some(())
+                    .ok_or_else(failure)?;
+                popping.Pop(TF_POPF_ALL)?;
+                popped.set(true);
+                Ok(())
+            }),
+        )));
+        let server = serve(&[Reply::Converted])?;
+        assert!(old.test(vk)? && old.down(vk)?);
+        assert!(pop_succeeded.get(), "the host did not pop the context");
+        let contexts = docs.EnumContexts()?;
+        let mut entry = [None];
+        let mut count = 0;
+        loop {
+            contexts.Next(&mut entry, &mut count)?;
+            if count == 0 {
+                break;
+            }
+            assert!(entry[0].take().as_ref() != Some(&old.context));
+        }
+        assert!(
+            old.store
+                .text
+                .borrow()
+                .iter()
+                .copied()
+                .eq("AB漢字".encode_utf16())
+        );
+        source.UnadviseSink(cookie)?;
+        assert_eq!(HINTS.get(), 1);
+        assert!(host.tip.shared.client.borrow().is_none());
+        assert!(host.tip.shared.composition.borrow().is_none());
+        finish(server)?;
+        manager.SetFocus(&host.context.GetDocumentMgr()?)?;
+        check_connected_commit(&host.tip, &host.context)?;
+        assert!(*host.store.text.borrow() == [65, 66, '字' as u16]);
+        Ok(())
+    })
+}
+
+#[test]
+fn reentry_ignores_notifications_for_the_previous_document_and_mark() -> Result<()> {
+    with_host(|host| unsafe {
+        let manager: ITfThreadMgr =
+            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+        let (docs, old) = test_document(&manager, host.owner_id, host.tip.clone())?;
+        let server = serve(&[Reply::Compose])?;
+        let vk = starter()?;
+        press(&old.tip, &old.context, vk)?;
+        let previous = old
+            .tip
+            .shared
+            .composition
+            .borrow()
+            .clone()
+            .ok_or_else(failure)?;
+        let events: ITfThreadMgrEventSink = host.tip.to_interface();
+        let current = host.context.GetDocumentMgr()?;
+        events.OnSetFocus(&current, &docs)?;
+        finish(server)?;
+        let ended: ITfCompositionSink = host.tip.to_interface();
+        let source = old.context.clone();
+        let previous_manager = docs.clone();
+        host.store.callback.set(Some((
+            DuringEdit::SetText,
+            Box::new(move || {
+                ended.OnCompositionTerminated(0, &previous)?;
+                events.OnPopContext(&source)?;
+                events.OnUninitDocumentMgr(&previous_manager)?;
+                events.OnSetFocus(&current, &previous_manager)
+            }),
+        )));
+        check_connected_commit(&host.tip, &host.context)?;
+        assert!(host.composition_ranges()?.is_empty());
+        assert!(*host.store.text.borrow() == [65, 66, '字' as u16]);
+        docs.Pop(TF_POPF_ALL)
+    })
 }
 
 fn check_rejected_edit(refusal: Refusal, steps: &'static [Reply]) -> Result<()> {
@@ -1479,12 +2925,53 @@ fn hidden_desktop(check: impl FnOnce() -> Result<()> + Send + 'static) -> Result
     closed
 }
 
-#[test]
-#[ignore = "TSF RichEdit loads the system IME"]
-fn edit_recovery_richedit_text_limit() -> Result<()> {
+fn check_richedit_modules() -> Result<()> {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    if unsafe { GetModuleHandleW(windows::core::w!("kanade_tip.dll")) }.is_ok() {
+        Err(Error::new(
+            E_FAIL,
+            "RichEdit loaded the installed Kanade TIP",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn rich_edit_control(parent: HWND, text: PCWSTR) -> Result<HWND> {
+    use windows::Win32::UI::Controls::RichEdit::*;
+    unsafe {
+        let edit = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            MSFTEDIT_CLASS,
+            text,
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            0,
+            0,
+            160,
+            40,
+            Some(parent),
+            None,
+            None,
+            None,
+        )?;
+        let style = SendMessageW(
+            edit,
+            EM_SETEDITSTYLE,
+            Some(WPARAM(SES_USECTF as usize)),
+            Some(LPARAM(SES_USECTF as isize)),
+        );
+        assert_ne!(style.0 & SES_USECTF as isize, 0);
+        check_richedit_modules()?;
+        Ok(edit)
+    }
+}
+
+fn with_richedit(
+    check: impl FnOnce(HWND, HWND, ComObject<Tip>, ITfContext) -> Result<()> + Send + 'static,
+) -> Result<()> {
     use windows::Win32::System::LibraryLoader::LoadLibraryW;
-    use windows::Win32::UI::Controls::{EM_SETSEL, RichEdit::*};
-    hidden_desktop(|| unsafe {
+    use windows::Win32::UI::Controls::EM_SETSEL;
+    hidden_desktop(move || unsafe {
         let manager: ITfThreadMgr =
             CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
         let mut tid = 0;
@@ -1506,28 +2993,8 @@ fn edit_recovery_richedit_text_limit() -> Result<()> {
             None,
             None,
         )?;
-        let edit = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
-            MSFTEDIT_CLASS,
-            windows::core::w!("AB"),
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-            0,
-            0,
-            160,
-            40,
-            Some(parent),
-            None,
-            None,
-            None,
-        )?;
+        let edit = rich_edit_control(parent, windows::core::w!("AB"))?;
         let result = (|| {
-            let style = SendMessageW(
-                edit,
-                EM_SETEDITSTYLE,
-                Some(WPARAM(SES_USECTF as usize)),
-                Some(LPARAM(SES_USECTF as isize)),
-            );
-            assert_ne!(style.0 & SES_USECTF as isize, 0);
             let _ = SetFocus(Some(edit));
             dispatch_pending();
             // RichEdit also exposes a CUAS document for this HWND. Its
@@ -1535,28 +3002,235 @@ fn edit_recovery_richedit_text_limit() -> Result<()> {
             let context = manager.GetFocus()?.GetTop()?;
             assert!(context.GetActiveView()?.GetWnd()? == edit);
             SendMessageW(edit, EM_SETSEL, Some(WPARAM(2)), Some(LPARAM(2)));
-            SendMessageW(edit, EM_EXLIMITTEXT, None, Some(LPARAM(3)));
             SetKeyboardState(&[0; 256])?;
             let tip = test_tip(&manager)?;
-            let server = serve_edits(&[Reply::Compose, Reply::Commit, Reply::Compose], Some(3))?;
-            press(&tip, &context, starter()?)?;
-            press(&tip, &context, 0x0d)?;
-            wait_for_text(edit, "AB字");
-            press(&tip, &context, starter()?)?;
-            wait_for_text(edit, "AB字");
-            assert!(tip.shared.composition.borrow().is_none());
-            finish(server)?;
-            SendMessageW(edit, EM_EXLIMITTEXT, None, Some(LPARAM(4)));
-            let fresh = serve(&[Reply::Commit])?;
-            press(&tip, &context, starter()?)?;
-            wait_for_text(edit, "AB字字");
-            tip.shared.client.borrow_mut().take();
-            finish(fresh)
+            tip.shared.manager.replace(Some(manager.clone()));
+            check_richedit_modules()?;
+            check(parent, edit, tip, context)?;
+            check_richedit_modules()
         })();
         DestroyWindow(parent)?;
         manager.Deactivate()?;
         FreeLibrary(library)?;
         result
+    })
+}
+
+#[test]
+#[ignore = "TSF RichEdit loads the system IME"]
+fn edit_recovery_richedit_text_limit() -> Result<()> {
+    use windows::Win32::UI::Controls::RichEdit::EM_EXLIMITTEXT;
+    with_richedit(|_, edit, tip, context| unsafe {
+        SendMessageW(edit, EM_EXLIMITTEXT, None, Some(LPARAM(3)));
+        let server = serve_edits(&[Reply::Compose, Reply::Commit, Reply::Compose], Some(3))?;
+        press(&tip, &context, starter()?)?;
+        press(&tip, &context, 0x0d)?;
+        wait_for_text(edit, "AB字");
+        press(&tip, &context, starter()?)?;
+        wait_for_text(edit, "AB字");
+        assert!(tip.shared.composition.borrow().is_none());
+        finish(server)?;
+        SendMessageW(edit, EM_EXLIMITTEXT, None, Some(LPARAM(4)));
+        let fresh = serve(&[Reply::Commit])?;
+        press(&tip, &context, starter()?)?;
+        wait_for_text(edit, "AB字字");
+        tip.shared.client.borrow_mut().take();
+        finish(fresh)
+    })
+}
+
+thread_local! {
+    static ON_CHANGE: Cell<Option<Callback>> = const { Cell::new(None) };
+    static CHANGE_RESULT: Cell<Option<Result<()>>> = const { Cell::new(None) };
+}
+
+unsafe extern "system" fn rich_edit_notification(
+    window: HWND,
+    message: u32,
+    w: WPARAM,
+    l: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    if message == WM_COMMAND
+        && (w.0 >> 16) as u32 == EN_CHANGE
+        && let Some(callback) = ON_CHANGE.take()
+    {
+        CHANGE_RESULT.set(Some(callback()));
+    }
+    unsafe { windows::Win32::UI::Shell::DefSubclassProc(window, message, w, l) }
+}
+
+#[test]
+#[ignore = "TSF RichEdit loads the system IME"]
+fn reentry_richedit_change_during_commit_and_preedit() -> Result<()> {
+    use windows::Win32::UI::{Controls::RichEdit::*, Shell::SetWindowSubclass};
+    with_richedit(|parent, edit, tip, context| unsafe {
+        SetWindowSubclass(parent, Some(rich_edit_notification), 1, 0).ok()?;
+        SendMessageW(
+            edit,
+            EM_SETEVENTMASK,
+            None,
+            Some(LPARAM(ENM_CHANGE as isize)),
+        );
+        let server = serve(&[Reply::Compose, Reply::CommitAndCompose, Reply::Commit])?;
+        let vk = starter()?;
+        press(&tip, &context, vk)?;
+        let keys = tip.to_interface();
+        let target = context.clone();
+        ON_CHANGE.set(Some(Box::new(move || {
+            if deliver(&keys, &target, 0x0d)? {
+                Ok(())
+            } else {
+                Err(Error::new(
+                    E_FAIL,
+                    "the nested key was passed to the application",
+                ))
+            }
+        })));
+        press(&tip, &context, vk)?;
+        CHANGE_RESULT
+            .take()
+            .ok_or_else(|| Error::new(E_FAIL, "RichEdit did not notify its parent"))??;
+        assert_eq!(HELLOS.get(), 1);
+        wait_for_text(edit, "AB字字");
+        assert!(tip.shared.composition.borrow().is_none());
+        tip.shared.client.borrow_mut().take();
+        finish(server)?;
+
+        // A second EN_CHANGE handler replaces the text and ends the new mark.
+        let server = serve(&[Reply::Compose, Reply::CommitAndCompose])?;
+        let vk = starter()?;
+        press(&tip, &context, vk)?;
+        let fresh = serve(&[Reply::Compose, Reply::Commit])?;
+        let target = context.clone();
+        let keys = tip.to_interface();
+        ON_CHANGE.set(Some(Box::new(move || {
+            deliver(&keys, &target, vk)?
+                .then_some(())
+                .ok_or_else(|| Error::new(E_FAIL, "starter passed before rewrite"))?;
+            SetWindowTextW(edit, windows::core::w!("R"))?;
+            deliver(&keys, &target, vk)?
+                .then_some(())
+                .ok_or_else(|| Error::new(E_FAIL, "starter passed after rewrite"))
+        })));
+        press(&tip, &context, vk)?;
+        CHANGE_RESULT
+            .take()
+            .ok_or_else(|| Error::new(E_FAIL, "RichEdit did not notify its parent"))??;
+        finish(server)?;
+        // SetWindowText resets the insertion point to the beginning.
+        wait_for_text(edit, "字R");
+        tip.shared.client.borrow_mut().take();
+        finish(fresh)?;
+
+        SetWindowTextW(edit, windows::core::w!(""))?;
+        let other = rich_edit_control(parent, windows::core::w!(""))?;
+        let manager = tip.shared.manager.borrow().clone().ok_or_else(failure)?;
+        let previous = context.GetDocumentMgr()?;
+        let events: ITfThreadMgrEventSink = tip.to_interface();
+        let keys = tip.to_interface();
+        let server = serve(&[Reply::Compose, Reply::CommitAndCompose])?;
+        press(&tip, &context, vk)?;
+        // RichEdit terminates its mark during SetFocus. The unsubmitted
+        // starter in the old control and the one in the new control each
+        // need a clean conversion session.
+        let mut listener = listener()?;
+        let fresh = std::thread::spawn(move || {
+            for step in [Reply::CommitConverted, Reply::Commit] {
+                let pipe = accept_session(&mut listener)?;
+                reply_to_session(pipe, [step], None, &[SpecialKey::None])?;
+            }
+            Ok(())
+        });
+        let old = context.clone();
+        ON_CHANGE.set(Some(Box::new(move || {
+            deliver(&keys, &old, vk)?
+                .then_some(())
+                .ok_or_else(failure)?;
+            let _ = SetFocus(Some(other));
+            check_richedit_modules()?;
+            let focused = manager.GetFocus()?;
+            let target = focused.GetTop()?;
+            if target.GetActiveView()?.GetWnd()? != other {
+                return Err(failure());
+            }
+            events.OnSetFocus(&focused, &previous)?;
+            deliver(&keys, &target, vk)?
+                .then_some(())
+                .ok_or_else(|| Error::new(E_FAIL, "starter passed in the new RichEdit"))
+        })));
+        press(&tip, &context, vk)?;
+        CHANGE_RESULT.take().ok_or_else(failure)??;
+        finish(server)?;
+        wait_for_text(other, "字");
+        wait_for_text(edit, "字じ漢字");
+        tip.shared.client.borrow_mut().take();
+        finish(fresh)?;
+        Ok(())
+    })
+}
+
+#[test]
+#[ignore = "TSF RichEdit loads the system IME"]
+fn reentry_richedit_mode_switch_then_direct_input() -> Result<()> {
+    use windows::Win32::UI::{
+        Controls::{EM_REPLACESEL, RichEdit::*},
+        Shell::SetWindowSubclass,
+    };
+    with_richedit(|parent, edit, tip, context| unsafe {
+        SetWindowSubclass(parent, Some(rich_edit_notification), 1, 0).ok()?;
+        SendMessageW(
+            edit,
+            EM_SETEVENTMASK,
+            None,
+            Some(LPARAM(ENM_CHANGE as isize)),
+        );
+        let manager = tip.shared.manager.borrow().clone().ok_or_else(failure)?;
+        let mode = input_mode::Mode::attach(&manager, tip.shared.tid.get(), &tip.to_interface())?;
+        let switch = mode.switch();
+        let original = switch.japanese();
+        tip.mode.replace(Some(mode));
+        switch.apply(tip.shared.tid.get(), input_mode::Command::On)?;
+        let server = serve(&[Reply::Compose, Reply::CommitAndCompose, Reply::Commit])?;
+        let vk = starter()?;
+        press(&tip, &context, vk)?;
+        let keys = tip.to_interface();
+        let target = context.clone();
+        ON_CHANGE.set(Some(Box::new(move || {
+            for key in [vk, 0x1a] {
+                deliver(&keys, &target, key)?
+                    .then_some(())
+                    .ok_or_else(failure)?;
+            }
+            if !deliver(&keys, &target, vk)? {
+                // RichEdit inserts passed characters at its current selection.
+                SendMessageW(
+                    edit,
+                    EM_REPLACESEL,
+                    None,
+                    Some(LPARAM(windows::core::w!("x").as_ptr() as isize)),
+                );
+                return Err(Error::new(E_FAIL, "direct input overtook the mode switch"));
+            }
+            Ok(())
+        })));
+        press(&tip, &context, vk)?;
+        let nested = CHANGE_RESULT.take().ok_or_else(failure)?;
+        let direct = !switch.japanese();
+        switch.apply(
+            tip.shared.tid.get(),
+            if original {
+                input_mode::Command::On
+            } else {
+                input_mode::Command::Off
+            },
+        )?;
+        nested?;
+        assert!(direct);
+        wait_for_text(edit, "AB字字");
+        assert!(IsWindowVisible(LAST_HINT.get()).as_bool());
+        finish(server)
     })
 }
 
@@ -1943,7 +3617,7 @@ fn secure_mode_uses_the_connected_engine_and_passes_keys_on_loss() -> Result<()>
 #[test]
 fn uiless_host_consumes_an_offline_starter_without_a_tooltip() -> Result<()> {
     with_host(|host| {
-        host.tip.show_mode_hint.set(false);
+        host.tip.shared.show_mode_hint.set(false);
         let vk = starter()?;
         assert!(host.test(vk)? && host.down(vk)?);
         host.check_up(vk, true)?;

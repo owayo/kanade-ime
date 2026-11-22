@@ -11,6 +11,16 @@ pub(super) enum Command {
     Off,
 }
 
+impl Command {
+    pub(super) fn japanese(self, current: bool) -> bool {
+        match self {
+            Self::On => true,
+            Self::Off => false,
+            Self::Toggle => !current,
+        }
+    }
+}
+
 struct Binding {
     id: GUID,
     key: TF_PRESERVEDKEY,
@@ -84,11 +94,7 @@ impl Switch {
     }
 
     pub(super) fn apply(&self, tid: u32, command: Command) -> Result<()> {
-        let on = match command {
-            Command::On => true,
-            Command::Off => false,
-            Command::Toggle => !self.japanese(),
-        };
+        let on = command.japanese(self.japanese());
         if on && !value(&self.conversion).is_some_and(|v| v as u32 & TF_CONVERSIONMODE_NATIVE != 0)
         {
             unsafe {
@@ -179,7 +185,7 @@ mod tests {
             let keys: ITfKeyEventSink = tip.to_interface();
             tip.shared.tid.set(tid);
             let mode = Mode::attach(&thread, tid, &tip.to_interface())?;
-            tip.japanese.set(mode.japanese());
+            tip.shared.japanese.set(mode.japanese());
             *tip.mode.borrow_mut() = Some(mode);
             let slots = thread.cast::<ITfCompartmentMgr>()?;
             let open = slots.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)?;

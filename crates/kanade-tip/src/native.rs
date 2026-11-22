@@ -6,7 +6,7 @@ use kanade_ipc::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     ffi::c_void,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -120,6 +120,78 @@ enum Connection {
     HandshakeFailed,
 }
 
+// One synchronous client operation, including the TSF callbacks and the ACK.
+struct Editing {
+    context: ITfContext,
+    destination: RefCell<Option<ITfDocumentMgr>>,
+    manager: RefCell<Option<ITfDocumentMgr>>,
+    policy: Cell<ipc::KeyPolicySummary>,
+    field: FieldScope,
+    app_privacy: Privacy,
+    focus_epoch: u64,
+    leaving: Cell<bool>,
+    terminated: Cell<bool>,
+}
+
+impl Editing {
+    fn active(&self) -> bool {
+        !self.leaving.get() && !self.terminated.get()
+    }
+    fn owns(&self, pending: &Pending) -> bool {
+        pending.focus_epoch == self.focus_epoch
+            && pending.action.context().is_none_or(|c| c == &self.context)
+    }
+}
+
+// A claimed key has not been sent to the engine yet. Its field and focus
+// lifetime travel with it, even when the current client has to be replaced.
+struct Pending {
+    focus_epoch: u64,
+    input_rect: RECT,
+    action: Action,
+}
+
+enum Delivery {
+    Passed,
+    Down,
+    Starter,
+    Queued,
+}
+
+enum Action {
+    Key {
+        context: ITfContext,
+        key: Key,
+        starter: bool,
+        field: FieldScope,
+    },
+    Mode {
+        context: Option<ITfContext>,
+        tip: windows_core::ComObject<Tip>,
+        command: input_mode::Command,
+    },
+    Choose {
+        context: ITfContext,
+        handle: ipc::CandidateHandle,
+    },
+    Poll {
+        context: ITfContext,
+        revision: u64,
+        expired: bool,
+    },
+}
+
+impl Action {
+    fn context(&self) -> Option<&ITfContext> {
+        match self {
+            Self::Key { context, .. }
+            | Self::Choose { context, .. }
+            | Self::Poll { context, .. } => Some(context),
+            Self::Mode { context, .. } => context.as_ref(),
+        }
+    }
+}
+
 struct Shared {
     open_pipe: fn(bool) -> Option<Pipe>,
     observed: RefCell<ipc::Context>,
@@ -132,7 +204,20 @@ struct Shared {
     tested: Cell<Option<TestedKey>>,
     eaten_keys: RefCell<BTreeSet<usize>>,
     client: RefCell<Option<Client<SessionPipe>>>,
+    editing: RefCell<Option<Rc<Editing>>>,
+    departing: RefCell<Option<Rc<Editing>>>,
+    pending: RefCell<VecDeque<Pending>>,
+    // Scope and focus queries while delivering a starter can reenter before
+    // its reply supplies the new key policy.
+    dispatching_starter: RefCell<Option<(u64, ITfContext)>>,
+    draining: Cell<bool>,
+    mode_queued: Cell<bool>,
+    japanese: Cell<bool>,
+    focus_epoch: Cell<u64>,
+    show_mode_hint: Cell<bool>,
     composition: RefCell<Option<ITfComposition>>,
+    composition_generation: Cell<u64>,
+    starting_composition: Cell<bool>,
     context: RefCell<Option<ITfContext>>,
     manager: RefCell<Option<ITfThreadMgr>>,
     tid: Cell<u32>,
@@ -158,7 +243,18 @@ impl Shared {
             tested: Cell::new(None),
             eaten_keys: RefCell::new(BTreeSet::new()),
             client: RefCell::new(None),
+            editing: RefCell::new(None),
+            departing: RefCell::new(None),
+            pending: RefCell::new(VecDeque::new()),
+            dispatching_starter: RefCell::new(None),
+            draining: Cell::new(false),
+            mode_queued: Cell::new(false),
+            japanese: Cell::new(false),
+            focus_epoch: Cell::new(0),
+            show_mode_hint: Cell::new(true),
             composition: RefCell::new(None),
+            composition_generation: Cell::new(0),
+            starting_composition: Cell::new(false),
             context: RefCell::new(None),
             manager: RefCell::new(None),
             tid: Cell::new(0),
@@ -174,6 +270,9 @@ impl Shared {
     /// Gives the client a connection when it has none. An existing client is
     /// kept: it may hold a composition that the new session will restore.
     fn connect(&self, allow_start: bool) -> Connection {
+        if self.editing.borrow().is_some() {
+            return Connection::Unchanged;
+        }
         let Ok(mut slot) = self.client.try_borrow_mut() else {
             return Connection::Unavailable;
         };
@@ -196,25 +295,338 @@ impl Shared {
             Connection::HandshakeFailed
         }
     }
-    fn put_client(&self, client: Client<SessionPipe>) {
-        if !client.edit_rejected()
-            && let Ok(mut slot) = self.client.try_borrow_mut()
+    fn with_client<R>(
+        self: &Rc<Self>,
+        context: &ITfContext,
+        operation: impl FnOnce(&mut Client<SessionPipe>, &mut NativeDocument<'_>) -> R,
+    ) -> Option<R> {
+        if self.editing.borrow().is_some() {
+            return None;
+        }
+        let mut client = self.client.try_borrow_mut().ok()?.take()?;
+        let departure = self.departing.borrow().clone();
+        let editing = Rc::new(Editing {
+            context: context.clone(),
+            destination: RefCell::new(
+                departure
+                    .as_ref()
+                    .and_then(|e| e.destination.borrow().clone()),
+            ),
+            manager: RefCell::new(None),
+            policy: Cell::new(client.key_policy()),
+            field: self.field.get(),
+            app_privacy: client.privacy_for_app(&self.observed.borrow().app),
+            focus_epoch: departure
+                .as_ref()
+                .map_or(self.focus_epoch.get(), |e| e.focus_epoch),
+            leaving: Cell::new(departure.is_some()),
+            terminated: Cell::new(false),
+        });
+        *self.editing.borrow_mut() = Some(editing.clone());
+        self.context.replace(Some(context.clone()));
+        let manager = match departure {
+            Some(e) => e.manager.borrow().clone(),
+            None => unsafe { context.GetDocumentMgr().ok() },
+        };
+        editing.manager.replace(manager);
+        let mut doc = NativeDocument {
+            accept_displayed: false,
+            editing: &editing,
+            shared: self.clone(),
+        };
+        let result = operation(&mut client, &mut doc);
+        if !editing.leaving.get() && !self.pending.borrow().is_empty() && !self.focused(context) {
+            editing.leaving.set(true);
+        }
+        if editing.terminated.get() || client.edit_rejected() {
+            drop(client);
+            self.clear_composition();
+        } else {
+            self.client.replace(Some(client));
+        }
+        if !self.japanese.get() {
+            self.finish_document(&editing);
+        }
+        if editing.leaving.get() {
+            self.departing.replace(Some(editing.clone()));
+        }
+        self.editing.borrow_mut().take();
+        self.drain();
+        Some(result)
+    }
+
+    fn finish_document(self: &Rc<Self>, editing: &Rc<Editing>) {
+        self.editing.replace(Some(editing.clone()));
+        let client = self.client.borrow_mut().take();
+        if let Some(mut client) = client
+            && !editing.terminated.get()
+            && editing.attached()
         {
-            *slot = Some(client);
+            let mut doc = NativeDocument {
+                accept_displayed: false,
+                editing,
+                shared: self.clone(),
+            };
+            refresh_scope(self, &editing.context, editing.field, false);
+            if editing.attached() {
+                client.finish(&mut doc);
+            }
+        }
+        self.clear_document(editing.leaving.get());
+        self.editing.take();
+    }
+
+    fn active_edit(&self) -> Option<Rc<Editing>> {
+        self.editing
+            .borrow()
+            .clone()
+            .or_else(|| self.departing.borrow().clone())
+    }
+
+    fn busy(&self) -> bool {
+        self.draining.get() || self.editing.borrow().is_some()
+    }
+
+    fn queue_epoch(&self, context: Option<&ITfContext>) -> u64 {
+        self.active_edit()
+            .filter(|e| {
+                e.leaving.get()
+                    && Some(&e.context) == context
+                    && (e.destination.borrow().is_none()
+                        || *e.destination.borrow() != *e.manager.borrow())
+            })
+            .map_or(self.focus_epoch.get(), |e| e.focus_epoch)
+    }
+
+    fn has_queued_starter(&self, context: &ITfContext) -> bool {
+        let epoch = self.queue_epoch(Some(context));
+        self.dispatching_starter.borrow().as_ref()
+            .is_some_and(|(e, c)| *e == epoch && c == context)
+            || self.pending.borrow().iter().any(|p| {
+                p.focus_epoch == epoch
+                    && matches!(&p.action, Action::Key { context: c, starter: true, .. } if c == context)
+            })
+    }
+
+    fn enqueue(&self, action: Action) {
+        if matches!(action, Action::Mode { .. }) {
+            self.mode_queued.set(true);
+        }
+        let epoch = self.queue_epoch(action.context());
+        let input_rect = mode_hint::input_rect();
+        self.pending.borrow_mut().push_back(Pending {
+            focus_epoch: epoch,
+            input_rect,
+            action,
+        });
+    }
+
+    fn focused(&self, context: &ITfContext) -> bool {
+        let manager = self.manager.borrow().clone();
+        unsafe {
+            context.GetDocumentMgr().is_ok_and(|document| {
+                document.GetTop().as_ref() == Ok(context)
+                    && manager.is_none_or(|m| m.GetFocus().as_ref() == Ok(&document))
+            })
         }
     }
-    fn composition_terminated(&self, composition: Ref<ITfComposition>) {
+
+    fn deliverable(&self, context: Option<&ITfContext>, epoch: u64) -> bool {
+        let departure = self.departing.borrow().clone();
+        match departure {
+            Some(e) => {
+                e.focus_epoch == epoch && context.is_none_or(|c| c == &e.context) && e.attached()
+            }
+            None => self.focus_epoch.get() == epoch && context.is_none_or(|c| self.focused(c)),
+        }
+    }
+
+    fn drain(self: &Rc<Self>) {
+        if self.draining.replace(true) {
+            return;
+        }
+        let mut discard_location = None;
+        loop {
+            self.dispatching_starter.take();
+            let departure = self.departing.borrow().clone();
+            let next = if let Some(e) = &departure {
+                // Keep the departing session until its last queued action has
+                // been acknowledged. New focus epochs wait for their own client.
+                let mut queue = self.pending.borrow_mut();
+                let next = queue
+                    .iter()
+                    .position(|p| e.owns(p))
+                    .and_then(|i| queue.remove(i));
+                drop(queue);
+                if next.is_none() {
+                    self.finish_document(e);
+                    if !self.pending.borrow().iter().any(|p| e.owns(p)) {
+                        self.departing.take();
+                    }
+                    continue;
+                }
+                next
+            } else {
+                self.pending.borrow_mut().pop_front()
+            };
+            let Some(pending) = next else {
+                self.mode_queued.set(false);
+                if let Some(input_rect) = discard_location.take() {
+                    // Showing the hint can itself call back into the key sink.
+                    self.report_discard(input_rect);
+                    continue;
+                }
+                break;
+            };
+            let context = pending.action.context();
+            if let Action::Key {
+                context,
+                starter: true,
+                ..
+            } = &pending.action
+            {
+                self.dispatching_starter
+                    .replace(Some((pending.focus_epoch, context.clone())));
+            }
+            if !self.deliverable(context, pending.focus_epoch) {
+                if !matches!(pending.action, Action::Poll { .. }) {
+                    discard_location.get_or_insert(pending.input_rect);
+                }
+                continue;
+            }
+            if let Action::Key { context, .. } = &pending.action
+                && self.context.borrow().as_ref().is_some_and(|c| c != context)
+            {
+                self.pending.borrow_mut().push_front(pending);
+                self.end_session();
+                continue;
+            }
+            let applied = match pending.action {
+                Action::Mode {
+                    tip,
+                    command,
+                    context,
+                } => tip.apply_input_mode(command, context.as_ref()).is_ok(),
+                Action::Key {
+                    context,
+                    key,
+                    starter,
+                    field,
+                } => {
+                    self.japanese.get()
+                        && self.queued_key(&context, pending.focus_epoch, key, starter, field)
+                }
+                Action::Choose { context, handle } => {
+                    self.context.borrow().as_ref() == Some(&context)
+                        && self
+                            .page
+                            .borrow()
+                            .items
+                            .iter()
+                            .any(|c| c.handle == Some(handle))
+                        && self.choose_now(handle)
+                }
+                Action::Poll {
+                    context,
+                    revision,
+                    expired,
+                } => {
+                    if departure.is_none()
+                        && self.context.borrow().as_ref() == Some(&context)
+                        && self.page.borrow().candidate_revision == revision
+                    {
+                        self.poll_now(expired);
+                    }
+                    true
+                }
+            };
+            if !applied {
+                discard_location.get_or_insert(pending.input_rect);
+            }
+        }
+        self.draining.set(false);
+    }
+
+    fn queued_key(
+        self: &Rc<Self>,
+        context: &ITfContext,
+        epoch: u64,
+        key: Key,
+        starter: bool,
+        limit: FieldScope,
+    ) -> bool {
+        // A refused read lock must not tear down an acknowledged mark. Check
+        // scope before connecting, then use the current Welcome to read context.
+        let previous = self.field.get();
+        let Some(field) = try_refresh_scope(self, context, limit, false) else {
+            self.field.set(previous);
+            return false;
+        };
+        if !self.deliverable(Some(context), epoch) {
+            return false;
+        }
+        if field == FieldScope::Bypass {
+            self.suspend_secure();
+            return false;
+        }
+        self.connect(starter && self.outage_scope());
+        if self.can_start_offline() {
+            if !self.outage_scope() || self.departing.borrow().is_some() {
+                return false;
+            }
+            self.report_outage(context);
+            return true;
+        }
+        let Some(field) = try_refresh_scope(self, context, field, true) else {
+            self.field.set(field);
+            return false;
+        };
+        if !self.deliverable(Some(context), epoch) {
+            return false;
+        }
+        if field == FieldScope::Bypass {
+            self.suspend_secure();
+            return false;
+        }
+        self.send_key(context, key, Delivery::Queued) == Some(true)
+    }
+
+    fn report_discard(&self, input_rect: RECT) {
+        if self.show_mode_hint.get()
+            && self.ui_native.get()
+            && let Ok(hint) = mode_hint::Hint::for_discard(input_rect)
+        {
+            self.mode_hint.replace(Some(hint));
+        }
+    }
+
+    fn composition_terminated(&self, composition: Ref<ITfComposition>, generation: Option<u64>) {
         let Some(ended) = composition.as_ref() else {
             return;
         };
-        if self.composition.borrow().as_ref() != Some(ended) {
+        if generation.is_some_and(|g| g != self.composition_generation.get())
+            || (self.composition.borrow().as_ref() != Some(ended)
+                && !(generation.is_some() && self.starting_composition.get()))
+        {
             return;
         }
-        self.composition.borrow_mut().take();
         // The host already decided what stays in the document.
+        if let Some(editing) = self.editing.borrow().as_ref() {
+            editing.terminated.set(true);
+            return;
+        }
         self.client.borrow_mut().take();
+        self.clear_composition();
+    }
+    fn composition_was_terminated(&self) -> bool {
+        self.editing
+            .borrow()
+            .as_ref()
+            .is_some_and(|editing| editing.terminated.get())
+    }
+    fn clear_composition(&self) {
+        self.composition.borrow_mut().take();
         *self.preedit.borrow_mut() = Preedit::default();
-        *self.page.borrow_mut() = ipc::CandidatePage::default();
         self.hide();
     }
     fn outage_scope(&self) -> bool {
@@ -222,11 +634,14 @@ impl Shared {
     }
     /// Only an idle, disconnected session can drop a starter.
     fn can_start_offline(&self) -> bool {
-        self.client
-            .try_borrow()
-            .is_ok_and(|slot| slot.as_ref().is_none_or(Client::can_start_offline))
+        self.editing.borrow().is_none()
+            && self
+                .client
+                .try_borrow()
+                .is_ok_and(|slot| slot.as_ref().is_none_or(Client::can_start_offline))
     }
     fn hide(&self) {
+        *self.page.borrow_mut() = ipc::CandidatePage::default();
         self.stop_refinement();
         let element = self
             .ui_element
@@ -246,21 +661,39 @@ impl Shared {
         }
     }
     fn reset(self: &Rc<Self>) {
+        self.focus_epoch.set(self.focus_epoch.get().wrapping_add(1));
+        if let Some(edit) = self.active_edit() {
+            edit.destination.take();
+        }
+        self.end_session();
+    }
+
+    fn end_session(self: &Rc<Self>) {
+        if let Some(editing) = self.active_edit() {
+            editing.leaving.set(true);
+            return;
+        }
+        let context = self.context.borrow().clone();
+        if let Some(context) = context
+            && self
+                .with_client(&context, |_, doc| doc.editing.leaving.set(true))
+                .is_some()
+        {
+            return;
+        }
+        if let Ok(mut client) = self.client.try_borrow_mut() {
+            client.take();
+        }
+        self.clear_document(true);
+    }
+    fn clear_document(&self, focus_ended: bool) {
         if let Ok(mut hint) = self.mode_hint.try_borrow_mut() {
             hint.take();
         }
-        if let Ok(mut keys) = self.eaten_keys.try_borrow_mut() {
+        if focus_ended && let Ok(mut keys) = self.eaten_keys.try_borrow_mut() {
             keys.clear();
         }
         self.hide();
-        let client = self.client.try_borrow_mut().ok().and_then(|mut c| c.take());
-        let context = self.context.try_borrow().ok().and_then(|c| c.clone());
-        if let (Some(mut client), Some(context)) = (client, context) {
-            client.finish(&mut NativeDocument {
-                shared: self.clone(),
-                context,
-            });
-        }
         if let Ok(mut c) = self.composition.try_borrow_mut() {
             c.take();
         }
@@ -273,9 +706,6 @@ impl Shared {
         }
         if let Ok(mut observed) = self.observed.try_borrow_mut() {
             *observed = ipc::Context::default();
-        }
-        if let Ok(mut page) = self.page.try_borrow_mut() {
-            *page = ipc::CandidatePage::default();
         }
     }
     fn suspend_secure(&self) {
@@ -298,9 +728,6 @@ impl Shared {
         }
         if let Ok(mut observed) = self.observed.try_borrow_mut() {
             *observed = ipc::Context::default();
-        }
-        if let Ok(mut page) = self.page.try_borrow_mut() {
-            *page = ipc::CandidatePage::default();
         }
     }
     fn show(self: &Rc<Self>, page: &ipc::CandidatePage) {
@@ -385,6 +812,21 @@ impl Shared {
         }
     }
     fn poll_refinement(self: &Rc<Self>, expired: bool) {
+        if self.busy() {
+            let revision = self.page.borrow().candidate_revision;
+            if let Some(context) = self.context.borrow().clone() {
+                self.enqueue(Action::Poll {
+                    context,
+                    revision,
+                    expired,
+                });
+            }
+        } else {
+            self.poll_now(expired);
+        }
+    }
+
+    fn poll_now(self: &Rc<Self>, expired: bool) {
         let context = self.context.try_borrow().ok().and_then(|c| c.clone());
         let focused = self
             .manager
@@ -398,7 +840,12 @@ impl Shared {
             return;
         };
         // Query input scope only: candidate polling never reads surrounding text.
-        if refresh_scope(self, &context, FieldScope::Ordinary, false) == FieldScope::Bypass {
+        let epoch = self.focus_epoch.get();
+        let field = refresh_scope(self, &context, FieldScope::Ordinary, false);
+        if epoch != self.focus_epoch.get() {
+            return;
+        }
+        if field == FieldScope::Bypass {
             self.suspend_secure();
             return;
         }
@@ -415,55 +862,65 @@ impl Shared {
             self.stop_refinement();
             return;
         };
-        let client = self.client.try_borrow_mut().ok().and_then(|mut c| c.take());
-        let Some(mut client) = client else {
-            if expired {
-                page.mark_refinement_timeout();
-                self.show(&page);
-            }
-            return;
-        };
-        let update = client.poll_with_preview(
-            &page,
-            &mut NativeDocument {
-                shared: self.clone(),
-                context,
-            },
-        );
-        self.put_client(client);
-        match update {
-            Ok(Some(page)) => self.show(&page),
-            Ok(None) if expired => {
-                page.mark_refinement_timeout();
-                self.show(&page);
-            }
-            Ok(None) => {}
-            Err(_) => self.hide(),
+        if self
+            .with_client(&context, |client, doc| {
+                match client.poll_with_preview(&page, doc) {
+                    Ok(Some(page)) => self.show(&page),
+                    Ok(None) if expired => {
+                        page.mark_refinement_timeout();
+                        self.show(&page);
+                    }
+                    Ok(None) => {}
+                    Err(_) => self.hide(),
+                }
+            })
+            .is_none()
+            && expired
+        {
+            page.mark_refinement_timeout();
+            self.show(&page);
         }
     }
     fn choose(self: &Rc<Self>, handle: ipc::CandidateHandle) {
+        if self.busy() {
+            let context = self.context.borrow().clone();
+            if let Some(context) = context {
+                self.enqueue(Action::Choose { context, handle });
+            } else {
+                self.report_discard(mode_hint::input_rect());
+            }
+        } else if !self.choose_now(handle) {
+            self.report_discard(mode_hint::input_rect());
+        }
+    }
+
+    fn choose_now(self: &Rc<Self>, handle: ipc::CandidateHandle) -> bool {
         self.stop_refinement();
         let context = self.context.try_borrow().ok().and_then(|c| c.clone());
         let Some(context) = context else {
             self.suspend_secure();
-            return;
+            return false;
         };
-        if refresh_scope(self, &context, FieldScope::Ordinary, false) == FieldScope::Bypass {
+        let epoch = self
+            .departing
+            .borrow()
+            .as_ref()
+            .map_or(self.focus_epoch.get(), |e| e.focus_epoch);
+        let field = refresh_scope(self, &context, FieldScope::Ordinary, false);
+        if !self.deliverable(Some(&context), epoch) {
+            return false;
+        }
+        if field == FieldScope::Bypass {
             self.suspend_secure();
-            return;
+            return false;
         }
-        let context = self.context.try_borrow().ok().and_then(|c| c.clone());
-        let client = self.client.try_borrow_mut().ok().and_then(|mut c| c.take());
-        if let (Some(context), Some(mut client)) = (context, client) {
-            client.select(
-                handle,
-                &mut NativeDocument {
-                    shared: self.clone(),
-                    context,
-                },
-            );
-            self.put_client(client);
-        }
+        self.with_client(&context, |client, doc| {
+            client.is_connected()
+                && !client.is_held()
+                && client.select(handle, doc)
+                && !client.edit_rejected()
+                && !client.is_held()
+        }) == Some(true)
     }
 }
 #[implement(
@@ -479,8 +936,6 @@ struct Tip {
     sink_cookie: Cell<Option<u32>>,
     mode: RefCell<Option<input_mode::Mode>>,
     button: RefCell<Option<language_bar::Item>>,
-    japanese: Cell<bool>,
-    show_mode_hint: Cell<bool>,
     _guard: ModuleGuard,
 }
 impl Tip {
@@ -490,10 +945,47 @@ impl Tip {
             sink_cookie: Cell::new(None),
             mode: RefCell::new(None),
             button: RefCell::new(None),
-            japanese: Cell::new(false),
-            show_mode_hint: Cell::new(true),
             _guard: ModuleGuard::new(),
         }
+    }
+    fn sync_mode(&self) {
+        if let Some(mode) = self.mode.borrow().as_ref() {
+            let japanese = mode.japanese();
+            if self.shared.japanese.replace(japanese)
+                && !japanese
+                && self.shared.editing.borrow().is_none()
+            {
+                // Finish at the OFF command, even if an ON follows in the same queue.
+                let context = self.shared.context.borrow().clone();
+                if let Some(context) = context {
+                    self.shared.with_client(&context, |_, _| ());
+                }
+            }
+        }
+        self.sync_button();
+    }
+    fn apply_input_mode(
+        &self,
+        command: input_mode::Command,
+        context: Option<&ITfContext>,
+    ) -> Result<()> {
+        if let Some(mode) = self.mode.borrow().as_ref() {
+            mode.apply(self.shared.tid.get(), command)?;
+        }
+        self.sync_mode();
+        if self.shared.show_mode_hint.get()
+            && let Some(context) = context
+        {
+            let hint = mode_hint::Hint::at_selection(
+                context,
+                self.shared.tid.get(),
+                self.shared.japanese.get(),
+            );
+            if let Ok(mut previous) = self.shared.mode_hint.try_borrow_mut() {
+                *previous = hint.ok();
+            }
+        }
+        Ok(())
     }
     /// The taskbar button, when this thread has one. The indicator calls
     /// back into the button, so the caller holds no borrow of the slot.
@@ -557,7 +1049,8 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
     fn ActivateEx(&self, manager: Ref<ITfThreadMgr>, tid: u32, flags: u32) -> Result<()> {
         let manager = manager.ok()?;
         self.shared.secure.set(flags & TF_TMAE_SECUREMODE != 0);
-        self.show_mode_hint
+        self.shared
+            .show_mode_hint
             .set(flags & (TF_TMAE_UIELEMENTENABLEDONLY | TF_TMAE_SECUREMODE) == 0);
         if let Ok(mut ui) = self.shared.ui_manager.try_borrow_mut() {
             *ui = manager.cast::<ITfUIElementMgr>().ok();
@@ -594,12 +1087,12 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
                 let _ = unsafe { keys.UnadviseKeyEventSink(tid) };
             })?;
         self.sink_cookie.set(Some(cookie));
-        self.japanese.set(mode.japanese());
+        self.shared.japanese.set(mode.japanese());
         *self.mode.borrow_mut() = Some(mode);
         if let Ok(mut slot) = self.button.try_borrow_mut() {
             *slot = button;
         }
-        if self.japanese.get() {
+        if self.shared.japanese.get() {
             self.shared.connect(false);
         }
         Ok(())
@@ -607,19 +1100,18 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
 }
 impl ITfCompartmentEventSink_Impl for Tip_Impl {
     fn OnChange(&self, _: *const GUID) -> Result<()> {
-        if let Some(mode) = self.mode.borrow().as_ref() {
-            let japanese = mode.japanese();
-            if self.japanese.replace(japanese) && !japanese {
-                self.shared.reset();
-            }
-        }
-        self.sync_button();
+        self.sync_mode();
         Ok(())
     }
 }
 impl ITfKeyEventSink_Impl for Tip_Impl {
     fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
         if foreground.as_bool() {
+            if let Some(edit) = self.shared.active_edit().filter(|e| e.leaving.get()) {
+                let manager = self.shared.manager.borrow().clone();
+                edit.destination
+                    .replace(manager.and_then(|m| unsafe { m.GetFocus().ok() }));
+            }
             // The taskbar theme can change while another thread has the focus.
             self.sync_button();
         } else {
@@ -629,15 +1121,33 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
     }
     fn OnTestKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
         let previous = self.shared.tested.take();
-        self.refresh_button();
+        if !self.shared.busy() {
+            self.refresh_button();
+        }
         if input_mode::physical(w.0).is_some() {
             return Ok(true.into());
         }
-        if !self.japanese.get() {
+        if !self.shared.japanese.get() && !self.shared.mode_queued.get() {
             return Ok(false.into());
         }
         let context = context.ok()?;
         let message = KeyMessage::current(context, w, l);
+        if self.shared.busy() {
+            let key = translate(w, l, false);
+            let (owns, field) = key.as_ref().map_or((false, FieldScope::Bypass), |k| {
+                self.nested_key(context, w, k)
+            });
+            self.shared.tested.set(Some(TestedKey {
+                message,
+                decision: if owns {
+                    KeyTest::Engine
+                } else {
+                    KeyTest::Passed
+                },
+                field,
+            }));
+            return Ok(owns.into());
+        }
         if let Some(tested) = previous.filter(|prior| prior.message == message) {
             self.shared.tested.set(Some(tested));
             return Ok((tested.decision != KeyTest::Passed).into());
@@ -682,7 +1192,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
                 if refresh_scope(&self.shared, context, field, true) == FieldScope::Bypass {
                     self.shared.suspend_secure();
                 } else {
-                    self.send_key(context, key, true, false);
+                    self.shared.send_key(context, key, Delivery::Passed);
                 }
             }
             KeyTest::Passed
@@ -705,7 +1215,9 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
     }
     fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
         let previous = self.shared.tested.take();
-        self.refresh_button();
+        if !self.shared.busy() {
+            self.refresh_button();
+        }
         if let Some(command) = input_mode::physical(w.0) {
             if l.0 & (1 << 30) == 0 {
                 self.set_input_mode(command, context.as_ref())?;
@@ -713,7 +1225,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             self.shared.eaten_keys.borrow_mut().insert(w.0);
             return Ok(true.into());
         }
-        if !self.japanese.get() {
+        if !self.shared.japanese.get() && !self.shared.mode_queued.get() {
             return Ok(false.into());
         }
         let context = context.ok()?;
@@ -722,7 +1234,23 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         if test.is_some_and(|key| key.decision == KeyTest::Passed) {
             return Ok(false.into());
         }
-        let consumed = self.process_key(context, w, l, test);
+        let consumed = if self.shared.busy() {
+            translate(w, l, false).is_some_and(|key| {
+                let (owns, field) = self.nested_key(context, w, &key);
+                if !owns && test.is_none() {
+                    return false;
+                }
+                self.shared.enqueue(Action::Key {
+                    context: context.clone(),
+                    starter: is_starter(w, &key),
+                    key,
+                    field: test.map_or(field, |t| t.field.min(field)),
+                });
+                true
+            })
+        } else {
+            self.process_key(context, w, l, test)
+        };
         if w.0 <= 255
             && let Ok(mut keys) = self.shared.eaten_keys.try_borrow_mut()
         {
@@ -752,26 +1280,70 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
     }
 }
 impl Tip_Impl {
+    fn nested_key(&self, context: &ITfContext, w: WPARAM, key: &Key) -> (bool, FieldScope) {
+        let same = self.shared.context.borrow().as_ref() == Some(context);
+        let editing = self.shared.active_edit().filter(|e| e.context == *context);
+        let field = if let Some(edit) = &editing {
+            edit.field
+        } else {
+            // A different store may already grant reads. If it is still locked,
+            // require a successful scope read at delivery.
+            query_scope(
+                None,
+                self.shared.tid.get(),
+                context,
+                FieldScope::Ordinary,
+                false,
+            )
+            .unwrap_or(FieldScope::Private)
+        };
+        let owns = if field == FieldScope::Bypass {
+            false
+        } else if self.shared.mode_queued.get() {
+            true
+        } else if self.shared.has_queued_starter(context) {
+            ipc::KeyPolicySummary {
+                enabled: true,
+                composing: true,
+                ..Default::default()
+            }
+            .would_consume(key)
+        } else {
+            match editing {
+                Some(e) if e.active() => e.policy.get().would_consume(key),
+                None if same => self
+                    .shared
+                    .client
+                    .try_borrow()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref()
+                            .map(|client| client.would_consume(key, Privacy::Unknown))
+                    })
+                    .unwrap_or_else(|| is_starter(w, key)),
+                _ => is_starter(w, key),
+            }
+        };
+        (owns, field)
+    }
+
     fn set_input_mode(
         &self,
         command: input_mode::Command,
         context: Option<&ITfContext>,
     ) -> Result<()> {
-        if let Some(mode) = self.mode.borrow().as_ref() {
-            mode.apply(self.shared.tid.get(), command)?;
+        if self.shared.busy() {
+            self.shared.enqueue(Action::Mode {
+                context: context.cloned(),
+                tip: self.to_object(),
+                command,
+            });
+            Ok(())
+        } else {
+            self.apply_input_mode(command, context)
         }
-        self.OnChange(std::ptr::null())?;
-        if self.show_mode_hint.get()
-            && let Some(context) = context
-        {
-            let hint =
-                mode_hint::Hint::at_selection(context, self.shared.tid.get(), self.japanese.get());
-            if let Ok(mut previous) = self.shared.mode_hint.try_borrow_mut() {
-                *previous = hint.ok();
-            }
-        }
-        Ok(())
     }
+
     fn process_key(
         &self,
         context: &ITfContext,
@@ -807,7 +1379,7 @@ impl Tip_Impl {
         {
             // Test already waited for Hello. Check only for a missing pipe.
             drop((self.shared.open_pipe)(true));
-            self.report_outage(context);
+            self.shared.report_outage(context);
             return true;
         }
         let connection = self.shared.connect(starter && self.shared.outage_scope());
@@ -824,69 +1396,74 @@ impl Tip_Impl {
         let eligible = starter && self.shared.outage_scope();
         if self.shared.can_start_offline() {
             if eligible {
-                self.report_outage(context);
+                self.shared.report_outage(context);
             }
             return claimed || eligible;
         }
+        let delivery = if eligible {
+            Delivery::Starter
+        } else {
+            Delivery::Down
+        };
         let consumed = self
-            .send_key(context, key, false, eligible)
+            .shared
+            .send_key(context, key, delivery)
             .unwrap_or(claimed);
         consumed || offline_claim || (claimed && connection == Connection::Attached)
     }
+}
+impl Shared {
     fn send_key(
-        &self,
+        self: &Rc<Self>,
         context: &ITfContext,
         key: Key,
-        passed: bool,
-        eligible: bool,
+        delivery: Delivery,
     ) -> Option<bool> {
-        if let Ok(mut saved) = self.shared.context.try_borrow_mut() {
-            *saved = Some(context.clone());
-        }
-        let observed = self.shared.observed.try_borrow().ok()?.clone();
-        let mut client = self
-            .shared
-            .client
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut c| c.take())?;
-        self.shared.stop_refinement();
-        let connected = client.is_connected();
-        let drop_on_loss = eligible && client.would_consume(&key, Privacy::Unknown);
-        let result = client.key_result(
-            key,
-            observed,
-            passed,
-            &mut NativeDocument {
-                shared: self.shared.clone(),
-                context: context.clone(),
-            },
-        );
-        // Candidates of a lost session cannot be chosen any more.
-        let held = client.is_held();
-        self.shared.put_client(client);
-        if held {
-            self.shared.hide();
-        }
-        if connected && result.is_some() {
-            // A handshake alone cannot tell whether the engine can process keys.
-            if let Ok(mut hint) = self.shared.mode_hint.try_borrow_mut() {
-                hint.take_if(|h| h.outage_shown_at.is_some());
+        let observed = self.observed.try_borrow().ok()?.clone();
+        self.with_client(context, |client, doc| {
+            self.stop_refinement();
+            let connected = client.is_connected();
+            let claimed_in_queue = matches!(delivery, Delivery::Queued) && self.outage_scope();
+            let drop_on_loss = claimed_in_queue
+                || (matches!(delivery, Delivery::Starter)
+                    && client.would_consume(&key, Privacy::Unknown));
+            doc.accept_displayed = matches!(delivery, Delivery::Queued) && is_enter(&key);
+            let result =
+                client.key_result(key, observed, matches!(delivery, Delivery::Passed), doc);
+            // Candidates of a lost session cannot be chosen any more.
+            let held = client.is_held();
+            if held {
+                self.hide();
             }
-        } else if drop_on_loss && !held && result.is_none() {
-            // A missing pipe may need the supervisor. Leave the next Hello
-            // for the next key, even if the stalled peer still accepts opens.
-            drop((self.shared.open_pipe)(true));
-            self.report_outage(context);
-            return Some(true);
-        }
-        result.or(held.then_some(true))
+            // KeyDown already returned TRUE for a queued key. A decline or
+            // rejected document edit must reach the queue's discard notice.
+            if matches!(delivery, Delivery::Queued)
+                && (result == Some(false) || client.edit_rejected())
+            {
+                return Some(false);
+            }
+            if connected && client.is_connected() && result.is_some() && !held {
+                // A handshake alone cannot tell whether the engine can process keys.
+                if let Ok(mut hint) = self.mode_hint.try_borrow_mut() {
+                    hint.take_if(|h| h.outage_shown_at.is_some());
+                }
+            } else if drop_on_loss && (result.is_none() && !held || claimed_in_queue && held) {
+                // A missing pipe may need the supervisor. Leave the next Hello
+                // for the next key, even if the stalled peer still accepts opens.
+                drop((self.open_pipe)(true));
+                if claimed_in_queue && doc.editing.leaving.get() {
+                    return Some(false);
+                }
+                self.report_outage(context);
+                return Some(true);
+            }
+            result.or(held.then_some(true))
+        })?
     }
     fn report_outage(&self, context: &ITfContext) {
         const REPEAT_AFTER: Duration = Duration::from_secs(10);
         if !self.show_mode_hint.get()
             || self
-                .shared
                 .mode_hint
                 .try_borrow()
                 .ok()
@@ -895,9 +1472,9 @@ impl Tip_Impl {
         {
             return;
         }
-        let hint = mode_hint::Hint::for_outage(context, self.shared.tid.get());
+        let hint = mode_hint::Hint::for_outage(context, self.tid.get());
         if let Ok(hint) = hint
-            && let Ok(mut previous) = self.shared.mode_hint.try_borrow_mut()
+            && let Ok(mut previous) = self.mode_hint.try_borrow_mut()
         {
             *previous = Some(hint);
         }
@@ -907,26 +1484,96 @@ impl ITfThreadMgrEventSink_Impl for Tip_Impl {
     fn OnInitDocumentMgr(&self, _: Ref<ITfDocumentMgr>) -> Result<()> {
         Ok(())
     }
-    fn OnUninitDocumentMgr(&self, _: Ref<ITfDocumentMgr>) -> Result<()> {
-        self.shared.reset();
+    fn OnUninitDocumentMgr(&self, document: Ref<ITfDocumentMgr>) -> Result<()> {
+        self.reset_document(document.as_ref());
         Ok(())
     }
-    fn OnSetFocus(&self, _: Ref<ITfDocumentMgr>, _: Ref<ITfDocumentMgr>) -> Result<()> {
-        self.shared.reset();
+    fn OnSetFocus(
+        &self,
+        focused: Ref<ITfDocumentMgr>,
+        previous: Ref<ITfDocumentMgr>,
+    ) -> Result<()> {
+        if let Some(edit) = self.shared.active_edit() {
+            let current = if edit.leaving.get() {
+                edit.destination.borrow().clone()
+            } else {
+                edit.manager.borrow().clone()
+            };
+            if focused.as_ref() != current.as_ref()
+                && (previous.is_none()
+                    || previous.as_ref() == current.as_ref()
+                    || current.is_none())
+            {
+                self.shared.reset();
+                edit.destination.replace(focused.cloned());
+            }
+        } else if previous.is_none()
+            && let Some(focused) = focused.as_ref()
+        {
+            if self.shared.document_manager().as_ref() != Some(focused) {
+                self.shared.reset();
+            }
+        } else if previous.as_ref() != focused.as_ref() {
+            self.reset_document(previous.as_ref());
+        }
         Ok(())
     }
-    fn OnPushContext(&self, _: Ref<ITfContext>) -> Result<()> {
-        self.shared.reset();
+    fn OnPushContext(&self, context: Ref<ITfContext>) -> Result<()> {
+        let manager = context
+            .as_ref()
+            .and_then(|c| unsafe { c.GetDocumentMgr().ok() });
+        self.reset_document(manager.as_ref());
         Ok(())
     }
-    fn OnPopContext(&self, _: Ref<ITfContext>) -> Result<()> {
-        self.shared.reset();
+    fn OnPopContext(&self, context: Ref<ITfContext>) -> Result<()> {
+        let leaving = self.shared.active_edit().filter(|e| e.leaving.get());
+        if let Some(edit) = leaving {
+            let manager = context
+                .as_ref()
+                .and_then(|c| unsafe { c.GetDocumentMgr().ok() });
+            if manager.is_some() && manager == *edit.destination.borrow() {
+                self.shared.reset();
+            }
+        } else if self
+            .shared
+            .context
+            .borrow()
+            .as_ref()
+            .is_none_or(|c| Some(c) == context.as_ref())
+        {
+            self.shared.reset();
+        }
         Ok(())
+    }
+}
+impl Tip_Impl {
+    fn reset_document(&self, previous: Option<&ITfDocumentMgr>) {
+        let leaving = self.shared.active_edit().filter(|e| e.leaving.get());
+        if let Some(edit) = leaving {
+            if previous.is_some() && edit.destination.borrow().as_ref() == previous {
+                self.shared.reset();
+            }
+        } else if self.shared.context.borrow().is_none()
+            || self.shared.document_manager().as_ref() == previous
+        {
+            self.shared.reset();
+        }
+    }
+}
+impl Shared {
+    fn document_manager(&self) -> Option<ITfDocumentMgr> {
+        let editing = self
+            .editing
+            .borrow()
+            .as_ref()
+            .and_then(|e| e.manager.borrow().clone());
+        let context = self.context.borrow().clone();
+        editing.or_else(|| context.and_then(|c| unsafe { c.GetDocumentMgr().ok() }))
     }
 }
 impl ITfCompositionSink_Impl for Tip_Impl {
     fn OnCompositionTerminated(&self, _: u32, composition: Ref<ITfComposition>) -> Result<()> {
-        self.shared.composition_terminated(composition);
+        self.shared.composition_terminated(composition, None);
         Ok(())
     }
 }
@@ -944,35 +1591,73 @@ impl ITfDisplayAttributeProvider_Impl for Tip_Impl {
 #[implement(ITfCompositionSink)]
 struct CompositionObserver {
     shared: Weak<Shared>,
+    generation: u64,
     _guard: ModuleGuard,
 }
 impl ITfCompositionSink_Impl for CompositionObserver_Impl {
     fn OnCompositionTerminated(&self, _: u32, composition: Ref<ITfComposition>) -> Result<()> {
         if let Some(shared) = self.shared.upgrade() {
-            shared.composition_terminated(composition);
+            shared.composition_terminated(composition, Some(self.generation));
         }
         Ok(())
     }
 }
-struct NativeDocument {
-    shared: Rc<Shared>,
-    context: ITfContext,
+fn is_enter(key: &Key) -> bool {
+    key.special == SpecialKey::Enter as i32 && key.modifiers == 0 && key.text.is_empty()
 }
-impl NativeDocument {
+
+struct NativeDocument<'a> {
+    accept_displayed: bool,
+    editing: &'a Editing,
+    shared: Rc<Shared>,
+}
+impl Editing {
+    fn attached(&self) -> bool {
+        let Some(document) = self.manager.borrow().clone() else {
+            return false;
+        };
+        // A pushed context can cover ours. Finish the original mark if its
+        // context is still on that stack, even though it no longer has focus.
+        unsafe {
+            if document.GetTop().as_ref() == Ok(&self.context) {
+                return true;
+            }
+            let Ok(contexts) = document.EnumContexts() else {
+                return false;
+            };
+            let mut slot = [None];
+            let mut fetched = 0;
+            while contexts.Next(&mut slot, &mut fetched).is_ok() && fetched == 1 {
+                if slot[0].take().as_ref() == Some(&self.context) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+impl NativeDocument<'_> {
     fn request_write(
         &self,
         edit: &ITfEditSession,
         mode: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
     ) -> Result<HRESULT> {
         unsafe {
-            self.context
-                .RequestEditSession(self.shared.tid.get(), edit, mode | TF_ES_READWRITE)
+            self.editing.context.RequestEditSession(
+                self.shared.tid.get(),
+                edit,
+                mode | TF_ES_READWRITE,
+            )
         }
     }
 
     // Capture the original composition: a deferred end must never touch a
     // composition started by a later key.
     fn end_owned(&self, reading: Option<&str>) -> bool {
+        if self.editing.terminated.get() {
+            return true;
+        }
         let Some(composition) = self.shared.composition.borrow_mut().take() else {
             return true;
         };
@@ -996,11 +1681,20 @@ impl NativeDocument {
         success
     }
 }
-impl Document for NativeDocument {
+impl Document for NativeDocument<'_> {
     fn apply(&mut self, reply: &KeyReply) -> bool {
-        if self.shared.field.get() == FieldScope::Bypass {
+        if self.editing.terminated.get()
+            || (self.editing.leaving.get()
+                && (self.shared.departing.borrow().is_none() || !self.editing.attached()))
+            || self.shared.field.get() == FieldScope::Bypass
+        {
             return false;
         }
+        // TSF can call TestKeyDown from StartComposition, before apply returns.
+        self.shared.dispatching_starter.take();
+        self.editing
+            .policy
+            .set(reply.key_policy.unwrap_or_default());
         if reply.commit.is_none()
             && reply.preedit.as_ref().is_none_or(|p| p.segments.is_empty())
             && self
@@ -1018,7 +1712,7 @@ impl Document for NativeDocument {
         }
         let edit: ITfEditSession = ApplyEdit {
             shared: self.shared.clone(),
-            context: self.context.clone(),
+            context: self.editing.context.clone(),
             reply: reply.clone(),
             _guard: ModuleGuard::new(),
         }
@@ -1026,7 +1720,15 @@ impl Document for NativeDocument {
         let success = self
             .request_write(&edit, TF_ES_SYNC)
             .is_ok_and(|hr| hr == S_OK);
-        if success {
+        if self.editing.terminated.get() {
+            return success;
+        }
+        if self.editing.leaving.get() && success {
+            // A queued click on the departing field still needs the acknowledged page.
+            self.shared
+                .page
+                .replace(reply.candidates.clone().unwrap_or_default());
+        } else if success {
             if let Some(page) = &reply.candidates {
                 self.shared.show(page);
             } else {
@@ -1035,14 +1737,20 @@ impl Document for NativeDocument {
         } else {
             self.end_owned(None);
             *self.shared.preedit.borrow_mut() = Preedit::default();
-            *self.shared.page.borrow_mut() = ipc::CandidatePage::default();
             self.shared.hide();
         }
         success
     }
     fn finish_reading(&mut self, reading: &str) -> bool {
         let writable = self.shared.field.get() != FieldScope::Bypass;
-        self.end_owned(writable.then_some(reading)) && writable
+        let surface;
+        let text = if self.accept_displayed {
+            surface = ipc::surface(&self.shared.preedit.borrow());
+            &surface
+        } else {
+            reading
+        };
+        self.end_owned(writable.then_some(text)) && writable
     }
 }
 #[implement(ITfEditSession)]
@@ -1055,13 +1763,7 @@ impl ITfEditSession_Impl for EndEdit_Impl {
     fn DoEditSession(&self, cookie: u32) -> Result<()> {
         if let Some((surface, reading)) = &self.finish {
             let range = unsafe { self.composition.GetRange()? };
-            // An extra unit distinguishes an exact match from a matching prefix.
-            let expected: Vec<_> = surface.encode_utf16().collect();
-            let mut actual = vec![0; expected.len() + 1];
-            let mut count = 0;
-            if unsafe { range.GetText(cookie, 0, &mut actual, &mut count) }.is_ok()
-                && actual.get(..count as usize) == Some(expected.as_slice())
-            {
+            if range_matches(&range, cookie, surface) {
                 if surface != reading {
                     unsafe {
                         range.SetText(cookie, 0, &reading.encode_utf16().collect::<Vec<_>>())?
@@ -1073,6 +1775,14 @@ impl ITfEditSession_Impl for EndEdit_Impl {
         unsafe { self.composition.EndComposition(cookie) }
     }
 }
+fn range_matches(range: &ITfRange, cookie: u32, surface: &str) -> bool {
+    // An extra unit distinguishes an exact match from a matching prefix.
+    let expected: Vec<_> = surface.encode_utf16().collect();
+    let mut actual = vec![0; expected.len() + 1];
+    let mut count = 0;
+    unsafe { range.GetText(cookie, 0, &mut actual, &mut count) }.is_ok()
+        && actual.get(..count as usize) == Some(expected.as_slice())
+}
 #[implement(ITfEditSession)]
 struct ApplyEdit {
     shared: Rc<Shared>,
@@ -1082,6 +1792,15 @@ struct ApplyEdit {
 }
 impl ITfEditSession_Impl for ApplyEdit_Impl {
     fn DoEditSession(&self, cookie: u32) -> Result<()> {
+        if self.shared.departing.borrow().is_some() {
+            let mark = self.shared.composition.borrow().clone();
+            let surface = ipc::surface(&self.shared.preedit.borrow());
+            if let Some(mark) = mark
+                && !range_matches(&unsafe { mark.GetRange()? }, cookie, &surface)
+            {
+                return Err(TF_E_COMPOSITION_REJECTED.into());
+            }
+        }
         if let Some(commit) = &self.reply.commit {
             write_composition(&self.shared, &self.context, cookie, &commit.value, true)?;
         }
@@ -1089,6 +1808,9 @@ impl ITfEditSession_Impl for ApplyEdit_Impl {
         let text = ipc::surface(&preedit);
         if !text.is_empty() {
             let range = write_composition(&self.shared, &self.context, cookie, &text, false)?;
+            if self.shared.composition_was_terminated() {
+                return Ok(());
+            }
             // SetText succeeded. Layout and selection are best effort.
             let _ = set_preedit_caret(&self.context, &range, cookie, preedit.cursor_utf16);
             if let Ok(view) = unsafe { self.context.GetActiveView() } {
@@ -1107,7 +1829,9 @@ impl ITfEditSession_Impl for ApplyEdit_Impl {
                 unsafe {
                     let range = composition.GetRange()?;
                     range.SetText(cookie, 0, &[])?;
-                    composition.EndComposition(cookie)?;
+                    if !self.shared.composition_was_terminated() {
+                        composition.EndComposition(cookie)?;
+                    }
                 }
                 self.shared.composition.borrow_mut().take();
             }
@@ -1173,6 +1897,9 @@ fn write_composition(
     text: &str,
     commit: bool,
 ) -> Result<ITfRange> {
+    if shared.composition_was_terminated() {
+        return Err(TF_E_COMPOSITION_REJECTED.into());
+    }
     let existing = shared.composition.try_borrow().ok().and_then(|c| c.clone());
     let composition = if let Some(c) = existing {
         c
@@ -1180,20 +1907,29 @@ fn write_composition(
         let insert = context.cast::<ITfInsertAtSelection>()?;
         let range = unsafe { insert.InsertTextAtSelection(cookie, TF_IAS_QUERYONLY, &[])? };
         let owner = context.cast::<ITfContextComposition>()?;
+        let generation = shared.composition_generation.get().wrapping_add(1);
+        shared.composition_generation.set(generation);
         let observer: ITfCompositionSink = CompositionObserver {
             shared: Rc::downgrade(shared),
+            generation,
             _guard: ModuleGuard::new(),
         }
         .into();
         // A veto returns S_OK with a null interface. windows-rs represents
         // that as an Error with a success code, which cannot cross a COM sink.
-        let c = unsafe { owner.StartComposition(cookie, &range, &observer) }.map_err(|e| {
+        shared.starting_composition.set(true);
+        let started = unsafe { owner.StartComposition(cookie, &range, &observer) };
+        shared.starting_composition.set(false);
+        let c = started.map_err(|e| {
             if e.code().is_ok() {
                 TF_E_COMPOSITION_REJECTED.into()
             } else {
                 e
             }
         })?;
+        if shared.composition_was_terminated() {
+            return Err(TF_E_COMPOSITION_REJECTED.into());
+        }
         if let Ok(mut slot) = shared.composition.try_borrow_mut() {
             *slot = Some(c.clone());
         }
@@ -1203,6 +1939,9 @@ fn write_composition(
     let utf16: Vec<_> = text.encode_utf16().collect();
     unsafe {
         range.SetText(cookie, 0, &utf16)?;
+    }
+    if shared.composition_was_terminated() {
+        return Ok(range);
     }
     if !commit
         && shared.attribute.get() != 0
@@ -1219,7 +1958,8 @@ fn write_composition(
 }
 #[implement(ITfEditSession)]
 struct ScopeEdit {
-    shared: Rc<Shared>,
+    shared: Option<Rc<Shared>>,
+    field: Cell<FieldScope>,
     context: ITfContext,
     limit: FieldScope,
     read_text: bool,
@@ -1241,6 +1981,10 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
             return Err(failure());
         }
         let field = classify_field(&self.context, cookie, &range)?.min(self.limit);
+        self.field.set(field);
+        let Some(shared) = self.shared.as_ref() else {
+            return Ok(());
+        };
         if field == FieldScope::Bypass {
             return Ok(());
         }
@@ -1252,8 +1996,10 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
             .unwrap_or_default();
         let privacy = if field == FieldScope::Private {
             Privacy::Private
+        } else if let Some(editing) = shared.editing.borrow().as_ref() {
+            editing.app_privacy
         } else {
-            self.shared
+            shared
                 .client
                 .try_borrow()
                 .ok()
@@ -1266,12 +2012,8 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
             ..Default::default()
         };
         if self.read_text && privacy == Privacy::Normal {
-            let before = if let Some(composition) = self
-                .shared
-                .composition
-                .try_borrow()
-                .ok()
-                .and_then(|c| c.clone())
+            let before = if let Some(composition) =
+                shared.composition.try_borrow().ok().and_then(|c| c.clone())
             {
                 unsafe { composition.GetRange()? }
             } else {
@@ -1296,12 +2038,7 @@ impl ITfEditSession_Impl for ScopeEdit_Impl {
                 observed.surrounding_available = true;
             }
         }
-        *self
-            .shared
-            .observed
-            .try_borrow_mut()
-            .map_err(|_| failure())? = observed;
-        self.shared.field.set(field);
+        *shared.observed.try_borrow_mut().map_err(|_| failure())? = observed;
         Ok(())
     }
 }
@@ -1410,21 +2147,45 @@ fn refresh_scope(
     limit: FieldScope,
     read_text: bool,
 ) -> FieldScope {
-    shared.field.set(FieldScope::Bypass);
-    let edit: ITfEditSession = ScopeEdit {
-        shared: shared.clone(),
+    try_refresh_scope(shared, context, limit, read_text).unwrap_or(FieldScope::Bypass)
+}
+
+fn try_refresh_scope(
+    shared: &Rc<Shared>,
+    context: &ITfContext,
+    limit: FieldScope,
+    read_text: bool,
+) -> Option<FieldScope> {
+    let field = query_scope(Some(shared), shared.tid.get(), context, limit, read_text);
+    shared.field.set(field.unwrap_or(FieldScope::Bypass));
+    field
+}
+
+fn query_scope(
+    shared: Option<&Rc<Shared>>,
+    tid: u32,
+    context: &ITfContext,
+    limit: FieldScope,
+    read_text: bool,
+) -> Option<FieldScope> {
+    let edit = windows_core::ComObject::new(ScopeEdit {
+        shared: shared.cloned(),
+        field: Cell::new(FieldScope::Bypass),
         context: context.clone(),
         limit,
         read_text,
         _guard: ModuleGuard::new(),
-    }
-    .into();
-    let result =
-        unsafe { context.RequestEditSession(shared.tid.get(), &edit, TF_ES_SYNC | TF_ES_READ) };
-    if !result.is_ok_and(|status| status == S_OK) {
-        shared.field.set(FieldScope::Bypass);
-    }
-    shared.field.get()
+    });
+    let result = unsafe {
+        context.RequestEditSession(
+            tid,
+            &edit.to_interface::<ITfEditSession>(),
+            TF_ES_SYNC | TF_ES_READ,
+        )
+    };
+    result
+        .is_ok_and(|status| status == S_OK)
+        .then(|| edit.field.get())
 }
 fn starter_virtual_key(vk: u32) -> bool {
     (0x30..=0x5a).contains(&vk) || (0xba..=0xe2).contains(&vk)

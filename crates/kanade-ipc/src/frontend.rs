@@ -131,6 +131,21 @@ fn handshake<T: Transport>(transport: &mut T) -> io::Result<Welcome> {
     }
     Ok(welcome)
 }
+
+impl KeyPolicySummary {
+    /// Whether the current conversion state owns the translated key.
+    pub fn would_consume(&self, key: &Key) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if key.modifiers & (MOD_CONTROL | MOD_ALT | MOD_META) != 0 {
+            return self.composing
+                && (key.special != SpecialKey::None as i32 || is_conversion_control(key));
+        }
+        self.composing || starts_composition(key)
+    }
+}
+
 impl<T: Transport> Client<T> {
     pub fn connect(mut transport: T) -> io::Result<Self> {
         let welcome = handshake(&mut transport)?;
@@ -190,18 +205,15 @@ impl<T: Transport> Client<T> {
     }
     /// TSF OnTestKeyDown must only consult this local summary.
     pub fn would_consume(&self, key: &Key, privacy: Privacy) -> bool {
-        if privacy == Privacy::Password
-            || self.blocked
-            || (self.transport.is_none() && !self.held)
-            || !self.policy.enabled
-        {
-            return false;
+        privacy != Privacy::Password && self.key_policy().would_consume(key)
+    }
+    /// Local ownership while a native callback has the client checked out.
+    pub fn key_policy(&self) -> KeyPolicySummary {
+        if self.blocked || (self.transport.is_none() && !self.held) {
+            KeyPolicySummary::default()
+        } else {
+            self.policy
         }
-        if key.modifiers & (MOD_CONTROL | MOD_ALT | MOD_META) != 0 {
-            return self.policy.composing
-                && (key.special != SpecialKey::None as i32 || is_conversion_control(key));
-        }
-        self.policy.composing || starts_composition(key)
     }
     pub fn privacy_for_app(&self, app: &str) -> Privacy {
         let allowed = if let Some(policy) = &self.learning_policy {
