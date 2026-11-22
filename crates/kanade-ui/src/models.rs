@@ -25,6 +25,18 @@ pub struct Job {
 #[derive(Clone, Deserialize)]
 pub struct InstalledModel {
     pub id: String,
+    /// The name of the model the file is. None when the file is not a model
+    /// this version registers, even under the same ID.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+impl InstalledModel {
+    /// How the settings name the installed file.
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("{}（同梱のモデルとは別のファイル）", self.id))
+    }
 }
 #[derive(Clone, Deserialize)]
 pub struct Status {
@@ -373,12 +385,29 @@ mod tests {
         let mut state = state();
         state.installed = Some(InstalledModel {
             id: "fixture-b".into(),
+            name: Some("fixture-b".into()),
         });
         let mut selection = ModelSelection::default();
         selection.refresh(Some(&state));
         let model = selection.selected(&state).unwrap();
         assert_eq!(model.id, "fixture-b");
         assert!(!selection.accepted(model));
+    }
+    #[test]
+    fn an_installed_file_is_named_only_as_the_model_it_is() {
+        let registered: InstalledModel =
+            serde_json::from_str(r#"{"id":"fixture-a","name":"Fixture A"}"#).unwrap();
+        assert_eq!(registered.label(), "Fixture A");
+        // A previous version's file under the same ID is not named after the
+        // model of this version.
+        let previous: InstalledModel =
+            serde_json::from_str(r#"{"id":"fixture-a","name":null}"#).unwrap();
+        assert_eq!(
+            previous.label(),
+            "fixture-a（同梱のモデルとは別のファイル）"
+        );
+        let older_engine: InstalledModel = serde_json::from_str(r#"{"id":"fixture-a"}"#).unwrap();
+        assert_eq!(older_engine.name, None);
     }
     #[test]
     fn changing_model_resets_both_consents_and_rejects_an_old_dialog_selection() {
