@@ -22,7 +22,7 @@ use std::os::unix::{
 use std::{
     collections::VecDeque,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -89,6 +89,48 @@ fn fatal<T, E: Into<anyhow::Error>>(event: Event, result: Result<T, E>) -> anyho
         record(event);
         error.into()
     })
+}
+/// The settings file of a data directory, with the separators of the system
+/// since the settings application shows it.
+fn settings_file(data: &Path) -> PathBuf {
+    data.join("kanade").join("settings.toml")
+}
+/// The learning store of a data directory.
+fn learning_file(data: &Path) -> PathBuf {
+    data.join("kanade").join("learning.json")
+}
+/// Reads the settings file and starts the learning store. Neither one that
+/// exists but cannot be read stops the engine, or is written while it runs:
+/// it may come from a newer version or be under repair. Settings that cannot
+/// be read are `None`, and the engine keeps every optional feature off; a
+/// store that cannot be read leaves Kanade's correction learning off.
+fn open_stores(
+    data: &Path,
+) -> anyhow::Result<(
+    Option<config::Config>,
+    Option<kanade_learn::service::LearningService>,
+)> {
+    let settings = config::Config::load(&settings_file(data))
+        .inspect_err(|_| record(Event::SettingsUnreadable))
+        .ok();
+    let path = learning_file(data);
+    let learning = match kanade_learn::Store::load(&path) {
+        // A store that was read is not reported as unreadable when only its
+        // thread cannot start.
+        Ok(store) => Some(fatal(
+            Event::FatalThread,
+            kanade_learn::service::LearningService::with_store(
+                store,
+                path,
+                data.join("dict/ipadic.hsd"),
+            ),
+        )?),
+        Err(_) => {
+            record(Event::LearningStoreUnreadable);
+            None
+        }
+    };
+    Ok((settings, learning))
 }
 /// Replaces a failed worker. One failed attempt does not end the engine: a
 /// fresh process can answer its first calls slowly, and exiting leaves every
@@ -314,33 +356,24 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
         )?;
         lock
     };
-    let settings = fatal(
-        Event::FatalConfiguration,
-        config::Config::load(&data.join("kanade/settings.toml")),
-    )?;
+    let (settings, learning) = open_stores(data)?;
     let project_changes = kanade_indexer::watch::catalog_changes(&data.join("kanade/projects"));
-    let learning = Some(fatal(
-        Event::FatalLearningStore,
-        kanade_learn::service::LearningService::start(
-            data.join("kanade/learning.json"),
-            data.join("dict/ipadic.hsd"),
-        ),
-    )?);
     let backend = fatal(
         Event::FatalWorkerStart,
         Mozc::start(worker, &data.join("mozc")),
     )?;
     let projects =
         Arc::new(kanade_indexer::Catalog::load(&data.join("kanade/projects")).unwrap_or_default());
+    let in_force = settings.clone().unwrap_or_else(config::Config::unreadable);
     // Model records are read and the worker is started on background threads.
     let llm = kanade_llm::Manager::open(
         data.join("kanade/llm"),
         kanade_llm::default_worker(),
-        settings.llm,
+        in_force.llm,
     );
     let administration = Arc::new(admin::Administration::new(
         data.to_owned(),
-        settings.clone(),
+        settings,
         learning.clone(),
         projects.clone(),
         llm.clone(),
@@ -348,7 +381,7 @@ pub fn serve(path: &Path, worker: &Path, data: &Path) -> anyhow::Result<()> {
     let mut engine = Engine::new(backend, learning);
     engine.set_reranker(Some(Box::new(llm.service())));
     engine.set_calendar(crate::dates::Calendar::local());
-    engine.configure(settings);
+    engine.configure(in_force);
     engine.set_projects(projects);
     #[cfg(unix)]
     let listener = fatal(Event::FatalListener, UnixListener::bind(path))?;
@@ -656,13 +689,13 @@ fn connection(
                 stream.verify_management_peer(
                     &std::env::current_exe()?.with_file_name("kanade-ui.exe"),
                 )?;
-                let json = admin.handle(manage, tx)?;
+                let management = admin.handle(manage, tx)?;
                 #[cfg(windows)]
                 stream.begin(Duration::from_secs(5));
                 ipc::send(
                     &mut stream,
                     &Response {
-                        body: Some(response::Body::Management(Management { json })),
+                        body: Some(response::Body::Management(management)),
                     },
                 )?;
                 continue;
@@ -725,6 +758,135 @@ mod tests {
         assert!(!sync_due(seconds(30), true));
         assert!(!sync_due(seconds(299), true));
         assert!(sync_due(seconds(300), true));
+    }
+    #[test]
+    fn files_that_cannot_be_read_neither_stop_the_engine_nor_are_written() {
+        let data = tempfile::tempdir().unwrap();
+        let (settings, learning) = open_stores(data.path()).unwrap();
+        assert!(settings.unwrap().learning, "a first start has the defaults");
+        assert!(learning.is_some());
+        drop(learning);
+        let settings_file = data.path().join("kanade/settings.toml");
+        let learning_file = data.path().join("kanade/learning.json");
+        std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+        for (settings_text, learning_text) in [
+            // A newer version wrote a setting this one does not know.
+            (
+                "learning = true\nfrom_a_newer_version = 1\n",
+                "{\"records\":{",
+            ),
+            // Both files end in the middle of a value.
+            ("learning = true\nfont_size = ", "{\"records\":[{\"id\":"),
+        ] {
+            std::fs::write(&settings_file, settings_text).unwrap();
+            std::fs::write(&learning_file, learning_text).unwrap();
+            let (settings, learning) = open_stores(data.path()).unwrap();
+            assert!(settings.is_none());
+            assert!(learning.is_none());
+            assert_eq!(
+                std::fs::read_to_string(&settings_file).unwrap(),
+                settings_text
+            );
+            assert_eq!(
+                std::fs::read_to_string(&learning_file).unwrap(),
+                learning_text
+            );
+        }
+    }
+    #[test]
+    fn settings_that_cannot_be_read_are_never_saved_and_read_again_on_request() {
+        let data = tempfile::tempdir().unwrap();
+        let file = data.path().join("kanade/settings.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let broken = "learning = true\nfrom_a_newer_version = 1\n";
+        std::fs::write(&file, broken).unwrap();
+        let llm = kanade_llm::Manager::open(
+            data.path().join("kanade/llm"),
+            data.path().join("no-worker"),
+            false,
+        );
+        let admin =
+            admin::Administration::new(data.path().to_owned(), None, None, Arc::default(), llm);
+        // Applies configuration as the engine thread does.
+        let (tx, rx) = mpsc::sync_channel::<Work>(4);
+        let engine = std::thread::spawn(move || {
+            let mut configured = vec![];
+            while let Ok(work) = rx.recv() {
+                if let Work::Configure(settings, ack) = work {
+                    configured.push(settings);
+                    let _ = ack.send(());
+                }
+            }
+            configured
+        });
+        let ask = |action: manage::Action, json: String| {
+            admin.handle(
+                &Manage {
+                    action: action as i32,
+                    json,
+                    ..Default::default()
+                },
+                &tx,
+            )
+        };
+        let shown = |reply: io::Result<Management>| {
+            let reply = reply.unwrap();
+            let settings = serde_json::from_str::<config::Config>(&reply.json).unwrap();
+            (settings, reply.settings, reply.learning)
+        };
+        let unreadable = StoreState::Unreadable as i32;
+        let reply = ask(manage::Action::GetSettings, String::new()).unwrap();
+        // The reply names the files this engine opened, for a settings
+        // application that may run with another data directory.
+        let named = |name| {
+            let file = data.path().join("kanade").join(name);
+            file.to_string_lossy().into_owned()
+        };
+        assert_eq!(reply.settings_file, named("settings.toml"));
+        assert_eq!(reply.learning_file, named("learning.json"));
+        let (fallback, settings, learning) = shown(Ok(reply));
+        assert_eq!((settings, learning), (unreadable, unreadable));
+        assert!(!fallback.learning && !fallback.emoji_dictionary);
+        let edited = serde_json::to_string(&config::Config {
+            font_size: 20.0,
+            ..fallback
+        })
+        .unwrap();
+        assert!(ask(manage::Action::SetSettings, edited).is_err());
+        let exclusions = serde_json::json!({"previous": [], "apps": ["com.example.Editor"]});
+        assert!(
+            ask(
+                manage::Action::SetLearningExclusions,
+                exclusions.to_string()
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), broken);
+        // Once repaired, the next request takes the file up, and settings
+        // changed from what it then shows can be saved.
+        std::fs::write(&file, "font_size = 24.0\n").unwrap();
+        let reply = ask(manage::Action::GetSettings, String::new()).unwrap();
+        assert_eq!(reply.settings_file, "");
+        assert_eq!(reply.learning_file, named("learning.json"));
+        let (repaired, settings, _) = shown(Ok(reply));
+        assert_eq!(settings, StoreState::Read as i32);
+        assert_eq!(repaired.font_size, 24.0);
+        assert!(repaired.learning && repaired.emoji_dictionary);
+        let edited = serde_json::to_string(&config::Config {
+            font_size: 20.0,
+            ..repaired
+        })
+        .unwrap();
+        ask(manage::Action::SetSettings, edited).unwrap();
+        let saved = config::Config::load(&file).unwrap();
+        assert_eq!(saved.font_size, 20.0);
+        assert!(saved.learning && saved.emoji_dictionary);
+        drop(tx);
+        let configured = engine.join().unwrap();
+        assert_eq!(
+            configured.iter().map(|c| c.font_size).collect::<Vec<_>>(),
+            [24.0, 20.0]
+        );
     }
     #[cfg(unix)]
     #[test]

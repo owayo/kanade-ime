@@ -238,9 +238,24 @@ impl Engine {
         engine.wait_for_start(1);
         engine
     }
+    /// Starts with these files in its data directory: a path relative to the
+    /// directory and the file's contents.
+    pub fn start_with_files(name: &str, files: &[(&str, &str)]) -> Self {
+        let data = tempfile::tempdir().unwrap();
+        for (path, contents) in files {
+            let path = data.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let mut engine = Self::spawn_in(&label(name), data, |_| {});
+        engine.wait_for_start(1);
+        engine
+    }
     /// Starts the process without waiting for an engine to serve.
     pub fn spawn_with(label: &str, prepare: impl FnOnce(&mut Command)) -> Self {
-        let data = tempfile::tempdir().unwrap();
+        Self::spawn_in(label, tempfile::tempdir().unwrap(), prepare)
+    }
+    fn spawn_in(label: &str, data: tempfile::TempDir, prepare: impl FnOnce(&mut Command)) -> Self {
         let mut command = engine_command(label, data.path());
         prepare(&mut command);
         Self {
@@ -252,6 +267,14 @@ impl Engine {
     }
     pub fn label(&self) -> &str {
         &self.label
+    }
+    pub fn data(&self) -> &Path {
+        self.data.path()
+    }
+    /// Ends the engine, so it can write nothing more.
+    pub fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
     /// The engines a supervisor started and has not seen end.
     pub fn supervised(&self) -> Vec<u32> {

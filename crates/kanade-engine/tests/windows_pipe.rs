@@ -625,6 +625,34 @@ fn mixed_load_for_a_while_never_ends_the_engine() {
 }
 
 #[test]
+#[ignore = "requires the locked worker and a debug engine; cargo xtask build-worker"]
+fn files_that_cannot_be_read_leave_conversion_working_and_unchanged() {
+    // Written by a newer version, and cut off in the middle of a record.
+    let settings = "learning = true\nfrom_a_newer_version = 1\n";
+    let learning = "{\"records\":[{\"id\":";
+    let mut engine = Engine::start_with_files(
+        "unreadable",
+        &[
+            ("kanade/settings.toml", settings),
+            ("kanade/learning.json", learning),
+        ],
+    );
+    assert!(fresh_frontend_converts(&engine));
+    let events = engine.events();
+    for expected in ["settings-unreadable", "learning-store-unreadable"] {
+        assert!(events.iter().any(|event| event == expected), "{events:?}");
+    }
+    assert!(
+        !events.iter().any(|event| event.starts_with("fatal-")),
+        "{events:?}"
+    );
+    engine.stop();
+    let read = |path: &str| std::fs::read_to_string(engine.data().join(path)).unwrap();
+    assert_eq!(read("kanade/settings.toml"), settings);
+    assert_eq!(read("kanade/learning.json"), learning);
+}
+
+#[test]
 fn the_engine_is_built_without_a_console() {
     // Subsystem 2 is the windowed one: the system gives such a process no
     // console window, however it is started.

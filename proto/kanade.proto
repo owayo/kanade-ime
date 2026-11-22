@@ -34,7 +34,11 @@ message CandidatePage { uint64 candidate_revision = 1; uint32 total = 2; uint32 
 message KeyPolicySummary { bool composing = 1; bool enabled = 2; bool can_undo_learning = 3; }
 message KeyReply { Revision revision = 1; uint64 event_seq = 2; uint64 state_revision = 3; bool consumed = 4; Preedit preedit = 5; Commit commit = 6; CandidatePage candidates = 7; KeyPolicySummary key_policy = 8; }
 message Failure { enum Code { INVALID = 0; STALE = 1; SEQUENCE = 2; UNAVAILABLE = 3; PRIVACY = 4; } Code code = 1; }
-message Management { string json = 1; }
+// Whether the engine could read a file of its data directory when it started. A missing file reads as its defaults.
+enum StoreState { STORE_STATE_UNSPECIFIED = 0; STORE_STATE_READ = 1; STORE_STATE_UNREADABLE = 2; }
+// `settings` and `learning` describe the settings file and the learning store. Unspecified: an engine from before these fields.
+// `settings_file` and `learning_file` name, as the engine opened it, a file it could not read and are empty otherwise.
+message Management { string json = 1; StoreState settings = 2; StoreState learning = 3; string settings_file = 4; string learning_file = 5; }
 // Replaces the displayed page only. Never carries a commit or a preedit change; the selected surface is unchanged.
 message CandidateUpdate { Revision revision = 1; CandidatePage candidates = 2; bool pending = 3; RefinementOutcome refinement_outcome = 4; }
 message Response { oneof body { Welcome welcome = 1; KeyReply key = 2; bool ack = 3; Failure failure = 4; Management management = 5; CandidateUpdate candidates = 6; } }

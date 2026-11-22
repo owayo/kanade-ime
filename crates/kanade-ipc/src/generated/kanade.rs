@@ -467,11 +467,21 @@ pub mod failure {
         }
     }
 }
+/// `settings` and `learning` describe the settings file and the learning store. Unspecified: an engine from before these fields.
+/// `settings_file` and `learning_file` name, as the engine opened it, a file it could not read and are empty otherwise.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Management {
     #[prost(string, tag = "1")]
     pub json: ::prost::alloc::string::String,
+    #[prost(enumeration = "StoreState", tag = "2")]
+    pub settings: i32,
+    #[prost(enumeration = "StoreState", tag = "3")]
+    pub learning: i32,
+    #[prost(string, tag = "4")]
+    pub settings_file: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub learning_file: ::prost::alloc::string::String,
 }
 /// Replaces the displayed page only. Never carries a commit or a preedit change; the selected surface is unchanged.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -676,6 +686,37 @@ impl RefinementOutcome {
             "REFINEMENT_OUTCOME_EVALUATED" => Some(Self::Evaluated),
             "REFINEMENT_OUTCOME_UNAVAILABLE" => Some(Self::Unavailable),
             "REFINEMENT_OUTCOME_TIMED_OUT" => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+}
+/// Whether the engine could read a file of its data directory when it started. A missing file reads as its defaults.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum StoreState {
+    Unspecified = 0,
+    Read = 1,
+    Unreadable = 2,
+}
+impl StoreState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "STORE_STATE_UNSPECIFIED",
+            Self::Read => "STORE_STATE_READ",
+            Self::Unreadable => "STORE_STATE_UNREADABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "STORE_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "STORE_STATE_READ" => Some(Self::Read),
+            "STORE_STATE_UNREADABLE" => Some(Self::Unreadable),
             _ => None,
         }
     }
