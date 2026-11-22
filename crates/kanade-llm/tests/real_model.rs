@@ -17,7 +17,9 @@ use kanade_llm::{
     Job, Manager, Poll, Rerank,
     frame::{self, Fault, Reply, Request},
     katakana, limits,
-    manager::{ImportRequest, JobError, JobPhase, Lifecycle, RemoveResult, StartResult, Status},
+    manager::{
+        ImportRequest, JobError, JobKind, JobPhase, Lifecycle, RemoveResult, StartResult, Status,
+    },
     process::identity_matches,
     process::{Failure, Worker},
     profile, qualify,
@@ -729,13 +731,37 @@ fn import_needs_consent_and_readiness_is_tied_to_every_identity() {
         Reason::QualityGate
     );
 
-    // Another worker build needs a new qualification.
+    // Another worker build needs a new qualification. While the model is
+    // switched off, nothing is measured and nothing is asked of the user.
     let rebuilt = data.path().join("kanade-llm-worker");
     let mut binary = std::fs::read(&worker).unwrap();
     binary.extend_from_slice(b"\0rebuilt");
     std::fs::write(&rebuilt, binary).unwrap();
-    let manager = Manager::open(dir.clone(), rebuilt, true);
-    assert_eq!(wait_until(&manager, false).reason, Reason::RuntimeChanged);
+    let manager = Manager::open(dir.clone(), rebuilt, false);
+    let status = wait_until(&manager, false);
+    assert_eq!((status.reason, status.job), (Reason::RuntimeChanged, None));
+    assert!(!manager.service().setup_required());
+    // Switched on, the engine measures by itself. This is the state after an
+    // update: the record names the worker of the version before it, and the
+    // real worker is the new one.
+    let mut previous = good.evidence.clone();
+    previous.worker_sha256 = "0".repeat(64);
+    store.save_qualification(&previous.seal()).unwrap();
+    let consent = std::fs::read(dir.join("install.json")).unwrap();
+    let manager = Manager::open(dir.clone(), worker.clone(), true);
+    let status = wait_for_job(&manager);
+    let job = status.job.unwrap();
+    assert_eq!((job.kind, job.error), (JobKind::Qualify, JobError::None));
+    assert!(wait_until(&manager, true).ready);
+    assert!(!manager.service().setup_required());
+    // The model is served again without a new import or consent, and the
+    // new record names this worker.
+    assert_eq!(score(&manager.service()), scores);
+    assert_eq!(std::fs::read(dir.join("install.json")).unwrap(), consent);
+    let renewed = store.qualification().bound().unwrap().clone();
+    assert_eq!(renewed.evidence.worker_sha256, worker_sha256);
+    assert_eq!(renewed.verdict(&install, &worker_sha256), Reason::None);
+    manager.set_enabled(false);
     let manager = Manager::open(dir.clone(), data.path().join("absent"), true);
     let status = wait_until(&manager, false);
     assert_eq!(

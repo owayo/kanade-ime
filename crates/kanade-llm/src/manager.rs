@@ -193,6 +193,30 @@ struct State {
     serving: bool,
     job: Option<JobStatus>,
     next_job: u64,
+    /// The engine has started a measurement by itself. It does so once per
+    /// process, so a measurement that fails does not repeat itself.
+    renewed: bool,
+}
+impl State {
+    /// A job holds the one slot until it has finished.
+    fn busy(&self) -> bool {
+        self.job.is_some_and(|job| !job.finished())
+    }
+    /// Takes the slot for a new job, unless one is under way.
+    fn reserve(&mut self, kind: JobKind) -> Option<u64> {
+        if self.busy() {
+            return None;
+        }
+        self.next_job += 1;
+        self.job = Some(JobStatus {
+            id: self.next_job,
+            kind,
+            phase: JobPhase::Queued,
+            copied: 0,
+            error: JobError::None,
+        });
+        Some(self.next_job)
+    }
 }
 struct Inner {
     store: Store,
@@ -210,10 +234,17 @@ impl Manager {
     /// `dir` holds the model and its records. Readiness is established on the
     /// management thread; until then nothing is served.
     pub fn open(dir: PathBuf, worker: PathBuf, enabled: bool) -> Self {
-        let manager = Self(Arc::new(Inner {
-            service: Service::new(ProcessSpawner {
-                worker: worker.clone(),
-            }),
+        let service = Service::new(ProcessSpawner {
+            worker: worker.clone(),
+        });
+        let manager = Self::unread(service, dir, worker, enabled);
+        manager.send(Task::Refresh);
+        manager
+    }
+    /// A manager that has not read its records.
+    fn unread(service: Service, dir: PathBuf, worker: PathBuf, enabled: bool) -> Self {
+        Self(Arc::new(Inner {
+            service,
             store: Store::new(dir),
             worker,
             state: Mutex::new(State {
@@ -227,12 +258,11 @@ impl Manager {
                 serving: false,
                 job: None,
                 next_job: 0,
+                renewed: false,
             }),
             tasks: Mutex::new(None),
             catalog: OnceLock::new(),
-        }));
-        manager.send(Task::Refresh);
-        manager
+        }))
     }
     pub fn service(&self) -> Service {
         self.0.service.clone()
@@ -246,7 +276,9 @@ impl Manager {
     pub fn set_enabled(&self, enabled: bool) {
         let mut state = self.lock();
         state.enabled = enabled;
-        self.serve(&mut state);
+        let renewal = self.settle(&mut state);
+        drop(state);
+        self.dispatch(renewal);
     }
     pub fn status(&self) -> Status {
         let catalog = self
@@ -275,7 +307,7 @@ impl Manager {
             .clone();
         let state = self.lock();
         let health = self.0.service.health();
-        let running = state.job.is_some_and(|job| !job.finished());
+        let running = state.busy();
         let (lifecycle, reason) = match (&state.install, health) {
             _ if !state.loaded => (Lifecycle::Loading, Reason::None),
             (None, _) => (Lifecycle::NotInstalled, Reason::None),
@@ -361,7 +393,7 @@ impl Manager {
     /// Stops the service and deletes the model with all of its records.
     pub fn remove(&self) -> RemoveResult {
         let mut state = self.lock();
-        if state.job.is_some_and(|job| !job.finished()) {
+        if state.busy() {
             return RemoveResult::Busy;
         }
         let installed = state.install.is_some();
@@ -372,6 +404,9 @@ impl Manager {
         state.qualification = Recorded::Missing;
         state.reason = Reason::ReportMissing;
         state.job = None;
+        // The caller switches the setting off next. Until it has, and if it
+        // cannot, the model is switched on with nothing left to serve.
+        self.announce(&state);
         if self.0.store.remove().is_err() {
             return RemoveResult::Failed;
         }
@@ -386,23 +421,20 @@ impl Manager {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn start(&self, kind: JobKind, task: impl FnOnce(u64) -> Task) -> Started {
-        let id = {
+        let reserved = {
             let mut state = self.lock();
-            if state.job.is_some_and(|job| !job.finished()) {
-                return Started {
-                    result: StartResult::Busy,
-                    job: None,
-                };
+            let reserved = state.reserve(kind);
+            if reserved.is_some() {
+                // The settings show the job; nothing more is asked of the user.
+                self.announce(&state);
             }
-            state.next_job += 1;
-            state.job = Some(JobStatus {
-                id: state.next_job,
-                kind,
-                phase: JobPhase::Queued,
-                copied: 0,
-                error: JobError::None,
-            });
-            state.next_job
+            reserved
+        };
+        let Some(id) = reserved else {
+            return Started {
+                result: StartResult::Busy,
+                job: None,
+            };
         };
         if self.send(task(id)) {
             Started {
@@ -451,6 +483,8 @@ impl Manager {
             }
         }
     }
+    /// Ends a job. A job that ran has read the records again first, so the
+    /// state is what it left.
     fn finish(&self, id: u64, error: JobError) {
         let mut state = self.lock();
         if let Some(job) = state.job.as_mut().filter(|job| job.id == id) {
@@ -460,6 +494,34 @@ impl Manager {
             } else {
                 JobPhase::Failed
             };
+        }
+        // With the slot free, a measurement that had to wait for this job is
+        // reserved, or else the user is told that nothing is served.
+        let renewal = self.settle(&mut state);
+        drop(state);
+        self.dispatch(renewal);
+    }
+    /// Brings the service in line with the state and reserves the measurement
+    /// the engine owes, in one step: no reader sees the stale model without
+    /// the job that renews it, and the key loop is not told meanwhile that
+    /// the user is needed. The caller passes the result to `dispatch` once
+    /// the state is unlocked.
+    fn settle(&self, state: &mut State) -> Option<u64> {
+        let renewal = if renewal_owed(state) {
+            state.reserve(JobKind::Qualify)
+        } else {
+            None
+        };
+        state.renewed |= renewal.is_some();
+        self.serve(state);
+        renewal
+    }
+    /// Hands a measurement reserved by `settle` to the management thread.
+    fn dispatch(&self, renewal: Option<u64>) {
+        if let Some(id) = renewal
+            && !self.send(Task::Qualify(id))
+        {
+            self.finish(id, JobError::WorkerFailed);
         }
     }
     /// Starts or stops serving to match the setting and the current verdict.
@@ -475,9 +537,23 @@ impl Manager {
             _ => {}
         }
         state.serving = model.is_some();
+        self.announce(state);
+    }
+    /// Tells the key loop whether the user is needed in the settings: the
+    /// model is switched on and nothing is served, nor is a job under way
+    /// that may still make it servable.
+    fn announce(&self, state: &State) {
+        self.0
+            .service
+            .set_setup_required(state.enabled && state.loaded && !state.serving && !state.busy());
     }
     /// Re-reads the records and the worker binary and derives readiness.
     fn refresh(&self) {
+        let renewal = self.reload();
+        self.dispatch(renewal);
+    }
+    /// `refresh` up to the point where a reserved measurement is handed over.
+    fn reload(&self) -> Option<u64> {
         let install = self.0.store.install();
         let qualification = self.0.store.qualification();
         let worker = store::sha256_file(&self.0.worker).ok();
@@ -522,41 +598,46 @@ impl Manager {
             self.0.service.deactivate();
             state.serving = false;
         }
-        self.serve(&mut state);
+        self.settle(&mut state)
     }
     fn run_import(&self, id: u64, source: &Path, model: &'static Model) {
-        // The previous model must not be scored while it is being replaced.
+        // The previous model must not be scored while it is being replaced,
+        // and its verdict says nothing about the files until they are read
+        // again.
         {
             let mut state = self.lock();
             self.0.service.deactivate();
             state.serving = false;
+            state.reason = Reason::ReportMissing;
         }
         self.phase(id, JobPhase::Copying, Some(0));
         let mut last = 0;
-        let imported = self.0.store.import(source, model, |copied| {
-            let percent = (copied.saturating_mul(100) / model.size.max(1)).min(100) as u8;
-            if percent != last {
-                last = percent;
-                self.phase(id, JobPhase::Copying, Some(percent));
-            }
-        });
-        let install = match imported {
-            Ok(install) => install,
-            Err(error) => {
-                self.finish(
-                    id,
-                    match error {
-                        ImportError::Source => JobError::SourceUnreadable,
-                        ImportError::Mismatch => JobError::ModelMismatch,
-                        ImportError::Storage => JobError::Storage,
-                    },
-                );
-                return self.refresh();
-            }
-        };
-        if self.0.store.save_install(&install).is_err() {
-            self.finish(id, JobError::Storage);
-            return self.refresh();
+        let imported = self
+            .0
+            .store
+            .import(source, model, |copied| {
+                let percent = (copied.saturating_mul(100) / model.size.max(1)).min(100) as u8;
+                if percent != last {
+                    last = percent;
+                    self.phase(id, JobPhase::Copying, Some(percent));
+                }
+            })
+            .map_err(|error| match error {
+                ImportError::Source => JobError::SourceUnreadable,
+                ImportError::Mismatch => JobError::ModelMismatch,
+                ImportError::Storage => JobError::Storage,
+            })
+            .and_then(|install| {
+                self.0
+                    .store
+                    .save_install(&install)
+                    .map_err(|_| JobError::Storage)
+            });
+        if let Err(error) = imported {
+            // The attempt may have replaced the file or removed the records.
+            // Read what it left before the job ends.
+            self.refresh();
+            return self.finish(id, error);
         }
         self.phase(id, JobPhase::Copying, Some(100));
         self.refresh();
@@ -629,7 +710,29 @@ fn ready(state: &State, health: Health) -> bool {
         && state.worker_present
         && state.reason == Reason::None
         && !matches!(health, Health::Faulted(_))
-        && !state.job.is_some_and(|job| !job.finished())
+        && !state.busy()
+}
+/// Whether the engine owes a measurement that nobody asked for.
+///
+/// The stored one is intact and names the installed file, but another worker
+/// or runtime made it. An update of Kanade leaves exactly that: every release
+/// builds the worker again. The reason does not say that nothing else of the
+/// build changed. It is found before the profile, the prompt and the corpora
+/// are compared, so those may differ as well. That is no obstacle. The engine
+/// measures with the profile this build registers, as it would if the user
+/// asked for it; the file is still the registered one and the consent still
+/// covers the current terms, or the reason would be another; and a
+/// measurement reads no text of the user and stays on this computer.
+///
+/// A measurement that ends, passed or failed, leaves another reason. The
+/// engine starts one once per process even so, whatever a later reading of
+/// the records says.
+fn renewal_owed(state: &State) -> bool {
+    state.loaded
+        && state.enabled
+        && !state.renewed
+        && !state.busy()
+        && state.reason == Reason::RuntimeChanged
 }
 
 #[cfg(test)]
@@ -637,13 +740,58 @@ mod tests {
     use super::*;
     use crate::{
         Job, Rerank,
+        process::Failure,
         profile::{CATALOG, fixture},
+        service::{Backend, Spawner, StartError},
         store::{
             Stamp,
             tests::{legacy_install, legacy_qualification},
         },
     };
+    use sha2::{Digest, Sha256};
     use std::time::{Duration, Instant};
+
+    /// Stands in for the worker process that the service starts.
+    enum Stub {
+        /// Loads whatever it is given.
+        Serving,
+        /// Finds another file than the registered one.
+        Refusing,
+    }
+    struct Flat;
+    impl Backend for Flat {
+        fn score(&mut self, job: &Job, _: bool) -> Result<Vec<Option<f32>>, Failure> {
+            Ok(vec![Some(0.0); job.candidates.len()])
+        }
+    }
+    impl Spawner for Stub {
+        fn start(&self, _: &Path, _: &'static Model) -> Result<Box<dyn Backend>, StartError> {
+            match self {
+                Self::Serving => Ok(Box::new(Flat)),
+                Self::Refusing => Err(StartError::Rejected(Reason::ModelChanged)),
+            }
+        }
+    }
+    /// Writes a file small enough to import in a test, and registers it.
+    fn small(source: &Path) -> &'static Model {
+        let bytes = b"stands in for a model file";
+        std::fs::write(source, bytes).unwrap();
+        let base = &CATALOG[0];
+        Box::leak(Box::new(Model {
+            id: "fixture-small",
+            name: base.name,
+            file_name: base.file_name,
+            size: bytes.len() as u64,
+            sha256: profile::hex(&Sha256::digest(bytes)).leak(),
+            license: base.license,
+            license_url: base.license_url,
+            source_url: base.source_url,
+            revision: base.revision,
+            attribution: base.attribution,
+            profile: base.profile,
+            preview: base.preview,
+        }))
+    }
 
     /// A data directory with a stand-in model file and a stand-in worker file.
     /// Reading records never opens either of them as a model or a program.
@@ -696,11 +844,27 @@ mod tests {
                 },
             )
         }
+        /// A passing measurement that the worker of another version made.
+        fn stale(&self, model: &Model) -> Evidence {
+            Evidence {
+                worker_sha256: "0".repeat(64),
+                ..self.qualified(model)
+            }
+        }
         fn record(&self, evidence: Evidence) {
             self.write(
                 "qualification.json",
                 &serde_json::to_string(&evidence.seal()).unwrap(),
             );
+        }
+        /// A manager that reads its records when the test calls `reload`.
+        fn unread(&self, enabled: bool, worker: Stub) -> Manager {
+            Manager::unread(
+                Service::new(worker),
+                self.data.clone(),
+                self.worker.clone(),
+                enabled,
+            )
         }
         fn open(&self, enabled: bool) -> (Manager, Status) {
             let manager = Manager::open(self.data.clone(), self.worker.clone(), enabled);
@@ -779,6 +943,228 @@ mod tests {
             std::fs::read(f.data.join("install.json")).unwrap(),
             install_before
         );
+    }
+    #[test]
+    fn a_measurement_by_another_worker_is_renewed_once_without_being_asked() {
+        let tsumugi = &CATALOG[0];
+        // What an update leaves behind: another worker made the measurement.
+        // The rest of the build may differ as well, here the profile version
+        // and the prompt. The reason is the same, and so is what follows.
+        type Edit = fn(&mut Evidence);
+        let updates: [Edit; 2] = [
+            |_| {},
+            |evidence| {
+                evidence.profile_version += 1;
+                evidence.prompt_sha256 = "1".repeat(64);
+            },
+        ];
+        for edit in updates {
+            let f = fixture();
+            f.install(tsumugi);
+            let mut measured = f.stale(tsumugi);
+            edit(&mut measured);
+            f.record(measured.clone());
+            // Switched off: nothing is measured, and nothing is asked.
+            let (manager, status) = f.open(false);
+            assert_eq!((status.reason, status.job), (Reason::RuntimeChanged, None));
+            assert!(!Rerank::setup_required(&manager.service()));
+
+            // Switched on. Reading the records reserves the measurement in
+            // the same step: the stale model is never seen without its job,
+            // and the key loop is not told that the user is needed.
+            let manager = f.unread(true, Stub::Serving);
+            let renewal = manager.reload();
+            let status = manager.status();
+            let job = status.job.unwrap();
+            assert_eq!(renewal, Some(job.id));
+            assert_eq!((job.kind, job.phase), (JobKind::Qualify, JobPhase::Queued));
+            assert_eq!((status.state, status.ready), (Lifecycle::Qualifying, false));
+            assert!(!Rerank::setup_required(&manager.service()));
+            // With no real worker the measurement fails. Now the user is
+            // needed.
+            manager.dispatch(renewal);
+            let status = finished(&manager);
+            let failed = status.job.unwrap();
+            assert_eq!((failed.id, failed.error), (job.id, JobError::WorkerFailed));
+            assert_eq!(status.reason, Reason::ReportMissing);
+            assert!(Rerank::setup_required(&manager.service()));
+            // The engine starts no second one, whatever the records say.
+            f.record(measured);
+            assert_eq!(manager.reload(), None);
+            let status = manager.status();
+            assert_eq!(status.reason, Reason::RuntimeChanged);
+            assert_eq!(status.job.unwrap().id, job.id);
+            assert!(Rerank::setup_required(&manager.service()));
+        }
+    }
+    #[test]
+    fn switching_a_stale_model_on_starts_its_measurement() {
+        let tsumugi = &CATALOG[0];
+        let f = fixture();
+        f.install(tsumugi);
+        f.record(f.stale(tsumugi));
+        let (manager, status) = f.open(false);
+        assert_eq!((status.reason, status.job), (Reason::RuntimeChanged, None));
+        manager.set_enabled(true);
+        // Reserved before the call returns; no status shows the model
+        // switched on, stale and idle.
+        assert_eq!(manager.status().job.unwrap().kind, JobKind::Qualify);
+        assert_eq!(
+            finished(&manager).job.unwrap().error,
+            JobError::WorkerFailed
+        );
+    }
+    #[test]
+    fn a_renewal_waits_for_a_job_that_was_accepted_before_the_records_were_read() {
+        let tsumugi = &CATALOG[0];
+        let f = fixture();
+        f.install(tsumugi);
+        f.record(f.stale(tsumugi));
+        let manager = f.unread(true, Stub::Serving);
+        // An import is accepted while the records are still unread.
+        let import = manager.lock().reserve(JobKind::Import).unwrap();
+        // Reading them finds the slot taken. The measurement stays owed, and
+        // the user is not sent to the settings for it.
+        assert_eq!(manager.reload(), None);
+        assert_eq!(manager.status().job.unwrap().id, import);
+        assert!(!Rerank::setup_required(&manager.service()));
+        // The import cannot read its source and leaves the records as they
+        // were. The measurement follows without being asked for.
+        manager.run_import(import, &f.data.join("absent.gguf"), tsumugi);
+        let status = finished(&manager);
+        let job = status.job.unwrap();
+        assert_eq!(
+            (job.id, job.kind, job.error),
+            (import + 1, JobKind::Qualify, JobError::WorkerFailed)
+        );
+        assert!(Rerank::setup_required(&manager.service()));
+    }
+    #[test]
+    fn a_failed_import_serves_only_what_the_records_still_qualify() {
+        let tsumugi = &CATALOG[0];
+        let f = fixture();
+        f.install(tsumugi);
+        f.record(f.qualified(tsumugi));
+        let manager = f.unread(true, Stub::Serving);
+        assert_eq!(manager.reload(), None);
+        let service = manager.service();
+        assert!(service.active());
+
+        // A source that cannot be read leaves the installed model as it was.
+        // It is stopped for the attempt and served again.
+        let before = service.generation();
+        let id = manager.lock().reserve(JobKind::Import).unwrap();
+        manager.run_import(id, &f.data.join("absent.gguf"), tsumugi);
+        let status = manager.status();
+        assert_eq!(status.job.unwrap().error, JobError::SourceUnreadable);
+        assert_eq!((status.state, status.ready), (Lifecycle::Qualified, true));
+        assert!(service.active());
+        assert_eq!(service.generation(), before + 2);
+        assert!(!Rerank::setup_required(&service));
+
+        // This import replaces the file and removes the records, and then
+        // cannot write the new record. The verdict from before the import
+        // describes none of that: the service is stopped once and is not
+        // started on it again, not even until the records are read.
+        let source = f.data.join("source.gguf");
+        let replacement = small(&source);
+        std::fs::create_dir(f.data.join("install.next")).unwrap();
+        let before = service.generation();
+        let id = manager.lock().reserve(JobKind::Import).unwrap();
+        manager.run_import(id, &source, replacement);
+        let status = manager.status();
+        assert_eq!(status.job.unwrap().error, JobError::Storage);
+        assert_eq!(
+            (status.state, status.ready),
+            (Lifecycle::NotInstalled, false)
+        );
+        assert!(!service.active());
+        assert_eq!(service.generation(), before + 1);
+        assert_eq!(service.submit(job()), None);
+        // Still switched on, and only the user can change what is served.
+        assert!(Rerank::setup_required(&service));
+    }
+    #[test]
+    fn a_switched_on_model_that_cannot_be_served_asks_for_the_settings() {
+        let tsumugi = &CATALOG[0];
+        let f = fixture();
+        // The file of the previous version's model under the same ID.
+        let mut install: serde_json::Value =
+            serde_json::from_str(&legacy_install(tsumugi, f.stamp)).unwrap();
+        install["terms_sha256"] = profile::terms_sha256(tsumugi).into();
+        install["sha256"] = "1".repeat(64).into();
+        f.write("install.json", &install.to_string());
+        f.record(f.qualified(tsumugi));
+        // Only an import helps. The engine measures nothing by itself.
+        let (manager, status) = f.open(true);
+        assert_eq!((status.reason, status.job), (Reason::ModelChanged, None));
+        assert!(Rerank::setup_required(&manager.service()));
+        drop(manager);
+        let (manager, _) = f.open(false);
+        assert!(!Rerank::setup_required(&manager.service()));
+        drop(manager);
+        // Neither does it for a record that names this worker and another
+        // profile: no update of Kanade leaves that.
+        f.install(tsumugi);
+        let mut other = f.qualified(tsumugi);
+        other.profile_version += 1;
+        f.record(other);
+        let (manager, status) = f.open(true);
+        assert_eq!((status.reason, status.job), (Reason::ProfileChanged, None));
+        assert!(Rerank::setup_required(&manager.service()));
+        drop(manager);
+        // A model that is served needs nothing.
+        f.record(f.qualified(tsumugi));
+        let manager = f.unread(true, Stub::Serving);
+        assert_eq!(manager.reload(), None);
+        assert_eq!(manager.status().reason, Reason::None);
+        assert!(manager.service().active());
+        assert!(!Rerank::setup_required(&manager.service()));
+    }
+    #[test]
+    fn a_worker_that_refuses_the_qualified_model_asks_for_the_settings() {
+        let tsumugi = &CATALOG[0];
+        let f = fixture();
+        f.install(tsumugi);
+        f.record(f.qualified(tsumugi));
+        // The records qualify the model, so the manager serves it.
+        let manager = f.unread(true, Stub::Refusing);
+        assert_eq!(manager.reload(), None);
+        let service = manager.service();
+        assert!(service.active());
+        // The worker finds another file than the registered one. The service
+        // stops and is not started again.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while manager.status().state != Lifecycle::Faulted {
+            assert!(Instant::now() < deadline, "the service did not stop");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let status = manager.status();
+        assert_eq!((status.reason, status.ready), (Reason::ModelChanged, false));
+        assert_eq!(service.submit(job()), None);
+        assert!(Rerank::setup_required(&service));
+        // Switched off, nothing is asked.
+        manager.set_enabled(false);
+        assert!(!Rerank::setup_required(&service));
+    }
+    #[test]
+    fn removing_a_model_that_stays_switched_on_asks_for_the_settings() {
+        let tsumugi = &CATALOG[0];
+        let f = fixture();
+        f.install(tsumugi);
+        f.record(f.qualified(tsumugi));
+        let manager = f.unread(true, Stub::Serving);
+        assert_eq!(manager.reload(), None);
+        let service = manager.service();
+        assert!(service.active() && !Rerank::setup_required(&service));
+        // Removal leaves the setting to its caller. Until that has switched
+        // it off, and when saving the setting fails, the model is switched on
+        // with nothing to serve.
+        assert_eq!(manager.remove(), RemoveResult::Removed);
+        assert!(!service.active());
+        assert!(Rerank::setup_required(&service));
+        manager.set_enabled(false);
+        assert!(!Rerank::setup_required(&service));
     }
     #[test]
     fn readiness_follows_the_profile_registered_for_the_installed_model() {
