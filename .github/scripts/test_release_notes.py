@@ -78,6 +78,8 @@ class TextTests(unittest.TestCase):
         paragraphs = text.removesuffix("\n").split("\n\n")
         self.assertEqual(len(paragraphs), 6)
         self.assertIn("Kanade 26.11.901 のプレビュー版です。", paragraphs[0])
+        self.assertIn("SHA256SUMS で照合してから", paragraphs[0])
+        self.assertIn("docs/distribution.md#macos-プレビュー版を開く", paragraphs[0])
         self.assertEqual(
             paragraphs[1],
             "どちらにも Tsumugi 26.11.900（66,507,360 バイト）を同梱しています。",
@@ -95,6 +97,7 @@ class TextTests(unittest.TestCase):
         paragraphs = text.removesuffix("\n").split("\n\n")
         self.assertEqual(len(paragraphs), 4)
         self.assertIn("SHA256SUMSで照合してから", paragraphs[0])
+        self.assertNotIn("macOS プレビュー版を開く手順", text)
         self.assertIn("Tsumugi 26.11.900", paragraphs[1])
         self.assertEqual(paragraphs[2], release_notes.STEPS)
         self.assertIn("`tsumugi.gguf`", paragraphs[3])

@@ -103,7 +103,11 @@ make install
 
 Windows のセットアップ EXE と macOS の DMG は Tsumugi を同梱しています。Windows では「半角／全角」でかな入力と半角英数を切り替えられます。ビルド済みのセットアップがあるチェックアウトで `install.bat` を実行できます。配布EXEをバッチの隣に置いても実行できます。
 
-配布物が公開されるまではソースから開発用のインストールをしてください。`make install`はmacOS向けで、既存のコード署名用証明書が必要です。MacではDMG内のGUIインストーラー、WindowsではEXEセットアップを使います。公開後の導入手順と署名の確認は[配布とインストール](docs/distribution.md)にあります。
+MacではDMG内のGUIインストーラー、WindowsではEXEセットアップを使います。[配布とインストール](docs/distribution.md)
+
+macOSのプレビュー版で警告が出た場合は、SHA-256を照合してからシステム設定で開くことを許可します。[macOS プレビュー版を開く手順](docs/distribution.md#macos-プレビュー版を開く)
+
+ソースからの `make install` はmacOS向けで、既存のコード署名用証明書が必要です。
 
 ## 使い方
 

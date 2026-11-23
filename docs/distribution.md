@@ -30,9 +30,20 @@ Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。
 
 削除する場合は、同じDMGのインストーラーで「アンインストール」を選びます。個人設定と学習データは保持します。
 
-配布ではDeveloper IDによる署名と公証を要求します。本体とインストーラーに公証チケットを付けてからDMGを作り、DMGも署名・公証してチケットを付けます。隔離属性を削除する操作は不要です。
+正式版はDeveloper IDで署名し、Appleの公証を受けます。本体とインストーラーに公証チケットを付けてからDMGを作り、DMGも署名・公証してチケットを付けます。
 
 ソースからの開発用インストールは[開発・操作の詳細](https://github.com/owayo/kanade-ime/blob/main/docs/usage.md)を参照してください。ローカル開発の証明書と配布用のDeveloper IDは用途が異なります。
+
+### macOS プレビュー版を開く
+
+タグに `-preview.` が付いた版のDMGとインストーラーは未公証です。初回に開くと、macOSが開発元やマルウェアの有無を検証できないという警告を出すことがあります。
+
+1. 公式のGitHub ReleasesからDMGと同じ版の `SHA256SUMS` を取得します。ダウンロードしたフォルダで `shasum -a 256 kanade-ime-aarch64-apple-darwin.dmg` を実行し、`SHA256SUMS` のDMGの行と一致することを確認します。[公式のGitHub Releases](https://github.com/owayo/kanade-ime/releases)
+2. DMGを開こうとして警告が出たら「完了」を選びます。「システム設定」→「プライバシーとセキュリティ」を開き、「セキュリティ」に表示されたDMGの「このまま開く」を選びます。確認画面で開くことを許可します。
+3. DMG内の「Kanade インストーラー.app」を開きます。同じ警告が出たら、今度はインストーラーに対して手順2を行います。インストーラーが開いたら「インストール」を選びます。
+4. 「システム設定」→「キーボード」でKanadeを入力ソースに追加します。Kanadeが候補に出ない場合は、ログインし直してから確認してください。
+
+「このまま開く」は、警告が出てから約1時間使えます。[Appleの案内](https://support.apple.com/ja-jp/guide/mac-help/mh40617/27/mac/27)
 
 ## Windows
 

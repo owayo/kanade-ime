@@ -85,7 +85,10 @@ def preview(version: str, model: dict, previous: dict | None, ci: str) -> str:
     """
     opening = (
         f"Kanade {version} のプレビュー版です。Windows x64 の EXE は未署名、"
-        "Apple Silicon Mac の DMG は一時署名・未公証です。"
+        "Apple Silicon Mac の DMG は一時署名・未公証です。macOS で警告が出た場合は、"
+        "SHA256SUMS で照合してからシステム設定で開くことを許可します。"
+        "[macOS プレビュー版を開く手順]"
+        "(https://github.com/owayo/kanade-ime/blob/main/docs/distribution.md#macos-プレビュー版を開く)"
     )
     notice = update_notice(model, previous)
     checksum = (
