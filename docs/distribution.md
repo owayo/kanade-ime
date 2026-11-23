@@ -1,6 +1,6 @@
 # 配布とインストール
 
-配布先はGitHub Releasesです。Apple Silicon Mac向けにはDMG、Windows x64向けにはEXEインストーラーを作ります。WindowsのEXEは、32bitアプリ向けの入力DLLも含むMSIを内包します。Linux、Intel Mac、Windows ARM64のインストーラーは作りません。
+配布先はGitHub Releasesです。正式版はApple Silicon Mac向けの公証済みDMGと、Windows x64向けのEXEを配布します。公開プレビューはWindows x64向けです。WindowsのEXEは、32bitアプリ向けの入力DLLも含むMSIを内包します。Linux、Intel Mac、Windows ARM64のインストーラーは作りません。
 
 検証状況は[実装状況](https://github.com/owayo/kanade-ime/blob/main/docs/status.md)を確認してください。署名・公証とネイティブ入力の検証は、コンパイルとは別に行います。
 
@@ -34,16 +34,9 @@ Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。
 
 ソースからの開発用インストールは[開発・操作の詳細](https://github.com/owayo/kanade-ime/blob/main/docs/usage.md)を参照してください。ローカル開発の証明書と配布用のDeveloper IDは用途が異なります。
 
-### macOS プレビュー版を開く
+### 過去のmacOSプレビュー版
 
-タグに `-preview.` が付いた版のDMGとインストーラーは未公証です。初回に開くと、macOSが開発元やマルウェアの有無を検証できないという警告を出すことがあります。
-
-1. 公式のGitHub ReleasesからDMGと同じ版の `SHA256SUMS` を取得します。ダウンロードしたフォルダで `shasum -a 256 kanade-ime-aarch64-apple-darwin.dmg` を実行し、`SHA256SUMS` のDMGの行と一致することを確認します。[公式のGitHub Releases](https://github.com/owayo/kanade-ime/releases)
-2. DMGを開こうとして警告が出たら「完了」を選びます。「システム設定」→「プライバシーとセキュリティ」を開き、「セキュリティ」に表示されたDMGの「このまま開く」を選びます。確認画面で開くことを許可します。
-3. DMG内の「Kanade インストーラー.app」を開きます。同じ警告が出たら、今度はインストーラーに対して手順2を行います。インストーラーが開いたら「インストール」を選びます。
-4. 「システム設定」→「キーボード」でKanadeを入力ソースに追加します。Kanadeが候補に出ない場合は、ログインし直してから確認してください。
-
-「このまま開く」は、警告が出てから約1時間使えます。[Appleの案内](https://support.apple.com/ja-jp/guide/mac-help/mh40617/27/mac/27)
+過去のプレビューに添付したDMGは、CI用の一時証明書で署名した未公証版です。「このまま開く」でインストーラーを起動できても、macOSがKanade本体の起動を拒否し、インストールが失敗する場合があります。公証済みの正式版を選ぶか、正式版の公開前は手元のコード署名用証明書でビルドしてください。[macOS の開発用インストール](usage.md#macos-の開発用バンドル)
 
 ## Windows
 
@@ -68,7 +61,9 @@ EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエン�
 
 `Release` の手動実行で `channel` を選びます。既定の `stable` は署名・公証した正式版を配布します。`dry_run` では正式版の次の版を計算します。
 
-`preview` は、既定ブランチの同じコミットで CI に合格した Windows x64 の未署名 EXE と、Apple Silicon Mac の一時署名・未公証 DMG を GitHub Releases のプレリリースとして公開します。両方に同じ Tsumugi を1個同梱します。Release 本文にモデルの版、バイト数、SHA-256、インストーラーを検査した CI のリンクが載ります。更新した人がモデルを取り込み直す手順も載ります。直前のプレビュー版が別のモデルを添付しているときは、比べた版のタグを添えて、同梱モデルが替わったことを書きます。正式版の本文にも同じ手順が載り、直前の正式版と比べます。本文は `.github/scripts/release_notes.py` が組み立てます。`dry_run` では両インストーラーを取得してチェックサムの照合まで行います。
+`preview` は、既定ブランチの同じコミットで CI に合格した Windows x64 の未署名 EXE を公開します。EXEは Tsumugi を1個同梱します。macOSの一時署名・未公証DMGはCIの検査用成果物です。`dry_run` ではWindows用EXEとモデルを取得してチェックサムを照合します。
+
+Release 本文には、モデルの版、バイト数、SHA-256と、更新時にモデルを取り込み直す手順が載ります。直前の同じチャネルの版からモデルが替わった場合は、その版のタグも記載します。プレビューの本文はインストーラーを検査したCIにリンクします。本文は `.github/scripts/release_notes.py` が組み立てます。
 
 Tsumugi はインストーラーに同梱する形で配布します。モデルだけの Release は作りません。各 Release には、インストーラーが同梱しているモデルの写しを `tsumugi.gguf` として添付します。`locks/llm.lock.toml` が記録するのはモデルの版・バイト数・SHA-256 で、URL は持ちません。インストーラーを作るときは、`.github/scripts/bundled_model.py` が Release の添付ファイルから SHA-256 の一致するものを探して取得し、ロックと照合してから同梱します。
 

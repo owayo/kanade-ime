@@ -9,6 +9,7 @@ from pathlib import Path
 
 from bundled_model import (
     INSTALLERS,
+    PREVIEW_INSTALLERS,
     carriers,
     locked_model,
     releases,
@@ -17,7 +18,7 @@ from bundled_model import (
 )
 
 
-def checksums(folder: Path, expected: int) -> None:
+def checksums(folder: Path, expected: int, *, preview: bool = False) -> None:
     """Reject unexpected files and hash the installers and the model they bundle.
 
     Raises:
@@ -26,10 +27,11 @@ def checksums(folder: Path, expected: int) -> None:
     """
     model = locked_model()
     entries = sorted(folder.iterdir())
-    names = {*INSTALLERS, model["file"]}
-    if expected != len(INSTALLERS) or {p.name for p in entries} != names:
+    installers = PREVIEW_INSTALLERS if preview else INSTALLERS
+    names = {*installers, model["file"]}
+    if expected != len(installers) or {p.name for p in entries} != names:
         raise ValueError(
-            "release must contain exactly the two supported native installers "
+            "release must contain exactly the installers for its channel "
             "and the model they bundle"
         )
     for p in entries:
@@ -45,7 +47,7 @@ def checksums(folder: Path, expected: int) -> None:
     (folder / "SHA256SUMS").write_text("".join(lines))
 
 
-def verify(folder: Path, tag: str, repo: str) -> None:
+def verify(folder: Path, tag: str, repo: str, *, preview: bool = False) -> None:
     """Match the public release metadata to the locally checked files.
 
     Raises:
@@ -63,8 +65,11 @@ def verify(folder: Path, tag: str, repo: str) -> None:
     )
     if release["name"] != tag or release["tag_name"] != tag:
         raise ValueError("published release title or tag differs")
+    if release["prerelease"] != preview:
+        raise ValueError("published release channel differs")
     assets = {p["name"]: p for p in release["assets"]}
-    expected = {*INSTALLERS, locked_model()["file"], "SHA256SUMS"}
+    installers = PREVIEW_INSTALLERS if preview else INSTALLERS
+    expected = {*installers, locked_model()["file"], "SHA256SUMS"}
     if set(assets) != expected:
         raise ValueError("published release asset names differ")
     for name in expected:
@@ -125,16 +130,17 @@ if __name__ == "__main__":
     parser.add_argument("mode", choices=["checksums", "verify", "prune"])
     parser.add_argument("folder", type=Path, nargs="?")
     parser.add_argument("--expected", type=int, default=2)
+    parser.add_argument("--preview", action="store_true")
     parser.add_argument("--tag")
     parser.add_argument("--repo")
     args = parser.parse_args()
     if args.mode != "prune" and args.folder is None:
         parser.error(f"{args.mode} requires a folder")
     if args.mode == "checksums":
-        checksums(args.folder, args.expected)
+        checksums(args.folder, args.expected, preview=args.preview)
     elif not args.tag or not args.repo:
         parser.error(f"{args.mode} requires --tag and --repo")
     elif args.mode == "verify":
-        verify(args.folder, args.tag, args.repo)
+        verify(args.folder, args.tag, args.repo, preview=args.preview)
     else:
         prune(args.tag, args.repo)

@@ -54,7 +54,12 @@ class InstallerIntegrityTests(unittest.TestCase):
                 sorted([*assets.INSTALLERS, MODEL["file"]]),
             )
             self.assertIn(f"{MODEL['sha256']}  {MODEL['file']}", listed)
-            metadata = {"name": "v26.11.101", "tag_name": "v26.11.101", "assets": []}
+            metadata = {
+                "name": "v26.11.101",
+                "tag_name": "v26.11.101",
+                "prerelease": False,
+                "assets": [],
+            }
             for path in folder.iterdir():
                 metadata["assets"].append(
                     {
@@ -80,6 +85,37 @@ class InstallerIntegrityTests(unittest.TestCase):
                 ]
                 with self.assertRaises(ValueError):
                     assets.verify(folder, "v26.11.101", "example/ime")
+
+    def test_preview_rejects_a_development_dmg_before_and_after_publication(self):
+        """Keep CI-only DMGs out of both staged and published preview assets."""
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.populate(folder)
+            dmg = folder / assets.INSTALLERS[0]
+            with self.assertRaises(ValueError):
+                assets.checksums(folder, 1, preview=True)
+            dmg.unlink()
+            assets.checksums(folder, 1, preview=True)
+            tag = "v26.11.101-preview.1"
+            metadata = {
+                "name": tag,
+                "tag_name": tag,
+                "prerelease": True,
+                "assets": [
+                    asset(index, path.name, path.read_bytes())
+                    | {"size": path.stat().st_size}
+                    for index, path in enumerate(folder.iterdir())
+                ],
+            }
+            with patch.object(
+                assets.subprocess,
+                "check_output",
+                side_effect=lambda *a, **kw: json.dumps(metadata).encode(),
+            ):
+                assets.verify(folder, tag, "example/ime", preview=True)
+                metadata["assets"].append(asset(4, dmg.name))
+                with self.assertRaisesRegex(ValueError, "asset names differ"):
+                    assets.verify(folder, tag, "example/ime", preview=True)
 
     def test_unpacked_executable_missing_installer_and_extra_platform_are_refused(self):
         for name in [

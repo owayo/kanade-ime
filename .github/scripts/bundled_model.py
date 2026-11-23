@@ -15,10 +15,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 # A verified copy that later builds reuse.
 CACHE = ROOT / "artifacts/models"
-# The installers that bundle the model. A release of the app carries both.
+# Public previews carry Windows only. Stable releases also carry a notarized DMG.
+PREVIEW_INSTALLERS = ("kanade-ime-x86_64-pc-windows-msvc.exe",)
 INSTALLERS = (
     "kanade-ime-aarch64-apple-darwin.dmg",
-    "kanade-ime-x86_64-pc-windows-msvc.exe",
+    *PREVIEW_INSTALLERS,
 )
 
 

@@ -4,7 +4,7 @@ import urllib.error
 from unittest.mock import patch
 
 import release_notes
-from bundled_model import INSTALLERS
+from bundled_model import INSTALLERS, PREVIEW_INSTALLERS
 
 WEIGHTS = b"test model"
 OTHER = b"model of an earlier lock"
@@ -36,7 +36,11 @@ class ComparedReleaseTests(unittest.TestCase):
             release("v3", "2026-11-08T00:00:00Z", APP, prerelease=False),
             # Not a release of the app: it only carries a model.
             release("model-only", "2026-11-07T00:00:00Z", {MODEL["file"]: OTHER}),
-            release("v2-preview.6", "2026-11-06T00:00:00Z", APP),
+            release(
+                "v2-preview.6",
+                "2026-11-06T00:00:00Z",
+                dict.fromkeys(PREVIEW_INSTALLERS, b"installer"),
+            ),
             release("v2-preview.4", "2026-11-04T00:00:00Z", APP),
             release("v1", "2026-11-01T00:00:00Z", APP, prerelease=False),
         ]
@@ -77,18 +81,18 @@ class TextTests(unittest.TestCase):
         )
         paragraphs = text.removesuffix("\n").split("\n\n")
         self.assertEqual(len(paragraphs), 6)
-        self.assertIn("Kanade 26.11.901 のプレビュー版です。", paragraphs[0])
-        self.assertIn("SHA256SUMS で照合してから", paragraphs[0])
-        self.assertIn("docs/distribution.md#macos-プレビュー版を開く", paragraphs[0])
+        self.assertIn("Kanade 26.11.901 の Windows x64 向けプレビュー版", paragraphs[0])
+        self.assertIn("macOS の開発用インストール", paragraphs[0])
         self.assertEqual(
             paragraphs[1],
-            "どちらにも Tsumugi 26.11.900（66,507,360 バイト）を同梱しています。",
+            "Tsumugi 26.11.900（66,507,360 バイト）を同梱しています。",
         )
         self.assertTrue(paragraphs[2].startswith("`v1-preview.4` と比べて、"))
         self.assertIn(MODEL["sha256"], paragraphs[3])
+        self.assertIn("EXE は添付の SHA256SUMS で照合できます。", paragraphs[3])
         self.assertIn("`tsumugi.gguf`", paragraphs[4])
         self.assertEqual(
-            paragraphs[5], "[両 OS のインストーラー検査](https://ci.invalid/1)"
+            paragraphs[5], "[Windows インストーラーの検査](https://ci.invalid/1)"
         )
         self.assertTrue(text.endswith("検査](https://ci.invalid/1)\n"))
 
@@ -97,7 +101,7 @@ class TextTests(unittest.TestCase):
         paragraphs = text.removesuffix("\n").split("\n\n")
         self.assertEqual(len(paragraphs), 4)
         self.assertIn("SHA256SUMSで照合してから", paragraphs[0])
-        self.assertNotIn("macOS プレビュー版を開く手順", text)
+        self.assertIn("macOSはDMG内の「Kanade インストーラー.app」", paragraphs[0])
         self.assertIn("Tsumugi 26.11.900", paragraphs[1])
         self.assertEqual(paragraphs[2], release_notes.STEPS)
         self.assertIn("`tsumugi.gguf`", paragraphs[3])

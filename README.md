@@ -81,11 +81,11 @@ Tsumugi 26.11.105 は、日本語版 Wikipedia の全記事から、測定に使
 <!-- standard:install:start -->
 ### GitHub Releases から
 
-プレビュー版を試す場合は、タグに `-preview.` が付いたリリースを開きます。Windows x64 の EXE は未署名、Apple Silicon Mac の DMG は一時署名・未公証です。どちらも Tsumugi を1つ同梱しています。インストーラーと同じリリースの `SHA256SUMS` でファイルを照合できます。[プレビュー版の一覧](https://github.com/owayo/kanade-ime/releases?q=preview)・[正式版](https://github.com/owayo/kanade-ime/releases/latest)
+Windows x64 のプレビュー版は、タグに `-preview.` が付いたリリースにあります。EXE は未署名です。Apple Silicon Mac 向けのDMGは、Developer IDで署名し、Appleの公証を受けた正式版で配布します。インストーラーは Tsumugi を同梱しています。同じリリースの `SHA256SUMS` でファイルを照合できます。[GitHub Releases](https://github.com/owayo/kanade-ime/releases)
 
 | プラットフォーム | ファイル |
 |---|---|
-| macOS (Apple Silicon) | `kanade-ime-aarch64-apple-darwin.dmg` |
+| macOS (Apple Silicon、正式版) | `kanade-ime-aarch64-apple-darwin.dmg` |
 | Windows (x86_64) | `kanade-ime-x86_64-pc-windows-msvc.exe` |
 
 ### ソースから
@@ -105,9 +105,7 @@ Windows のセットアップ EXE と macOS の DMG は Tsumugi を同梱して�
 
 MacではDMG内のGUIインストーラー、WindowsではEXEセットアップを使います。[配布とインストール](docs/distribution.md)
 
-macOSのプレビュー版で警告が出た場合は、SHA-256を照合してからシステム設定で開くことを許可します。[macOS プレビュー版を開く手順](docs/distribution.md#macos-プレビュー版を開く)
-
-ソースからの `make install` はmacOS向けで、既存のコード署名用証明書が必要です。
+Apple Silicon Macで正式版の公開前に試す場合は、手元のコード署名用証明書を使ってソースからインストールできます。[macOS の開発用インストール](docs/usage.md#macos-の開発用バンドル)
 
 ## 使い方
 

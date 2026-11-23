@@ -34,23 +34,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Find the successful installer tests for this revision
+      - name: Find the successful CI run for this revision
         id: ci
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
           run_id=$(gh run list --workflow ci.yml --branch "$DEFAULT_BRANCH" --commit "$GITHUB_SHA" --event push --status success --json databaseId,headSha --jq '.[0] | select(.headSha == env.GITHUB_SHA) | .databaseId')
           if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
-            echo "::error::Windows and macOS CI must pass on this exact default-branch commit"
+            echo "::error::CI must pass on this exact default-branch commit"
             exit 1
           fi
           echo "run=$run_id" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v8
-        with:
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.ci.outputs.run }}
-          name: macos-development-installer
-          path: release
       - uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
@@ -62,13 +56,13 @@ jobs:
       # Later builds find it there by its SHA-256.
       - name: Add the bundled model to the release files
         run: python3 .github/scripts/bundled_model.py release
-      - name: Check installers and identify the bundled model
+      - name: Check the Windows installer and identify the bundled model
         id: assets
         env:
           CI_RUN: ${{ steps.ci.outputs.run }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/release-assets.py checksums release
+          python3 .github/scripts/release-assets.py checksums release --preview --expected 1
           (cd release && sha256sum --check SHA256SUMS)
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           tag="v$version-preview.$GITHUB_RUN_NUMBER"
@@ -91,7 +85,7 @@ jobs:
           else
             gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "$TAG" --notes-file preview-notes.md --prerelease --latest=false
           fi
-          python3 .github/scripts/release-assets.py verify release --tag "$TAG" --repo "$GITHUB_REPOSITORY"
+          python3 .github/scripts/release-assets.py verify release --preview --tag "$TAG" --repo "$GITHUB_REPOSITORY"
           # A copy attached to an earlier release for builds is no longer needed.
           python3 .github/scripts/release-assets.py prune --tag "$TAG" --repo "$GITHUB_REPOSITORY"
   prepare-release:
@@ -375,6 +369,6 @@ jobs:
             echo "Build: $BUILD"
             echo "Release: $RELEASE"
             echo "Preview: $PREVIEW"
-            echo 'Platforms: Windows x64; macOS Apple Silicon'
+            echo 'Platforms: Windows x64 preview; Windows x64 and macOS Apple Silicon stable'
             echo 'Distribution: GitHub Releases only'
           } >> "$GITHUB_STEP_SUMMARY"
