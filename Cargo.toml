@@ -5,7 +5,7 @@ resolver = "3"
 exclude = ["third_party/mozc", "artifacts/analyzer-source"]
 
 [workspace.package]
-version = "26.11.118"
+version = "26.11.119"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
