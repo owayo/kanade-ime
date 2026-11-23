@@ -107,6 +107,11 @@ install: require-signing bundle ## リリース版のアプリを INSTALL_DIR �
 	@if [ "$(INSTALL_DICTIONARY)" = 1 ]; then $(XTASK) fetch-dictionary; fi
 	KANADE_INSTALL_DIR="$(INSTALL_DIR)" $(XTASK) install-macos $(if $(filter 1,$(ENABLE_INPUT_SOURCE)),--enable,)
 
+.PHONY: macos-preview-pkg
+macos-preview-pkg: require-signing prepare ## macOSプレビュー用の未公証PKGを作る
+	$(RUN) python .github/scripts/bundled_model.py --fetch
+	$(RUN) bash .github/scripts/package-macos.sh --preview-pkg
+
 uninstall: require-macos ## INSTALL_DIR からアプリを取り除く
 	KANADE_INSTALL_DIR="$(INSTALL_DIR)" $(XTASK) install-macos --uninstall
 

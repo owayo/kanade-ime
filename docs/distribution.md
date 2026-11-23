@@ -1,6 +1,6 @@
 # 配布とインストール
 
-配布先はGitHub Releasesです。正式版はApple Silicon Mac向けの公証済みDMGと、Windows x64向けのEXEを配布します。公開プレビューはWindows x64向けです。WindowsのEXEは、32bitアプリ向けの入力DLLも含むMSIを内包します。Linux、Intel Mac、Windows ARM64のインストーラーは作りません。
+配布先はGitHub Releasesです。Apple Silicon Mac向けには正式版の公証済みDMGとプレビュー版の未公証PKGを配布します。Windows x64向けはどちらもEXEで、32bitアプリ向け入力DLLを含むMSIを内包します。Linux、Intel Mac、Windows ARM64のインストーラーは作りません。
 
 検証状況は[実装状況](https://github.com/owayo/kanade-ime/blob/main/docs/status.md)を確認してください。署名・公証とネイティブ入力の検証は、コンパイルとは別に行います。
 
@@ -10,7 +10,8 @@
 
 | 対象 | ファイル | 内容 |
 |---|---|---|
-| Apple Silicon Mac | `kanade-ime-aarch64-apple-darwin.dmg` | 日本語のGUIインストーラー、Kanade本体、Tsumugi |
+| Apple Silicon Mac（正式版） | `kanade-ime-aarch64-apple-darwin.dmg` | 日本語のGUIインストーラー、Kanade本体、Tsumugi |
+| Apple Silicon Mac（プレビュー版） | `kanade-ime-aarch64-apple-darwin.pkg` | macOS標準インストーラーで導入するKanade本体、Tsumugi |
 | Windows x64 | `kanade-ime-x86_64-pc-windows-msvc.exe` | 日本語のセットアップ画面、Tsumugi を含むMSI |
 
 同じ Release にある `tsumugi.gguf` は、インストーラーが同梱しているモデルの写しです。インストーラーのビルドが取得するために添付しています。利用するときにダウンロードする必要はありません。
@@ -18,6 +19,8 @@
 Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。EXEをバッチの隣に置いても実行できます。Windows では Tsumugi をインストール先の `models/` に、macOS では Kanade 内の設定アプリに配置します。利用条件に同意して有効にする手順は[利用方法](usage.md)にあります。同梱モデルが替わらない版に更新したときは、並べ替えを有効にしていれば、Kanade がモデルを検証し直します。`install.bat` はその検証が終わるのを待ちます。同梱モデルが替わった版に更新したときは、モデルを取り込み直すまで候補の並べ替えが働きません。その手順も同じページにあります。
 
 ## macOS
+
+### 正式版のDMG
 
 1. 入力中の文章を確定し、DMGを開きます。
 2. 「Kanade インストーラー」をダブルクリックし、「インストール」を選びます。
@@ -34,9 +37,19 @@ Windowsでは `install.bat` が `artifacts/release/` のEXEを起動します。
 
 ソースからの開発用インストールは[開発・操作の詳細](https://github.com/owayo/kanade-ime/blob/main/docs/usage.md)を参照してください。ローカル開発の証明書と配布用のDeveloper IDは用途が異なります。
 
-### 過去のmacOSプレビュー版
+### macOS プレビュー版のPKG
 
-過去のプレビューに添付したDMGは、CI用の一時証明書で署名した未公証版です。「このまま開く」でインストーラーを起動できても、macOSがKanade本体の起動を拒否し、インストールが失敗する場合があります。公証済みの正式版を選ぶか、正式版の公開前は手元のコード署名用証明書でビルドしてください。[macOS の開発用インストール](usage.md#macos-の開発用バンドル)
+PKGは未署名・未公証です。Apple SiliconのmacOS 14以降で、現在のユーザーにインストールします。
+
+1. ダウンロード先で `shasum -a 256 kanade-ime-aarch64-apple-darwin.pkg` を実行し、同じリリースの `SHA256SUMS` にあるPKGの行と照合します。一致したら入力中の文章を確定し、PKGを開きます。
+2. macOSがPKGを止めた場合は、システム設定の「プライバシーとセキュリティ」で、そのPKGの「このまま開く」を選びます。[Appleの案内](https://support.apple.com/ja-jp/102445)
+3. macOS標準のインストーラーで「インストール」を選びます。入力ソースにKanadeが表示されないときは、ログアウト・再ログインしてから「キーボード」の設定で追加します。
+
+削除するには、入力中の文章を確定してから、ターミナルで次を実行します。個人設定と学習データは保持します。
+
+```sh
+"$HOME/Library/Input Methods/Kanade.app/Contents/MacOS/kanade-installer" install-macos --uninstall
+```
 
 ## Windows
 
@@ -61,7 +74,7 @@ EXEはWiX Burnのセットアップです。MSIはProgram Files配下にエン�
 
 `Release` の手動実行で `channel` を選びます。既定の `stable` は署名・公証した正式版を配布します。`dry_run` では正式版の次の版を計算します。
 
-`preview` は、既定ブランチの同じコミットで CI に合格した Windows x64 の未署名 EXE を公開します。EXEは Tsumugi を1個同梱します。macOSの一時署名・未公証DMGはCIの検査用成果物です。`dry_run` ではWindows用EXEとモデルを取得してチェックサムを照合します。
+`preview` の公開対象は、既定ブランチの同じコミットでCIに合格したWindows x64向け未署名EXEと、Apple Silicon Mac向け未署名・未公証PKGです。どちらもTsumugiを1個同梱します。CIのmacOSランナーでは、CI用証明書への信頼を削除してからPKGをインストールし、アプリの署名、同梱モデル、エンジン接続を確認します。`dry_run` は、両インストーラーとモデルのチェックサム照合までです。
 
 Release 本文には、モデルの版、バイト数、SHA-256と、更新時にモデルを取り込み直す手順が載ります。直前の同じチャネルの版からモデルが替わった場合は、その版のタグも記載します。プレビューの本文はインストーラーを検査したCIにリンクします。本文は `.github/scripts/release_notes.py` が組み立てます。
 

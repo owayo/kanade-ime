@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Kanade IME プレビュー</title>
+  <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
+  <allowed-os-versions>
+    <os-version min="14.0"/>
+  </allowed-os-versions>
+  <choices-outline>
+    <line choice="kanade"/>
+  </choices-outline>
+  <choice id="kanade" visible="false" title="Kanade">
+    <pkg-ref id="dev.kanade.preview"/>
+  </choice>
+  <pkg-ref id="dev.kanade.preview">Kanade.pkg</pkg-ref>
+</installer-gui-script>

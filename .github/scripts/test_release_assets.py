@@ -92,10 +92,11 @@ class InstallerIntegrityTests(unittest.TestCase):
             folder = Path(directory)
             self.populate(folder)
             dmg = folder / assets.INSTALLERS[0]
+            (folder / assets.PREVIEW_INSTALLERS[0]).write_bytes(b"test preview pkg")
             with self.assertRaises(ValueError):
-                assets.checksums(folder, 1, preview=True)
+                assets.checksums(folder, 2, preview=True)
             dmg.unlink()
-            assets.checksums(folder, 1, preview=True)
+            assets.checksums(folder, 2, preview=True)
             tag = "v26.11.101-preview.1"
             metadata = {
                 "name": tag,

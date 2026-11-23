@@ -4,7 +4,7 @@ import urllib.error
 from unittest.mock import patch
 
 import release_notes
-from bundled_model import INSTALLERS, PREVIEW_INSTALLERS
+from bundled_model import INSTALLERS, WINDOWS_INSTALLER
 
 WEIGHTS = b"test model"
 OTHER = b"model of an earlier lock"
@@ -39,7 +39,7 @@ class ComparedReleaseTests(unittest.TestCase):
             release(
                 "v2-preview.6",
                 "2026-11-06T00:00:00Z",
-                dict.fromkeys(PREVIEW_INSTALLERS, b"installer"),
+                {WINDOWS_INSTALLER: b"installer"},
             ),
             release("v2-preview.4", "2026-11-04T00:00:00Z", APP),
             release("v1", "2026-11-01T00:00:00Z", APP, prerelease=False),
@@ -81,18 +81,19 @@ class TextTests(unittest.TestCase):
         )
         paragraphs = text.removesuffix("\n").split("\n\n")
         self.assertEqual(len(paragraphs), 6)
-        self.assertIn("Kanade 26.11.901 の Windows x64 向けプレビュー版", paragraphs[0])
-        self.assertIn("macOS の開発用インストール", paragraphs[0])
+        self.assertIn("Kanade 26.11.901 のプレビュー版", paragraphs[0])
+        self.assertIn("PKG は未署名・未公証", paragraphs[0])
+        self.assertIn("macOS プレビュー版のインストール手順", paragraphs[0])
         self.assertEqual(
             paragraphs[1],
             "Tsumugi 26.11.900（66,507,360 バイト）を同梱しています。",
         )
         self.assertTrue(paragraphs[2].startswith("`v1-preview.4` と比べて、"))
         self.assertIn(MODEL["sha256"], paragraphs[3])
-        self.assertIn("EXE は添付の SHA256SUMS で照合できます。", paragraphs[3])
+        self.assertIn("インストーラーは添付の SHA256SUMS で照合できます。", paragraphs[3])
         self.assertIn("`tsumugi.gguf`", paragraphs[4])
         self.assertEqual(
-            paragraphs[5], "[Windows インストーラーの検査](https://ci.invalid/1)"
+            paragraphs[5], "[インストーラーの検査](https://ci.invalid/1)"
         )
         self.assertTrue(text.endswith("検査](https://ci.invalid/1)\n"))
 

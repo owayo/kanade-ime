@@ -125,7 +125,7 @@ These are not implemented or advertised as working:
 
 ## Native release gates
 
-On macOS 27.2.1, the CI-signed DMG from `v26.11.119-preview.11` could launch the outer installer after user approval. macOS refused to start the copied input method when the installer checked input-source status. The system reported an unknown certificate chain and the installer restored the existing bundle. Public previews now carry the Windows installer. The macOS development DMG remains a CI artifact, and public macOS distribution requires Developer ID signing and notarization.
+On macOS 27.2.1, the CI-signed DMG from `v26.11.119-preview.11` could launch the outer installer after user approval. macOS refused to start the copied input method when the installer checked input-source status. The system reported an unknown certificate chain and the installer restored the existing bundle. The preview workflow uses a current-user PKG, with an installation rehearsal after removing CI certificate trust. The stable macOS DMG remains subject to Developer ID signing and notarization.
 
 Test IMK input, candidate clicks, focus, client exceptions and sleep recovery in TextEdit, browsers and editors. Verify secure input without fetching surrounding text. Some macOS system surfaces reject third-party IMK input sources.
 

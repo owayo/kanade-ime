@@ -81,11 +81,12 @@ Tsumugi 26.11.105 は、日本語版 Wikipedia の全記事から、測定に使
 <!-- standard:install:start -->
 ### GitHub Releases から
 
-Windows x64 のプレビュー版は、タグに `-preview.` が付いたリリースにあります。EXE は未署名です。Apple Silicon Mac 向けのDMGは、Developer IDで署名し、Appleの公証を受けた正式版で配布します。インストーラーは Tsumugi を同梱しています。同じリリースの `SHA256SUMS` でファイルを照合できます。[GitHub Releases](https://github.com/owayo/kanade-ime/releases)
+プレビュー版は、タグに `-preview.` が付いたリリースにあります。Windows x64 の EXE は未署名、Apple Silicon Mac の PKG は未署名・未公証です。正式版の Mac 向け DMG は Developer ID で署名し、Apple の公証を受けます。同じリリースの `SHA256SUMS` でファイルを照合できます。[GitHub Releases](https://github.com/owayo/kanade-ime/releases)
 
 | プラットフォーム | ファイル |
 |---|---|
 | macOS (Apple Silicon、正式版) | `kanade-ime-aarch64-apple-darwin.dmg` |
+| macOS (Apple Silicon、プレビュー版) | `kanade-ime-aarch64-apple-darwin.pkg` |
 | Windows (x86_64) | `kanade-ime-x86_64-pc-windows-msvc.exe` |
 
 ### ソースから
@@ -103,7 +104,7 @@ make install
 
 Windows のセットアップ EXE と macOS の DMG は Tsumugi を同梱しています。Windows では「半角／全角」でかな入力と半角英数を切り替えられます。ビルド済みのセットアップがあるチェックアウトで `install.bat` を実行できます。配布EXEをバッチの隣に置いても実行できます。
 
-MacではDMG内のGUIインストーラー、WindowsではEXEセットアップを使います。[配布とインストール](docs/distribution.md)
+Macのプレビュー版はPKGを開きます。警告が出た場合の許可手順と、インストール後の入力ソースの追加方法は配布ガイドにあります。[macOS プレビュー版のインストール手順](docs/distribution.md#macos-プレビュー版のpkg)
 
 Apple Silicon Macで正式版の公開前に試す場合は、手元のコード署名用証明書を使ってソースからインストールできます。[macOS の開発用インストール](docs/usage.md#macos-の開発用バンドル)
 

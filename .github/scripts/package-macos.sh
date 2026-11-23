@@ -1,5 +1,9 @@
 #!/bin/bash
 set -euo pipefail
+case "${1:-}" in
+  ""|--preview-pkg) ;;
+  *) echo "Usage: $0 [--preview-pkg]" >&2; exit 2 ;;
+esac
 test "$(uname -m)" = arm64
 : "${CODESIGN_IDENTITY:?A certificate identity is required}"
 test "$CODESIGN_IDENTITY" != -
@@ -17,6 +21,11 @@ codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$app
 codesign --verify --deep --strict "$app"
 "$app/Contents/MacOS/kanade-imk" --check
 "$app/Contents/MacOS/kanade-installer" install-macos --status
+
+if [ "${1:-}" = --preview-pkg ]; then
+  test "${KANADE_NOTARIZE:-0}" = 0
+  exec bash .github/scripts/package-macos-preview.sh "$app"
+fi
 
 stage=artifacts/distribution/macos
 rm -rf "$stage"

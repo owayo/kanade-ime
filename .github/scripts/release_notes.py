@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from bundled_model import INSTALLERS, PREVIEW_INSTALLERS, locked_model, releases
+from bundled_model import INSTALLERS, WINDOWS_INSTALLER, locked_model, releases
 
 # The engine stops using an imported model that is not the bundled one. The
 # candidate window then asks for the settings, and the settings say what to do.
@@ -26,7 +26,8 @@ def compared(listing: list, tag: str, prerelease: bool) -> dict | None:
         The latest other release that carries the installers for this channel.
 
     """
-    installers = set(PREVIEW_INSTALLERS if prerelease else INSTALLERS)
+    # Preview releases have used different macOS formats and sometimes only Windows.
+    installers = {WINDOWS_INSTALLER} if prerelease else set(INSTALLERS)
     earlier = [
         release
         for release in listing
@@ -85,22 +86,23 @@ def preview(version: str, model: dict, previous: dict | None, ci: str) -> str:
 
     """
     opening = (
-        f"Kanade {version} の Windows x64 向けプレビュー版です。EXE は未署名です。"
-        "Apple Silicon Mac で試す場合は、ソースからインストールできます。"
-        "[macOS の開発用インストール]"
-        "(https://github.com/owayo/kanade-ime/blob/main/docs/usage.md#macos-の開発用バンドル)"
+        f"Kanade {version} のプレビュー版です。Windows x64 の EXE は未署名、"
+        "Apple Silicon Mac の PKG は未署名・未公証です。"
+        "Macでは同じリリースの SHA256SUMS で照合してから PKG を開いてください。"
+        "[macOS プレビュー版のインストール手順]"
+        "(https://github.com/owayo/kanade-ime/blob/main/docs/distribution.md#macos-プレビュー版のpkg)"
     )
     notice = update_notice(model, previous)
     checksum = (
         f"モデルの SHA-256 は `{model['sha256']}` です。"
-        "EXE は添付の SHA256SUMS で照合できます。"
+        "インストーラーは添付の SHA256SUMS で照合できます。"
     )
     attached = (
         f"`{model['file']}` は同梱しているモデルの写しで、"
         "インストーラーのビルドが取得するために添付しています。"
         "利用するときにダウンロードする必要はありません。"
     )
-    tests = f"[Windows インストーラーの検査]({ci})"
+    tests = f"[インストーラーの検査]({ci})"
     paragraphs = [opening, bundled(model), notice, checksum, attached, tests]
     return "\n\n".join(paragraphs) + "\n"
 

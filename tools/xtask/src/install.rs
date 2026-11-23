@@ -278,6 +278,7 @@ pub fn macos(root: &Path) -> Result<()> {
             return Ok(());
         }
         let enable = std::env::args().any(|arg| arg == "--enable");
+        let preview_package = std::env::args().any(|arg| arg == "--preview-pkg");
         let home = PathBuf::from(std::env::var_os("HOME").context("home directory missing")?);
         let methods = std::env::var_os("KANADE_INSTALL_DIR")
             .map(PathBuf::from)
@@ -488,7 +489,15 @@ pub fn macos(root: &Path) -> Result<()> {
             let service = format!("{domain}/dev.kanade.engine");
             restart_agent(&domain, &service, &path)?;
             verify_engine(&target)?;
-            let local = inspect_input_source(&target, true, enable)?;
+            if let Err(error) = inspect_input_source(&target, true, enable) {
+                if preview_package {
+                    println!(
+                        "Kanade was installed; log in again and add Kanade in System Settings"
+                    );
+                    return Ok(());
+                }
+                return Err(error);
+            }
             let started = std::time::Instant::now();
             let global = loop {
                 let status: serde_json::Value = serde_json::from_str(&output(
@@ -501,7 +510,6 @@ pub fn macos(root: &Path) -> Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             };
-            let _ = local;
             println!("input-source status: {}", serde_json::to_string(&global)?);
             if global["installed"].as_u64().unwrap_or(0) == 0 {
                 println!("input-source discovery is pending; log in again before adding Kanade");

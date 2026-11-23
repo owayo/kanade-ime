@@ -49,6 +49,13 @@ jobs:
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.ci.outputs.run }}
+          name: kanade-ime-aarch64-apple-darwin.pkg
+          path: release
+          skip-decompress: true
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.ci.outputs.run }}
           name: kanade-ime-x86_64-pc-windows-msvc.exe
           path: release
           skip-decompress: true
@@ -56,13 +63,13 @@ jobs:
       # Later builds find it there by its SHA-256.
       - name: Add the bundled model to the release files
         run: python3 .github/scripts/bundled_model.py release
-      - name: Check the Windows installer and identify the bundled model
+      - name: Check the installers and identify the bundled model
         id: assets
         env:
           CI_RUN: ${{ steps.ci.outputs.run }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/release-assets.py checksums release --preview --expected 1
+          python3 .github/scripts/release-assets.py checksums release --preview
           (cd release && sha256sum --check SHA256SUMS)
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           tag="v$version-preview.$GITHUB_RUN_NUMBER"
@@ -369,6 +376,6 @@ jobs:
             echo "Build: $BUILD"
             echo "Release: $RELEASE"
             echo "Preview: $PREVIEW"
-            echo 'Platforms: Windows x64 preview; Windows x64 and macOS Apple Silicon stable'
+            echo 'Platforms: Windows x64; macOS Apple Silicon'
             echo 'Distribution: GitHub Releases only'
           } >> "$GITHUB_STEP_SUMMARY"
