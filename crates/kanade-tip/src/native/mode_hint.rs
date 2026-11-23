@@ -77,6 +77,21 @@ fn win32_caret() -> Option<RECT> {
     }
 }
 
+// Capture geometry while the key's field still has focus. A later Pop or
+// focus change can destroy its window before the queue reports a discard.
+pub(super) fn input_rect() -> RECT {
+    win32_caret()
+        .or_else(|| unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(GetFocus(), &mut rect).ok().map(|()| rect)
+        })
+        .unwrap_or(RECT {
+            right: 1,
+            bottom: 1,
+            ..Default::default()
+        }) // Primary monitor's origin.
+}
+
 const TIMER: usize = 0x4b4d;
 unsafe extern "system" fn tooltip_proc(
     hwnd: HWND,
@@ -126,6 +141,14 @@ impl Hint {
         hint.outage_shown_at = Some(Instant::now());
         Ok(hint)
     }
+    pub(super) fn for_discard(input: RECT) -> Result<Self> {
+        Self::show_at(
+            None,
+            input,
+            w!("Kanade はこの入力を反映できず、破棄しました"),
+            5000,
+        )
+    }
     fn with_label(
         context: &ITfContext,
         tid: u32,
@@ -146,19 +169,39 @@ impl Hint {
             if owner.is_invalid() {
                 return Err(failure());
             }
+            Self::show_at(Some(owner), caret, label, duration_ms)
+        }
+    }
+    fn show_at(
+        focus_owner: Option<HWND>,
+        anchor: RECT,
+        label: windows::core::PCWSTR,
+        duration_ms: u32,
+    ) -> Result<Self> {
+        unsafe {
             InitCommonControlsEx(&INITCOMMONCONTROLSEX {
                 dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
                 dwICC: ICC_WIN95_CLASSES,
             })
             .ok()?;
+            let mut monitor = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            GetMonitorInfoW(
+                MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST),
+                &mut monitor,
+            )
+            .ok()?;
+            let work = monitor.rcWork;
             // Unowned so an editor destroying its child window cannot invalidate our handle.
             let hwnd = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
                 TOOLTIPS_CLASSW,
                 None,
                 WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX | TTS_NOANIMATE | TTS_NOFADE),
-                0,
-                0,
+                work.left,
+                work.top,
                 0,
                 0,
                 None,
@@ -171,11 +214,17 @@ impl Hint {
                 outage_shown_at: None,
             };
             SetWindowSubclass(hwnd, Some(tooltip_proc), TIMER, 0).ok()?;
+            // Only forward mouse messages when the tool has a distinct owner.
+            let mut flags = TTF_TRACK | TTF_ABSOLUTE;
+            if focus_owner.is_some() {
+                flags |= TTF_TRANSPARENT;
+            }
+            let owner = focus_owner.unwrap_or(hwnd);
             let info = TTTOOLINFOW {
                 // Hosts without a v6 common-controls manifest accept the v2 layout.
                 // The reserved trailing pointer is unused by tracking tools.
                 cbSize: std::mem::offset_of!(TTTOOLINFOW, lpReserved) as u32,
-                uFlags: TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT,
+                uFlags: flags,
                 hwnd: owner,
                 uId: 1,
                 lpszText: PWSTR(label.as_ptr().cast_mut()),
@@ -186,34 +235,28 @@ impl Hint {
                 return Err(failure());
             }
             let gap = ((GetDpiForWindow(owner).max(96) * 5) / 96) as i32;
-            let xy = (caret.left as u16 as u32) | (((caret.bottom + gap) as u16 as u32) << 16);
+            let (x, y) = if focus_owner.is_some() {
+                (anchor.left, anchor.bottom + gap)
+            } else {
+                (work.left, work.top)
+            };
+            let xy = (x as u16 as u32) | ((y as u16 as u32) << 16);
             SendMessageW(hwnd, TTM_TRACKPOSITION, None, Some(LPARAM(xy as isize)));
             SendMessageW(hwnd, TTM_TRACKACTIVATE, Some(WPARAM(1)), Some(tool));
             let mut bubble = RECT::default();
             GetWindowRect(hwnd, &mut bubble)?;
             let (width, height) = (bubble.right - bubble.left, bubble.bottom - bubble.top);
-            let mut monitor = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            GetMonitorInfoW(
-                MonitorFromRect(&caret, MONITOR_DEFAULTTONEAREST),
-                &mut monitor,
-            )
-            .ok()?;
-            let work = monitor.rcWork;
-            let x = caret
-                .left
-                .clamp(work.left, (work.right - width).max(work.left));
-            let y = if caret.bottom + gap + height <= work.bottom {
-                caret.bottom + gap
+            let (x, y) = if focus_owner.is_none() {
+                (work.right - width - gap, work.bottom - height - gap)
+            } else if anchor.bottom + gap + height <= work.bottom {
+                (anchor.left, anchor.bottom + gap)
             } else {
-                caret.top - gap - height
+                (anchor.left, anchor.top - gap - height)
             };
             SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
-                x,
+                x.clamp(work.left, (work.right - width).max(work.left)),
                 y.clamp(work.top, (work.bottom - height).max(work.top)),
                 0,
                 0,

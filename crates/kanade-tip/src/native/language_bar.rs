@@ -660,9 +660,9 @@ mod tests {
             let items = thread.cast::<ITfLangBarItemMgr>()?;
             let mut cookie = 0;
             items.AdviseItemSink(&sink, &mut cookie, &GUID_LBI_INPUTMODE)?;
-            assert!(tip.japanese.get());
+            assert!(tip.shared.japanese.get());
             item.OnClick(TF_LBI_CLK_LEFT, POINT::default(), std::ptr::null())?;
-            assert!(!tip.japanese.get());
+            assert!(!tip.shared.japanese.get());
             assert_eq!(item.GetText()?.to_string(), "半角英数");
             assert_eq!(
                 item.GetTooltipString()?.to_string(),
@@ -670,7 +670,7 @@ mod tests {
             );
             assert_eq!(*updates.borrow(), [CHANGED]);
             item.OnClick(TF_LBI_CLK_LEFT, POINT::default(), std::ptr::null())?;
-            assert!(tip.japanese.get());
+            assert!(tip.shared.japanese.get());
             assert_eq!(item.GetText()?.to_string(), "ひらがな");
             assert_eq!(*updates.borrow(), [CHANGED, CHANGED]);
             // A key that switches the mode updates the button as well.
@@ -876,12 +876,12 @@ mod tests {
                 ]
             );
             item.OnMenuSelect(1)?;
-            assert!(!tip.japanese.get());
+            assert!(!tip.shared.japanese.get());
             item.OnMenuSelect(0)?;
-            assert!(tip.japanese.get());
+            assert!(tip.shared.japanese.get());
             // Choosing the current mode keeps it.
             item.OnMenuSelect(0)?;
-            assert!(tip.japanese.get());
+            assert!(tip.shared.japanese.get());
             item.OnMenuSelect(3)?;
             assert_eq!(opened.get(), 1);
             // The separator and a line that does not exist are not commands.
