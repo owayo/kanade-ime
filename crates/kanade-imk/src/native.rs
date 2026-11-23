@@ -1,4 +1,5 @@
 mod candidates;
+mod mode_indicator;
 mod refinement;
 
 use anyhow::{Context as _, Result, ensure};
@@ -145,6 +146,7 @@ define_class!(
                 if let Some(sender) = sender && let Ok(mut stored) = self.ivars().sender.try_borrow_mut() {
                     *stored = Some(sender.retain());
                 }
+                mode_indicator::activated(self, sender);
                 self.connect();
             });
         }
@@ -158,7 +160,11 @@ define_class!(
                         Incident::DeactivatedWhileComposing
                     });
                 }
-                if unsafe { IsSecureEventInputEnabled() } { self.clear_context(); return; }
+                if unsafe { IsSecureEventInputEnabled() } {
+                    mode_indicator::deactivated(self, None);
+                    self.clear_context();
+                    return;
+                }
                 let client = self.ivars().engine.try_borrow_mut().ok().and_then(|mut c| c.take());
                 if let (Some(sender), Some(mut client)) = (sender, client) {
                     let context = self.context(sender, &client);
@@ -168,6 +174,9 @@ define_class!(
                     // commit ends as its reading instead of staying marked.
                     if client.is_held() { client.finish(&mut document); }
                 }
+                if !self.ivars().selecting_source.get() {
+                    mode_indicator::deactivated(self, sender);
+                }
                 self.clear_context();
             });
         }
@@ -176,7 +185,11 @@ define_class!(
             guarded(|| {
                 let (Some(event), Some(sender)) = (event, sender) else { return false; };
                 if event.r#type() != NSEventType::KeyDown { return false; }
-                if unsafe { IsSecureEventInputEnabled() } { self.clear_context(); return false; }
+                if unsafe { IsSecureEventInputEnabled() } {
+                    mode_indicator::deactivated(self, None);
+                    self.clear_context();
+                    return false;
+                }
                 // JIS Kana is a mode key; its characters can contain a space.
                 if event.keyCode() == 0x68 { return true; }
                 if self.ivars().selecting_source.get() { return false; }
@@ -311,6 +324,7 @@ impl Controller {
         {
             return;
         }
+        let anchor = guarded(|| mode_indicator::capture_anchor(sender));
         // Drop all controller borrows before TIS reenters deactivateServer:.
         self.clear_context();
         let source = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
@@ -323,7 +337,9 @@ impl Controller {
         let selected = guarded(|| unsafe { TISSelectInputSource(source) == 0 });
         self.ivars().selecting_source.set(false);
         unsafe { CFRelease(source) };
-        if !selected {
+        if selected {
+            mode_indicator::switched_to_ascii(self, anchor);
+        } else {
             eprintln!("kanade-imk: ASCII input source could not be selected");
         }
     }
@@ -707,6 +723,7 @@ pub fn run() -> Result<()> {
             IMKServer::initWithName_bundleIdentifier(IMKServer::alloc(), Some(&name), Some(&id))
         }
         .context("input method server could not start")?;
+        mode_indicator::install(&id, mtm);
         app.run();
         drop(server);
         Ok(())
