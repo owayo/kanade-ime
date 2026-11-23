@@ -45,6 +45,7 @@ pub enum JobPhase {
     Tokenizer,
     Bounds,
     Ranking,
+    Activating,
     Done,
     Failed,
 }
@@ -63,6 +64,7 @@ pub enum JobError {
     QualityGate,
     /// The stored consent does not cover the current terms; import again.
     ConsentRequired,
+    ActivationFailed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct JobStatus {
@@ -112,6 +114,8 @@ pub struct InstalledModel {
     pub profile: Option<&'static str>,
     /// The installed file is a model this build registers and can serve.
     pub supported: bool,
+    /// The stored consent covers this exact model and the current terms.
+    pub consent_current: bool,
 }
 #[derive(Serialize)]
 pub struct QualificationSummary {
@@ -175,10 +179,12 @@ pub enum RemoveResult {
     Failed,
 }
 
+pub type Activation = Box<dyn FnOnce() -> std::io::Result<()> + Send>;
+
 enum Task {
     Refresh,
-    Import(u64, PathBuf, &'static Model),
-    Qualify(u64),
+    Import(u64, PathBuf, &'static Model, Option<Activation>),
+    Qualify(u64, Option<Activation>),
 }
 struct State {
     enabled: bool,
@@ -339,6 +345,7 @@ impl Manager {
                     name: model.map(|model| model.name),
                     profile: model.map(|model| model.profile.id),
                     supported: model.is_some(),
+                    consent_current: model.is_some_and(|model| install.consents(model)),
                 }
             }),
             qualification: state
@@ -356,6 +363,15 @@ impl Manager {
     /// Starts an import after checking the explicit consent. The file is only
     /// read on the management thread.
     pub fn import(&self, request: ImportRequest) -> Started {
+        self.import_with_activation(request, None)
+    }
+    /// The activation runs on the management thread after successful
+    /// qualification, while this job still owns the slot.
+    pub fn import_with_activation(
+        &self,
+        request: ImportRequest,
+        activation: Option<Activation>,
+    ) -> Started {
         let refuse = |result| Started { result, job: None };
         let Some(model) = profile::model(&request.model) else {
             return refuse(StartResult::UnsupportedModel);
@@ -370,12 +386,17 @@ impl Manager {
         {
             return refuse(StartResult::ConsentRequired);
         }
-        self.start(JobKind::Import, |id| Task::Import(id, request.path, model))
+        self.start(JobKind::Import, |id| {
+            Task::Import(id, request.path, model, activation)
+        })
     }
     /// Measures the installed model again with its registered profile, for
     /// example after a worker update or when the stored measurement is not
     /// bound to the current profile.
     pub fn qualify(&self) -> Started {
+        self.qualify_with_activation(None)
+    }
+    pub fn qualify_with_activation(&self, activation: Option<Activation>) -> Started {
         {
             let state = self.lock();
             let refusal = match (&state.install, state.model, state.reason) {
@@ -388,7 +409,7 @@ impl Manager {
                 return Started { result, job: None };
             }
         }
-        self.start(JobKind::Qualify, Task::Qualify)
+        self.start(JobKind::Qualify, |id| Task::Qualify(id, activation))
     }
     /// Stops the service and deletes the model with all of its records.
     pub fn remove(&self) -> RemoveResult {
@@ -460,8 +481,10 @@ impl Manager {
                     while let Ok(task) = receiver.recv() {
                         match task {
                             Task::Refresh => manager.refresh(),
-                            Task::Import(id, path, model) => manager.run_import(id, &path, model),
-                            Task::Qualify(id) => manager.run_qualify(id),
+                            Task::Import(id, path, model, activation) => {
+                                manager.run_import(id, &path, model, activation)
+                            }
+                            Task::Qualify(id, activation) => manager.run_qualify(id, activation),
                         }
                     }
                 });
@@ -519,7 +542,7 @@ impl Manager {
     /// Hands a measurement reserved by `settle` to the management thread.
     fn dispatch(&self, renewal: Option<u64>) {
         if let Some(id) = renewal
-            && !self.send(Task::Qualify(id))
+            && !self.send(Task::Qualify(id, None))
         {
             self.finish(id, JobError::WorkerFailed);
         }
@@ -600,7 +623,13 @@ impl Manager {
         }
         self.settle(&mut state)
     }
-    fn run_import(&self, id: u64, source: &Path, model: &'static Model) {
+    fn run_import(
+        &self,
+        id: u64,
+        source: &Path,
+        model: &'static Model,
+        activation: Option<Activation>,
+    ) {
         // The previous model must not be scored while it is being replaced,
         // and its verdict says nothing about the files until they are read
         // again.
@@ -641,11 +670,20 @@ impl Manager {
         }
         self.phase(id, JobPhase::Copying, Some(100));
         self.refresh();
-        self.run_qualify(id);
+        self.run_qualify(id, activation);
     }
-    fn run_qualify(&self, id: u64) {
-        let error = self.measure(id).err().unwrap_or(JobError::None);
+    fn run_qualify(&self, id: u64, activation: Option<Activation>) {
+        let mut error = self.measure(id).err().unwrap_or(JobError::None);
         self.refresh();
+        if error == JobError::None
+            && let Some(activate) = activation
+        {
+            self.phase(id, JobPhase::Activating, None);
+            let qualified = self.lock().reason == Reason::None;
+            if !qualified || activate().is_err() {
+                error = JobError::ActivationFailed;
+            }
+        }
         self.finish(id, error);
     }
     fn measure(&self, id: u64) -> Result<(), JobError> {
@@ -1030,7 +1068,7 @@ mod tests {
         assert!(!Rerank::setup_required(&manager.service()));
         // The import cannot read its source and leaves the records as they
         // were. The measurement follows without being asked for.
-        manager.run_import(import, &f.data.join("absent.gguf"), tsumugi);
+        manager.run_import(import, &f.data.join("absent.gguf"), tsumugi, None);
         let status = finished(&manager);
         let job = status.job.unwrap();
         assert_eq!(
@@ -1054,7 +1092,12 @@ mod tests {
         // It is stopped for the attempt and served again.
         let before = service.generation();
         let id = manager.lock().reserve(JobKind::Import).unwrap();
-        manager.run_import(id, &f.data.join("absent.gguf"), tsumugi);
+        manager.run_import(
+            id,
+            &f.data.join("absent.gguf"),
+            tsumugi,
+            Some(Box::new(|| panic!("failed import must not activate"))),
+        );
         let status = manager.status();
         assert_eq!(status.job.unwrap().error, JobError::SourceUnreadable);
         assert_eq!((status.state, status.ready), (Lifecycle::Qualified, true));
@@ -1071,7 +1114,7 @@ mod tests {
         std::fs::create_dir(f.data.join("install.next")).unwrap();
         let before = service.generation();
         let id = manager.lock().reserve(JobKind::Import).unwrap();
-        manager.run_import(id, &source, replacement);
+        manager.run_import(id, &source, replacement, None);
         let status = manager.status();
         assert_eq!(status.job.unwrap().error, JobError::Storage);
         assert_eq!(

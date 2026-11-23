@@ -1,5 +1,7 @@
 use super::*;
 use kanade_learn::service::{AdminAction, LearningService};
+use kanade_llm::manager::{Activation, ImportRequest, Started};
+use serde::Deserialize;
 use std::{
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -32,6 +34,33 @@ impl Settings {
         }
     }
 }
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SettingsRequest {
+    Edit(SettingsChanges),
+    Replace(config::Config),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsChanges {
+    changes: serde_json::Map<String, serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModelImport {
+    Activate(ImportAndActivate),
+    Import(ImportRequest),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportAndActivate {
+    import_and_activate: ImportRequest,
+}
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ModelQualification {
+    activate: bool,
+}
 impl Administration {
     /// `settings` is `None` when the settings file could not be read.
     pub(super) fn new(
@@ -57,7 +86,11 @@ impl Administration {
     }
     /// Answers a request, with whether the settings file and the learning
     /// store could be read.
-    pub(super) fn handle(&self, request: &Manage, tx: &SyncSender<Work>) -> io::Result<Management> {
+    pub(super) fn handle(
+        self: &Arc<Self>,
+        request: &Manage,
+        tx: &SyncSender<Work>,
+    ) -> io::Result<Management> {
         // Read under the same lock as the settings it describes, so settings
         // kept off for a file that could not be read never pass as read.
         let mut settings_state = None;
@@ -133,10 +166,21 @@ impl Administration {
                 serde_json::to_value(&current.config)?
             }
             Action::SetSettings => {
-                let settings: config::Config = serde_json::from_str(&request.json)
+                let edit: SettingsRequest = serde_json::from_str(&request.json)
                     .map_err(|_| io::ErrorKind::InvalidInput)?;
-                settings.validate()?;
                 let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
+                let settings = match edit {
+                    SettingsRequest::Replace(settings) => settings,
+                    SettingsRequest::Edit(edit) => {
+                        let serde_json::Value::Object(mut merged) = serde_json::to_value(&current.config)? else {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        };
+                        merged.extend(edit.changes);
+                        serde_json::from_value(serde_json::Value::Object(merged))
+                            .map_err(|_| io::ErrorKind::InvalidInput)?
+                    }
+                };
+                settings.validate()?;
                 // Switching the model on needs a qualified model and runtime.
                 // Other settings stay editable while `llm` is already on.
                 if settings.llm && !current.config.llm && !self.llm.ready() {
@@ -157,21 +201,35 @@ impl Administration {
             }
             Action::LlmStatus => serde_json::to_value(self.llm.status())?,
             Action::LlmImport => {
-                let import = serde_json::from_str(&request.json)
+                let request = serde_json::from_str(&request.json)
                     .map_err(|_| io::ErrorKind::InvalidInput)?;
-                serde_json::to_value(self.llm.import(import))?
+                let started = match request {
+                    ModelImport::Import(import) => self.llm.import(import),
+                    ModelImport::Activate(request) => self.start_activating(tx, |activation| {
+                        self.llm.import_with_activation(request.import_and_activate, activation)
+                    })?,
+                };
+                serde_json::to_value(started)?
             }
-            Action::LlmQualify => serde_json::to_value(self.llm.qualify())?,
+            Action::LlmQualify => {
+                let options: ModelQualification = if request.json.is_empty() {
+                    ModelQualification::default()
+                } else {
+                    serde_json::from_str(&request.json).map_err(|_| io::ErrorKind::InvalidInput)?
+                };
+                serde_json::to_value(if options.activate {
+                    self.start_activating(tx, |activation| self.llm.qualify_with_activation(activation))?
+                } else {
+                    self.llm.qualify()
+                })?
+            }
             Action::LlmRemove => {
+                let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
                 let result = self.llm.remove();
-                if result != kanade_llm::manager::RemoveResult::Busy {
-                    let mut current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
-                    // Settings that could not be read already have the model off.
-                    if current.config.llm {
-                        let mut settings = current.config.clone();
-                        settings.llm = false;
-                        self.apply_settings(&mut current, settings, tx)?;
-                    }
+                if result != kanade_llm::manager::RemoveResult::Busy && current.config.llm {
+                    let mut settings = current.config.clone();
+                    settings.llm = false;
+                    self.apply_settings(&mut current, settings, tx)?;
                 }
                 serde_json::json!({"result": result})
             }
@@ -286,6 +344,33 @@ impl Administration {
             settings_file: named(settings, self.settings_file()),
             learning_file: named(learning, self.learning_file()),
         })
+    }
+    fn start_activating(
+        self: &Arc<Self>,
+        tx: &SyncSender<Work>,
+        start: impl FnOnce(Option<Activation>) -> Started,
+    ) -> io::Result<Started> {
+        // Take the job slot before another settings operation can turn the
+        // previous model off or remove it.
+        let current = self.settings.lock().map_err(|_| io::ErrorKind::Other)?;
+        if current.unreadable {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if current.config.llm {
+            return Ok(start(None));
+        }
+        let admin = Arc::downgrade(self);
+        let tx = tx.clone();
+        Ok(start(Some(Box::new(move || {
+            let admin = admin.upgrade().ok_or(io::ErrorKind::BrokenPipe)?;
+            let mut current = admin.settings.lock().map_err(|_| io::ErrorKind::Other)?;
+            if !current.config.llm {
+                let mut settings = current.config.clone();
+                settings.llm = true;
+                admin.apply_settings(&mut current, settings, &tx)?;
+            }
+            Ok(())
+        }))))
     }
     pub(super) fn reload_projects(&self, tx: &SyncSender<Work>) -> io::Result<bool> {
         reload_catalog(&self.data, &self.project_reload, tx)

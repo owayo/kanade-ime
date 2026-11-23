@@ -21,6 +21,8 @@ pub struct CatalogEntry {
 pub struct Job {
     pub phase: String,
     pub error: String,
+    #[serde(default)]
+    pub copied: u8,
 }
 #[derive(Clone, Deserialize)]
 pub struct InstalledModel {
@@ -29,6 +31,8 @@ pub struct InstalledModel {
     /// this version registers, even under the same ID.
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub consent_current: bool,
 }
 impl InstalledModel {
     /// How the settings name the installed file.
@@ -50,64 +54,23 @@ pub struct Status {
     pub job: Option<Job>,
 }
 
-/// Consent belongs to the displayed model and exact terms, never a list index.
-#[derive(Default)]
-pub struct ModelSelection {
-    key: Option<SelectionKey>,
-    pub license: bool,
-    pub local_processing: bool,
-}
-#[derive(PartialEq, Eq)]
-struct SelectionKey {
-    id: String,
-    terms: String,
-    profile: Option<String>,
-    profile_sha256: Option<String>,
-}
-impl SelectionKey {
-    fn of(model: &CatalogEntry) -> Self {
-        Self {
-            id: model.id.clone(),
-            terms: model.terms_sha256.clone(),
-            profile: model.profile.clone(),
-            profile_sha256: model.profile_sha256.clone(),
-        }
-    }
-}
-impl ModelSelection {
-    pub fn refresh(&mut self, status: Option<&Status>) {
-        let model = status.and_then(|status| {
-            self.key
-                .as_ref()
-                .and_then(|key| status.catalog.iter().find(|model| model.id == key.id))
-                .or_else(|| {
-                    status.installed.as_ref().and_then(|installed| {
-                        status.catalog.iter().find(|model| model.id == installed.id)
-                    })
-                })
-                .or_else(|| status.catalog.first())
-        });
-        self.select(model);
-    }
-    pub fn select(&mut self, model: Option<&CatalogEntry>) {
-        let key = model.map(SelectionKey::of);
-        if self.key != key {
-            self.key = key;
-            self.license = false;
-            self.local_processing = false;
-        }
-    }
-    pub fn selected<'a>(&self, status: &'a Status) -> Option<&'a CatalogEntry> {
-        status.catalog.iter().find(|model| self.matches(model))
-    }
-    pub fn matches(&self, model: &CatalogEntry) -> bool {
-        self.key.as_ref() == Some(&SelectionKey::of(model))
-    }
-    pub fn accepted(&self, model: &CatalogEntry) -> bool {
-        self.matches(model) && self.license && self.local_processing
-    }
-}
 impl Status {
+    pub fn catalog_entry(&self) -> Option<&CatalogEntry> {
+        self.catalog
+            .iter()
+            .find(|model| self.has_consent(model))
+            .or_else(|| self.catalog.first())
+    }
+    pub fn has_consent(&self, model: &CatalogEntry) -> bool {
+        self.installed
+            .as_ref()
+            .is_some_and(|installed| installed.id == model.id && installed.consent_current)
+    }
+    pub fn needs_import(&self) -> bool {
+        self.catalog_entry()
+            .is_none_or(|model| !self.has_consent(model))
+            || matches!(self.reason.as_str(), "model_missing" | "model_changed")
+    }
     pub fn busy(&self) -> bool {
         self.state == "loading"
             || self
@@ -131,8 +94,19 @@ impl Status {
                 "tokenizer" => return "モデルの文字処理を検証しています。",
                 "bounds" => return "モデルの処理量の上限を検証しています。",
                 "ranking" | "timing" => return "候補の評価結果と応答時間を検証しています。",
+                "activating" => return "検証が完了しました。AI変換をオンにしています。",
                 "failed" => {
                     return match job.error.as_str() {
+                        "activation_failed" if self.enabled && self.ready => "AI変換はオンです。",
+                        "activation_failed" => {
+                            "検証は完了しました。設定を保存できなかったため、AI変換をオンにしてください。"
+                        }
+                        "source_unreadable" => {
+                            "モデルのファイルを読み込めませんでした。ファイルを確認してもう一度お試しください。"
+                        }
+                        "storage" => {
+                            "モデルを保存できませんでした。空き容量とアクセス権を確認してください。"
+                        }
                         "model_mismatch" => {
                             "対応するモデルと内容が一致しません。配布元とファイルを確認してください。"
                         }
@@ -155,14 +129,11 @@ impl Status {
             return if self.enabled {
                 "検証済みのモデルで、変換候補を文脈に合わせて並べ替えます。"
             } else {
-                "モデルの検証が完了しました。候補の並べ替えを有効にできます。"
+                "同意と検証は完了しています。いつでもAI変換をオンにできます。"
             };
         }
         match self.state.as_str() {
-            "loading" => "モデルの導入状態を確認しています。",
-            "not_installed" => {
-                "モデルは未導入です。配布元から取得したGGUFファイルを取り込んでください。"
-            }
+            "not_installed" => "利用条件に同意すると、モデルの準備を始めます。",
             "qualifying" => "モデルを検証しています。通常の変換はそのまま使えます。",
             _ if self.reason == "model_unsupported" => {
                 "導入済みのモデルはこのバージョンで利用できません。対応モデルを取り込み直してください。"
@@ -181,9 +152,9 @@ impl Status {
                 "推論プログラムまたはモデルの設定が更新されています。モデルを再検証してください。"
             }
             _ if self.reason == "worker_failed" => {
-                "モデルの処理を停止しました。再検証してから有効にしてください。"
+                "モデルの処理を停止しました。再検証から再開できます。"
             }
-            _ => "モデルを検証してから有効にしてください。",
+            _ => "AI変換を使うには、モデルの検証が必要です。",
         }
     }
 }
@@ -210,6 +181,17 @@ pub fn import(
     license: bool,
     local: bool,
 ) -> Result<serde_json::Value> {
+    request(
+        Action::LlmImport,
+        import_payload(path, model, license, local)?,
+    )
+}
+fn import_payload(
+    path: &Path,
+    model: &CatalogEntry,
+    license: bool,
+    local: bool,
+) -> Result<serde_json::Value> {
     ensure!(path.is_absolute(), "model path must be absolute");
     ensure!(
         license && local,
@@ -224,18 +206,31 @@ pub fn import(
         accept_license: bool,
         accept_local_processing: bool,
     }
+    Ok(serde_json::to_value(Import {
+        path,
+        model: &model.id,
+        license: &model.license,
+        terms_sha256: &model.terms_sha256,
+        accept_license: license,
+        accept_local_processing: local,
+    })?)
+}
+pub fn import_and_activate(path: &Path, model: &CatalogEntry) -> Result<serde_json::Value> {
     request(
         Action::LlmImport,
-        serde_json::to_value(Import {
-            path,
-            model: &model.id,
-            license: &model.license,
-            terms_sha256: &model.terms_sha256,
-            accept_license: license,
-            accept_local_processing: local,
-        })?,
+        serde_json::json!({"import_and_activate": import_payload(path, model, true, true)?}),
     )
 }
+pub fn qualify_and_activate() -> Result<serde_json::Value> {
+    request(Action::LlmQualify, serde_json::json!({"activate": true}))
+}
+pub fn set_enabled(enabled: bool) -> Result<serde_json::Value> {
+    request(
+        Action::SetSettings,
+        serde_json::json!({"changes": {"llm": enabled}}),
+    )
+}
+
 pub fn qualify() -> Result<serde_json::Value> {
     request(Action::LlmQualify, serde_json::json!({}))
 }
@@ -372,26 +367,31 @@ mod tests {
             job: None,
         }
     }
-    fn accept(selection: &mut ModelSelection) {
-        selection.license = true;
-        selection.local_processing = true;
-    }
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
     }
 
     #[test]
-    fn initial_selection_prefers_the_installed_model_and_never_accepts_terms() {
+    fn status_displays_only_the_consent_saved_for_the_current_model() {
         let mut state = state();
-        state.installed = Some(InstalledModel {
-            id: "fixture-b".into(),
-            name: Some("fixture-b".into()),
-        });
-        let mut selection = ModelSelection::default();
-        selection.refresh(Some(&state));
-        let model = selection.selected(&state).unwrap();
-        assert_eq!(model.id, "fixture-b");
-        assert!(!selection.accepted(model));
+        assert!(!state.has_consent(state.catalog_entry().unwrap()));
+        state.installed = Some(
+            serde_json::from_value(serde_json::json!({
+                "id": "fixture-b", "name": "Fixture B", "consent_current": true
+            }))
+            .unwrap(),
+        );
+        // A freshly opened window has only the engine reply.
+        assert_eq!(state.catalog_entry().unwrap().id, "fixture-b");
+        assert!(state.has_consent(state.catalog_entry().unwrap()));
+        assert!(!state.has_consent(&state.catalog[0]));
+        assert!(!state.needs_import());
+        state.reason = "model_missing".into();
+        assert!(state.needs_import());
+        assert!(state.has_consent(state.catalog_entry().unwrap()));
+        state.installed.as_mut().unwrap().consent_current = false;
+        assert!(state.needs_import());
+        assert!(!state.has_consent(&state.catalog[1]));
     }
     #[test]
     fn an_installed_file_is_named_only_as_the_model_it_is() {
@@ -408,76 +408,6 @@ mod tests {
         );
         let older_engine: InstalledModel = serde_json::from_str(r#"{"id":"fixture-a"}"#).unwrap();
         assert_eq!(older_engine.name, None);
-    }
-    #[test]
-    fn changing_model_resets_both_consents_and_rejects_an_old_dialog_selection() {
-        let state = state();
-        let mut selection = ModelSelection::default();
-        selection.refresh(Some(&state));
-        let previous = selection.selected(&state).unwrap().clone();
-        accept(&mut selection);
-        assert!(selection.accepted(&previous));
-        selection.select(Some(&state.catalog[1]));
-        assert!(!selection.license && !selection.local_processing);
-        accept(&mut selection);
-        assert!(!selection.accepted(&previous));
-        assert!(selection.accepted(&state.catalog[1]));
-    }
-    #[test]
-    fn a_catalog_reorder_preserves_the_named_selection_and_consent() {
-        let mut state = state();
-        let mut selection = ModelSelection::default();
-        selection.refresh(Some(&state));
-        accept(&mut selection);
-        state.catalog.reverse();
-        selection.refresh(Some(&state));
-        let model = selection.selected(&state).unwrap();
-        assert_eq!(model.id, "fixture-a");
-        assert!(selection.accepted(model));
-    }
-    #[test]
-    fn changed_terms_require_fresh_consent_and_retire_an_open_dialog() {
-        let mut state = state();
-        let mut selection = ModelSelection::default();
-        selection.refresh(Some(&state));
-        let previous = selection.selected(&state).unwrap().clone();
-        accept(&mut selection);
-        state.catalog[0].terms_sha256 = "updated-terms".into();
-        selection.refresh(Some(&state));
-        assert!(!selection.license && !selection.local_processing);
-        accept(&mut selection);
-        assert!(!selection.accepted(&previous));
-        assert!(selection.accepted(&state.catalog[0]));
-    }
-    #[test]
-    fn changed_profile_retires_the_old_selection_even_if_the_license_is_unchanged() {
-        let mut state = state();
-        let mut selection = ModelSelection::default();
-        selection.refresh(Some(&state));
-        let previous = selection.selected(&state).unwrap().clone();
-        accept(&mut selection);
-        state.catalog[0].profile_sha256 = Some("updated-profile".into());
-        selection.refresh(Some(&state));
-        assert!(!selection.license && !selection.local_processing);
-        accept(&mut selection);
-        assert!(!selection.accepted(&previous));
-        assert!(selection.accepted(&state.catalog[0]));
-    }
-    #[test]
-    fn missing_catalog_or_connection_drops_consent_before_a_new_selection() {
-        let mut state = state();
-        let mut selection = ModelSelection::default();
-        selection.refresh(Some(&state));
-        accept(&mut selection);
-        state.catalog.remove(0);
-        selection.refresh(Some(&state));
-        assert_eq!(selection.selected(&state).unwrap().id, "fixture-b");
-        assert!(!selection.license && !selection.local_processing);
-        accept(&mut selection);
-        selection.refresh(None);
-        assert!(selection.selected(&state).is_none());
-        selection.refresh(Some(&state));
-        assert!(!selection.accepted(&state.catalog[0]));
     }
     #[test]
     fn command_line_requires_an_unambiguous_registered_model() {

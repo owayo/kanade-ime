@@ -16,41 +16,56 @@ mod learning_panel;
 #[cfg(target_os = "macos")]
 mod macos;
 mod model_panel;
-mod project_panel;
-mod project_readings;
-mod project_workflow;
+mod records_panel;
 mod text_field;
 const WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(680.0), px(700.0));
 const WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(560.0), px(420.0));
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SettingsPage {
+    #[default]
+    Conversion,
+    Appearance,
+    Learning,
+    Records,
+}
+impl SettingsPage {
+    const ALL: [Self; 4] = [
+        Self::Conversion,
+        Self::Appearance,
+        Self::Learning,
+        Self::Records,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Conversion => "入力・変換",
+            Self::Appearance => "候補表示",
+            Self::Learning => "学習",
+            Self::Records => "学習記録",
+        }
+    }
+}
+
 struct Settings {
     learning_editor: Option<learning_panel::Editor>,
     learning_busy: bool,
     learning_epoch: u64,
     navigation_focus: gpui::FocusHandle,
     scroll: gpui::ScrollHandle,
-    project_scroll: gpui::ScrollHandle,
+    page: SettingsPage,
     models: Option<crate::models::Status>,
+    bundled_model: Option<std::path::PathBuf>,
     model_busy: bool,
-    model_selection: crate::models::ModelSelection,
+    model_notice: Option<&'static str>,
     model_remove_confirm: bool,
     config: Config,
     settings_loaded: bool,
     /// What the engine could read, as of the last refresh.
     stores: crate::Stores,
     loading: bool,
-    records: Vec<serde_json::Value>,
-    total: u64,
-    offset: u32,
+    records: records_panel::Records,
     status: String,
     pending_clear: Option<Action>,
-    projects_open: bool,
-    projects: kanade_indexer::management::Listing,
-    projects_loaded: bool,
-    project_pending: bool,
-    project_monitor: Option<kanade_indexer::monitor::Report>,
-    project_monitor_polling: bool,
-    pending_project_revoke: Option<kanade_indexer::management::Edit>,
-    project_scope: project_panel::ScopePanel,
     dictionary_open: bool,
     dictionary: dictionary_panel::DictionaryPanel,
 }
@@ -62,28 +77,19 @@ impl Settings {
             learning_epoch: 0,
             navigation_focus: cx.focus_handle(),
             scroll: gpui::ScrollHandle::new(),
-            project_scroll: gpui::ScrollHandle::new(),
+            page: SettingsPage::default(),
+            bundled_model: model_panel::bundled_model(),
             models: None,
             model_busy: false,
-            model_selection: Default::default(),
+            model_notice: None,
             model_remove_confirm: false,
             config: Config::default(),
             settings_loaded: false,
             stores: crate::Stores::UNKNOWN,
             loading: false,
-            records: vec![],
-            total: 0,
-            offset: 0,
+            records: Default::default(),
             status: String::new(),
             pending_clear: None,
-            projects_open: false,
-            projects: Default::default(),
-            projects_loaded: false,
-            project_pending: false,
-            project_monitor: None,
-            project_monitor_polling: false,
-            pending_project_revoke: None,
-            project_scope: Default::default(),
             dictionary_open: false,
             dictionary: Default::default(),
         }
@@ -94,58 +100,33 @@ impl Settings {
         }
         self.loading = true;
         self.status = "設定を取得しています。".into();
-        let offset = self.offset;
-        let task = cx.background_spawn(async move {
-            let config = crate::settings_with_stores();
-            let records = crate::manage(Manage {
-                action: Action::ListLearning as i32,
-                offset,
-                ..Default::default()
-            });
-            let models = crate::models::status();
-            (config, records, models)
-        });
+        let task = cx.background_spawn(async { crate::settings_with_stores() });
         cx.spawn(async move |view, cx| {
-            let (config, records, models) = task.await;
+            let config = task.await;
             let _ = view.update(cx, |this, cx| {
                 this.loading = false;
-                this.models = models.ok();
-                this.model_selection.refresh(this.models.as_ref());
-                if this
-                    .models
-                    .as_ref()
-                    .is_some_and(crate::models::Status::busy)
-                    && !this.model_busy
-                {
-                    this.monitor_models(cx);
-                }
                 #[cfg(target_os = "macos")]
-                if config.is_err() || records.is_err() {
-                    settings_log(LogComponent::Settings, LogEvent::LoadFailed);
-                } else {
-                    settings_log(LogComponent::Settings, LogEvent::Loaded);
-                }
-                let config_ok = config.is_ok();
-                if let Ok((config, stores)) = config {
-                    this.config = config;
-                    this.stores = stores;
-                    this.settings_loaded = true;
-                }
-                this.status = match records {
-                    Ok(value) => {
-                        this.records = value["records"].as_array().cloned().unwrap_or_default();
-                        this.total = value["total"].as_u64().unwrap_or(0);
-                        if config_ok {
-                            ""
-                        } else {
-                            "設定を取得できませんでした。接続を確認して「更新」を押してください。"
-                        }
+                settings_log(
+                    LogComponent::Settings,
+                    if config.is_ok() {
+                        LogEvent::Loaded
+                    } else {
+                        LogEvent::LoadFailed
+                    },
+                );
+                match config {
+                    Ok((config, stores)) => {
+                        this.config = config;
+                        this.stores = stores;
+                        this.settings_loaded = true;
+                        this.status.clear();
                     }
                     Err(_) => {
-                        "エンジンに接続できませんでした。接続を確認して「更新」を押してください。"
+                        this.settings_loaded = false;
+                        this.status =
+                            "設定を取得できませんでした。エンジンの接続を確認してください。".into();
                     }
                 }
-                .into();
                 cx.notify();
             });
         })
@@ -169,7 +150,7 @@ impl Settings {
         }
         let before = self.config.clone();
         change(&mut self.config);
-        match crate::save(&self.config) {
+        match crate::save_changes(&before, &self.config) {
             Ok(()) => {
                 self.status = if before.learning != self.config.learning
                     || before.learning_excluded_apps != self.config.learning_excluded_apps
@@ -434,146 +415,6 @@ impl Settings {
                     ),
             )
     }
-    fn records_section(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let last = (self.offset as u64 + 50).min(self.total);
-        section("候補・訂正の記録")
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(if self.stores.learning == StoreState::Unreadable {
-                        "記録を読めないため、表示できません。".to_string()
-                    } else if self.total == 0 {
-                        "記録はありません。".to_string()
-                    } else {
-                        format!("{} 件中 {}〜{} 件", self.total, self.offset + 1, last)
-                    })
-                    .child(
-                        button(
-                            "refresh",
-                            if self.loading {
-                                "取得中…"
-                            } else {
-                                "更新"
-                            },
-                            "設定と訂正記録を更新する",
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.refresh(cx);
-                            cx.notify();
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(self.records.iter().filter_map(|r| {
-                        let id = r["id"].as_u64()?;
-                        let reading = r["correction"]["reading"].as_str().unwrap_or("");
-                        let accepted = r["correction"]["accepted"].as_str().unwrap_or("");
-                        let count = r["selection_count"].as_u64().unwrap_or(0);
-                        let proposal_reading = reading.to_string();
-                        let proposal_value = accepted.to_string();
-                        Some(
-                            card()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .gap_4()
-                                .p_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(format!("{reading} → {accepted}"))
-                                        .child(div().text_sm().text_color(rgb(MUTED)).child(
-                                            if count > 0 {
-                                                format!("候補から選択：{count}回")
-                                            } else {
-                                                "確定後の訂正".into()
-                                            },
-                                        )),
-                                )
-                                .child(
-                                    button(
-                                        ("register-correction", id),
-                                        "辞書へ登録…",
-                                        "この学習した語をユーザー辞書に登録する",
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, window, cx| {
-                                            this.register_correction(
-                                                proposal_reading.clone(),
-                                                proposal_value.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    button(("delete", id), "削除", "この訂正記録を削除する")
-                                        .text_sm()
-                                        .text_color(rgb(DANGER))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            match crate::manage(Manage {
-                                                action: Action::DeleteLearning as i32,
-                                                record_id: id,
-                                                ..Default::default()
-                                            }) {
-                                                Ok(_) => {
-                                                    this.status =
-                                                        "選好と語彙の記録を削除しました。".into();
-                                                    this.refresh(cx);
-                                                }
-                                                Err(_) => {
-                                                    this.status = "削除できませんでした。".into()
-                                                }
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                    })),
-            )
-            .when(self.total > 50, |section| {
-                section.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            button("previous", "前の50件", "前の50件").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    if !this.loading {
-                                        this.offset = this.offset.saturating_sub(50);
-                                        this.refresh(cx);
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                        .child(button("next", "次の50件", "次の50件").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if !this.loading && (this.offset as u64 + 50) < this.total {
-                                    this.offset += 50;
-                                    this.refresh(cx);
-                                }
-                                cx.notify();
-                            },
-                        ))),
-                )
-            })
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("「削除」は Kanade の記録だけを削除します。Mozc の学習は変わりません。"),
-            )
-    }
     fn mozc_section(&self, cx: &mut Context<Self>) -> gpui::Div {
         section("Mozc の学習")
             .child(
@@ -645,6 +486,143 @@ impl Settings {
             }))
     }
 }
+impl Settings {
+    fn select_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        if self.page == page || self.learning_editor.is_some() {
+            return;
+        }
+        self.page = page;
+        if self.settings_loaded {
+            self.status.clear();
+        }
+        self.pending_clear = None;
+        self.model_remove_confirm = false;
+        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        match page {
+            SettingsPage::Records => self.reload_records(cx),
+            SettingsPage::Conversion => self.monitor_models(cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn navigation(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .children(SettingsPage::ALL.into_iter().map(|page| {
+                let label = page.label();
+                button(label, label, label)
+                    .role(gpui::Role::Tab)
+                    .aria_selected(page == self.page)
+                    .inactive(page != self.page && self.learning_editor.is_some())
+                    .when(page == self.page, |item| {
+                        item.bg(rgb(HOVER))
+                            .text_color(rgb(ACCENT))
+                            .border_color(rgb(ACCENT))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
+            }))
+            .child(
+                button(
+                    "open-user-dictionary",
+                    "ユーザー辞書",
+                    "ユーザー辞書を管理する",
+                )
+                .inactive(self.learning_editor.is_some())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.dictionary_open = true;
+                    this.load_dictionary(0, cx);
+                })),
+            )
+    }
+
+    fn conversion_page(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div().flex().flex_col().gap_4()
+            .child(self.model_section(cx))
+            .child(section("入力と追加候補").child(
+                card()
+                                .child(self.toggle(
+                                    "punctuation-commit",
+                                    "句読点で確定",
+                                    "変換前の読みに「。」「、」「？」「！」を続けて入力すると、そのまま確定します。",
+                                    self.config.punctuation_commit,
+                                    |c| c.punctuation_commit = !c.punctuation_commit,
+                                    cx,
+                                ))
+                                .child(separator())
+                                .child(self.toggle(
+                                    "calculated-dates",
+                                    "日付の候補",
+                                    "「こんげつまつ」などの読みに、計算した日付の候補を追加します。",
+                                    self.config.calculated_dates,
+                                    |c| c.calculated_dates = !c.calculated_dates,
+                                    cx,
+                                ))
+                                .child(separator())
+                                .child(self.toggle(
+                                    "emoji-dictionary",
+                                    "絵文字の候補",
+                                    "読みに一致する絵文字の候補を追加します。",
+                                    self.config.emoji_dictionary,
+                                    |c| c.emoji_dictionary = !c.emoji_dictionary,
+                                    cx,
+                                ))
+            ))
+    }
+
+    fn appearance_page(&self, cx: &mut Context<Self>) -> gpui::Div {
+        section("変換候補ウインドウ").child(
+            card()
+                .child(self.stepper(
+                    "文字サイズ",
+                    "12〜40 の範囲で変更できます。",
+                    self.config.font_size.to_string(),
+                    ("smaller", "候補の文字を小さくする", |c| {
+                        c.font_size = (c.font_size - 1.0).max(12.0)
+                    }),
+                    ("larger", "候補の文字を大きくする", |c| {
+                        c.font_size = (c.font_size + 1.0).min(40.0)
+                    }),
+                    cx,
+                ))
+                .child(separator())
+                .child(self.stepper(
+                    "1 ページの候補数",
+                    "数字キーで選べる候補の数です。1〜9 の範囲で変更できます。",
+                    self.config.page_size.to_string(),
+                    (
+                        "fewer-candidates",
+                        "1 ページの候補を減らす",
+                        |c| c.page_size = c.page_size.saturating_sub(1).max(1),
+                    ),
+                    ("more-candidates", "1 ページの候補を増やす", |c| {
+                        c.page_size = (c.page_size + 1).min(9)
+                    }),
+                    cx,
+                )),
+        )
+    }
+
+    fn learning_page(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(card().child(self.toggle(
+                "learning",
+                "候補・訂正学習",
+                "選んで確定した候補と、確定後の訂正を記録し、次の候補順に反映します。",
+                self.config.learning,
+                |c| c.learning = !c.learning,
+                cx,
+            )))
+            .child(self.learning_section(cx))
+            .child(self.mozc_section(cx))
+    }
+}
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.dictionary_open {
@@ -653,12 +631,12 @@ impl Render for Settings {
                 .track_focus(&self.navigation_focus)
                 .into_any_element();
         }
-        if self.projects_open {
-            return self
-                .project_panel(window, cx)
-                .track_focus(&self.navigation_focus)
-                .into_any_element();
-        }
+        let body = match self.page {
+            SettingsPage::Conversion => self.conversion_page(cx),
+            SettingsPage::Appearance => self.appearance_page(cx),
+            SettingsPage::Learning => self.learning_page(cx),
+            SettingsPage::Records => self.records_list(cx),
+        };
         div()
             .size_full()
             .track_focus(&self.navigation_focus)
@@ -672,61 +650,52 @@ impl Render for Settings {
             .flex()
             .flex_col()
             .child(
-                // The title and the result of the last operation stay in view
-                // while the settings below scroll.
                 div()
                     .flex_none()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_3()
                     .px_6()
-                    .pt_6()
+                    .pt_5()
                     .pb_3()
                     .child(
                         div()
                             .flex()
-                            .flex_wrap()
                             .items_center()
                             .justify_between()
-                            .gap_4()
+                            .gap_3()
                             .child(app_heading("Kanade の設定", window))
-                            .child(
-                                button("open-user-dictionary", "ユーザー辞書を管理…", "ユーザー辞書を管理する")
-                                    .inactive(self.learning_editor.is_some())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.dictionary_open = true;
-                                        this.load_dictionary(0, cx);
-                                    })),
-                            )
-                            .child(
-                                button(
-                                    "open-projects",
-                                    "プロジェクト辞書を管理…",
-                                    "プロジェクト辞書を管理する",
-                                )
-                                .inactive(self.learning_editor.is_some())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.projects_open = true;
-                                    this.load_projects(cx);
-                                })),
+                            .when(
+                                !self.loading
+                                    && (!self.settings_loaded
+                                        || self.stores.settings == StoreState::Unreadable),
+                                |row| {
+                                    row.child(
+                                        button("refresh-settings", "更新", "設定を読み直す")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.refresh(cx)),
+                                            ),
+                                    )
+                                },
                             ),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child("通常の入力は端末内で処理します。パスワード欄では学習しません。"),
-                    )
-                    .child(
-                        div()
-                            .min_h(px(20.0))
-                            .text_sm()
-                            .text_color(rgb(ACCENT))
-                            .child(self.status.clone()),
-                    )
+                    .child(self.navigation(cx))
+                    .when(!self.status.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .child(self.status.clone()),
+                        )
+                    })
                     .when_some(self.store_notice(), |header, notice| header.child(notice))
-                    .when_some(self.learning_close_notice(cx), |header, notice| header.child(notice)),
+                    .when_some(self.learning_close_notice(cx), |header, notice| {
+                        header.child(notice)
+                    }),
             )
+            .when(self.page == SettingsPage::Records, |root| {
+                root.child(self.records_toolbar(cx))
+            })
             .child(
                 div()
                     .id("settings-body")
@@ -737,84 +706,10 @@ impl Render for Settings {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap_6()
                     .px_6()
                     .pb_6()
                     .child(control::scroll_begin())
-                    .child(
-                        section("入力").child(
-                            card()
-                                .child(self.toggle(
-                                    "learning",
-                                    "候補・訂正学習",
-                                    "選んで確定した候補と、確定後の訂正を記録し、次の候補順に反映します。",
-                                    self.config.learning,
-                                    |c| c.learning = !c.learning,
-                                    cx,
-                                ))
-                                .child(separator())
-                                .child(self.toggle(
-                                    "punctuation-commit",
-                                    "句読点で確定",
-                                    "変換前の読みに「。」「、」「？」「！」を続けて入力すると、そのまま確定します。",
-                                    self.config.punctuation_commit,
-                                    |c| c.punctuation_commit = !c.punctuation_commit,
-                                    cx,
-                                ))
-                                .child(separator())
-                                .child(self.toggle(
-                                    "calculated-dates",
-                                    "計算日付",
-                                    "「こんげつまつ」などの読みに、計算した日付の候補を追加します。",
-                                    self.config.calculated_dates,
-                                    |c| c.calculated_dates = !c.calculated_dates,
-                                    cx,
-                                ))
-                                .child(separator())
-                                .child(self.toggle(
-                                    "emoji-dictionary",
-                                    "絵文字辞書",
-                                    "読みに一致する絵文字の候補を追加します。",
-                                    self.config.emoji_dictionary,
-                                    |c| c.emoji_dictionary = !c.emoji_dictionary,
-                                    cx,
-                                )),
-                        ),
-                    )
-                    .child(
-                        section("候補").child(
-                            card()
-                                .child(self.stepper(
-                                    "候補の文字サイズ",
-                                    "12〜40 の範囲で変更できます。",
-                                    self.config.font_size.to_string(),
-                                    ("smaller", "候補の文字を小さくする", |c| {
-                                        c.font_size = (c.font_size - 1.0).max(12.0)
-                                    }),
-                                    ("larger", "候補の文字を大きくする", |c| {
-                                        c.font_size = (c.font_size + 1.0).min(40.0)
-                                    }),
-                                    cx,
-                                ))
-                                .child(separator())
-                                .child(self.stepper(
-                                    "1 ページの候補数",
-                                    "数字キーで選べる候補の数です。1〜9 の範囲で変更できます。",
-                                    self.config.page_size.to_string(),
-                                    ("fewer-candidates", "1 ページの候補を減らす", |c| {
-                                        c.page_size = c.page_size.saturating_sub(1).max(1)
-                                    }),
-                                    ("more-candidates", "1 ページの候補を増やす", |c| {
-                                        c.page_size = (c.page_size + 1).min(9)
-                                    }),
-                                    cx,
-                                )),
-                        ),
-                    )
-                    .child(self.learning_section(cx))
-                    .child(self.model_section(cx))
-                    .child(self.records_section(cx))
-                    .child(self.mozc_section(cx))
+                    .child(body.flex_none())
                     .child(control::scroll_end(self.scroll.clone())),
             )
             .into_any_element()
@@ -905,6 +800,7 @@ fn show_settings(cx: &mut App) {
                     let mut state = Settings::new(cx);
                     window.focus(&state.navigation_focus, cx);
                     state.refresh(cx);
+                    state.monitor_models(cx);
                     state
                 })
             },

@@ -1,6 +1,6 @@
 # Local reranking model
 
-An optional local language model reorders the Mozc candidates of the focused segment, using the text before the cursor. It is off by default. The Windows and macOS installers include the pinned Tsumugi GGUF. Each user can import it from settings after accepting the model and local-processing terms. The engine qualifies it before reranking can be enabled.
+An optional local language model reorders the Mozc candidates of the focused segment, using the text before the cursor. It is off by default. The Windows and macOS installers include the pinned Tsumugi GGUF. Accepting the license and local-processing terms in Settings starts import and qualification. The engine enables reranking after qualification succeeds, even if the window has closed. The settings window reads saved consent for the current model and terms from the engine.
 
 Each importable file is registered together with a profile that fixes how it is loaded, prompted, scored and qualified. Registrations are compiled into Kanade. One model is installed at a time.
 
@@ -27,6 +27,8 @@ flowchart LR
 | Worker | `crates/kanade-llm/src/bin/worker.rs`, feature `llama` | The only process that loads the model |
 | Engine integration | `crates/kanade-engine/src/refine.rs` | Queues jobs, answers polls, applies an order |
 | Management | `crates/kanade-engine/src/server/admin.rs` | `LLM_STATUS`, `LLM_IMPORT`, `LLM_QUALIFY`, `LLM_REMOVE` |
+
+`models status` reports current consent as `installed.consent_current`. A settings job that activates a qualified model can report phase `activating` or error `activation_failed`. The latter means the job could not confirm activation. Check `ready` and `enabled` for the resulting state.
 
 The key loop copies a few short strings into a queue of two jobs and later looks a result up. Both operations take a lock that is only held for a few memory operations. Spawning, loading, hashing, timeouts and restarts happen on the service and management threads.
 

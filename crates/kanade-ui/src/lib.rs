@@ -116,4 +116,18 @@ pub fn save(settings: &Config) -> Result<()> {
     Ok(())
 }
 #[cfg(all(feature = "native", any(windows, target_os = "macos")))]
+fn save_changes(previous: &Config, settings: &Config) -> Result<()> {
+    settings.validate()?;
+    let previous = serde_json::to_value(previous)?;
+    let mut changes: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::to_value(settings)?)?;
+    changes.retain(|key, value| previous.get(key) != Some(value));
+    manage(Manage {
+        action: Action::SetSettings as i32,
+        json: serde_json::json!({"changes": changes}).to_string(),
+        ..Default::default()
+    })?;
+    Ok(())
+}
+#[cfg(all(feature = "native", any(windows, target_os = "macos")))]
 pub mod native;

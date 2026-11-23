@@ -111,13 +111,20 @@ fn real_model_refines_candidates_after_ack_without_editing_the_document() {
     let result = manage(
         &socket,
         Action::LlmImport,
-        serde_json::json!({
+        serde_json::json!({"import_and_activate": {
             "path": Path::new(&model), "model": entry["id"], "license": entry["license"],
             "terms_sha256": entry["terms_sha256"],
             "accept_license": true, "accept_local_processing": true
-        }),
+        }}),
     );
     assert_eq!(result["result"], "started");
+    // A setting changed while the model is being prepared must survive
+    // automatic activation. Conversely the edit never switches LLM off.
+    manage(
+        &socket,
+        Action::SetSettings,
+        serde_json::json!({"changes": {"font_size": 22.0}}),
+    );
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let status = manage(&socket, Action::LlmStatus, serde_json::Value::Null);
@@ -127,14 +134,33 @@ fn real_model_refines_candidates_after_ack_without_editing_the_document() {
             status["job"]["error"], status["reason"], status["qualification"]
         );
         if status["ready"] == true {
+            assert_eq!(status["enabled"], true);
+            assert_eq!(status["installed"]["consent_current"], true);
             break;
         }
         assert!(Instant::now() < deadline, "model qualification deadline");
         std::thread::sleep(Duration::from_millis(80));
     }
-    let mut settings = manage(&socket, Action::GetSettings, serde_json::Value::Null);
-    settings["llm"] = true.into();
-    manage(&socket, Action::SetSettings, settings);
+    let settings_path = data.join("kanade/settings.toml");
+    let saved = kanade_engine::config::Config::load(&settings_path).unwrap();
+    assert!(saved.llm);
+    assert_eq!(saved.font_size, 22.0);
+    for enabled in [false, true] {
+        manage(
+            &socket,
+            Action::SetSettings,
+            serde_json::json!({"changes": {"llm": enabled}}),
+        );
+        let status = manage(&socket, Action::LlmStatus, serde_json::Value::Null);
+        assert_eq!(status["enabled"], enabled);
+        assert_eq!(status["installed"]["consent_current"], true);
+        assert_eq!(
+            kanade_engine::config::Config::load(&settings_path)
+                .unwrap()
+                .llm,
+            enabled
+        );
+    }
     // This contract measures a warm refinement. A cold worker may legitimately
     // miss the display deadline and leave Mozc's order untouched.
     std::thread::sleep(Duration::from_secs(1));

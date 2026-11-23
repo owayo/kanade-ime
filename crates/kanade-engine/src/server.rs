@@ -251,7 +251,7 @@ fn admit(
         .name(Thread::CONNECTION.into())
         .spawn(move || {
             let _slot = slot;
-            let _ = connection(stream, &tx, &administration, &connections);
+            let _ = serve_connection(stream, &tx, &administration, &connections);
         });
     if spawned.is_err() {
         // This peer is lost, with its slot returned. Later ones may fare better.
@@ -618,10 +618,10 @@ fn turn(
     }
     Ok(Flow::Continue)
 }
-fn connection(
+fn serve_connection(
     mut stream: NativeStream,
     tx: &SyncSender<Work>,
-    admin: &admin::Administration,
+    admin: &Arc<admin::Administration>,
     connections: &Mutex<Connections>,
 ) -> io::Result<()> {
     #[cfg(unix)]
@@ -805,8 +805,13 @@ mod tests {
             data.path().join("no-worker"),
             false,
         );
-        let admin =
-            admin::Administration::new(data.path().to_owned(), None, None, Arc::default(), llm);
+        let admin = Arc::new(admin::Administration::new(
+            data.path().to_owned(),
+            None,
+            None,
+            Arc::default(),
+            llm,
+        ));
         // Applies configuration as the engine thread does.
         let (tx, rx) = mpsc::sync_channel::<Work>(4);
         let engine = std::thread::spawn(move || {

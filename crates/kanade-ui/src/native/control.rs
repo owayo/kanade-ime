@@ -151,7 +151,7 @@ impl RenderOnce for Control {
                     window.focus(&mouse_focus, cx);
                 }
             })
-            .focus(|style| style.bg(rgb(0xe1eaff)));
+            .focus(|style| style.bg(rgb(0xe1eaff)).text_color(rgb(super::INK)));
         if self.disabled.get() {
             inner = inner
                 .aria_description("現在は操作できません。")

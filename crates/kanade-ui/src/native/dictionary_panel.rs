@@ -78,9 +78,6 @@ impl Settings {
         if !self.confirm_learning_close(cx) {
             return false;
         }
-        if !self.confirm_project_close(cx) {
-            return false;
-        }
         if self
             .dictionary
             .editor
