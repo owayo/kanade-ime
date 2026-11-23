@@ -6,7 +6,7 @@ use kanade_ipc::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     ffi::c_void,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -78,6 +78,67 @@ fn module_path() -> Result<PathBuf> {
         String::from_utf16(value).map_err(|_| failure())?,
     ))
 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PhysicalKey {
+    vk: u8,
+    // Bits 16..=24 include the scan code and the extended-key bit.
+    scan: u16,
+}
+
+impl PhysicalKey {
+    fn new(w: WPARAM, l: LPARAM) -> Option<Self> {
+        Some(Self {
+            vk: w.0.try_into().ok()?,
+            scan: ((l.0 >> 16) & 0x1ff) as u16,
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DownRoute {
+    NoDown,
+    Tip,
+    Application,
+}
+
+#[derive(Default)]
+struct Presses(BTreeMap<PhysicalKey, Rc<Cell<DownRoute>>>);
+
+impl Presses {
+    // A callback may release or replace this press before Down returns. Its
+    // result belongs to this cell even if the map now holds a newer press.
+    fn begin(&mut self, w: WPARAM, l: LPARAM) -> Option<Rc<Cell<DownRoute>>> {
+        let key = PhysicalKey::new(w, l)?;
+        let repeat = l.0 & (1 << 30) != 0;
+        self.0.retain(|id, _| {
+            // WPF omits the scan code and repeat bit for character keys.
+            let fresh = *id == key && key.scan != 0 && !repeat;
+            !fresh && unsafe { GetKeyState(i32::from(id.vk)) < 0 }
+        });
+        let press = self.0.entry(key).or_insert_with(|| {
+            // A repeat can be the first Down seen by a newly attached sink.
+            Rc::new(Cell::new(if repeat {
+                DownRoute::Application
+            } else {
+                DownRoute::NoDown
+            }))
+        });
+        Some(press.clone())
+    }
+
+    fn up(&mut self, w: WPARAM, l: LPARAM, delivered: bool) -> bool {
+        let Some(key) = PhysicalKey::new(w, l) else {
+            return false;
+        };
+        let taken = self.0.get(&key).is_some_and(|p| p.get() == DownRoute::Tip);
+        // TSF may omit KeyUp when TestKeyUp passes it to the application.
+        if delivered || !taken {
+            self.0.remove(&key);
+        }
+        taken
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct KeyMessage {
     time: i32,
@@ -202,7 +263,6 @@ struct Shared {
     ui_native: Cell<bool>,
     ui_selection: Cell<u32>,
     tested: Cell<Option<TestedKey>>,
-    eaten_keys: RefCell<BTreeSet<usize>>,
     client: RefCell<Option<Client<SessionPipe>>>,
     editing: RefCell<Option<Rc<Editing>>>,
     departing: RefCell<Option<Rc<Editing>>>,
@@ -241,7 +301,6 @@ impl Shared {
             ui_native: Cell::new(true),
             ui_selection: Cell::new(0),
             tested: Cell::new(None),
-            eaten_keys: RefCell::new(BTreeSet::new()),
             client: RefCell::new(None),
             editing: RefCell::new(None),
             departing: RefCell::new(None),
@@ -372,7 +431,7 @@ impl Shared {
                 client.finish(&mut doc);
             }
         }
-        self.clear_document(editing.leaving.get());
+        self.clear_document();
         self.editing.take();
     }
 
@@ -684,14 +743,11 @@ impl Shared {
         if let Ok(mut client) = self.client.try_borrow_mut() {
             client.take();
         }
-        self.clear_document(true);
+        self.clear_document();
     }
-    fn clear_document(&self, focus_ended: bool) {
+    fn clear_document(&self) {
         if let Ok(mut hint) = self.mode_hint.try_borrow_mut() {
             hint.take();
-        }
-        if focus_ended && let Ok(mut keys) = self.eaten_keys.try_borrow_mut() {
-            keys.clear();
         }
         self.hide();
         if let Ok(mut c) = self.composition.try_borrow_mut() {
@@ -710,24 +766,30 @@ impl Shared {
     }
     fn suspend_secure(&self) {
         self.tested.set(None);
-        if let Ok(mut keys) = self.eaten_keys.try_borrow_mut() {
-            keys.clear();
-        }
-        self.hide();
+        // A callback can arrive while either slot is borrowed. Leave a borrowed
+        // slot to its holder, as before, rather than panic inside the host.
+        let composition = self
+            .composition
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut c| c.take());
+        let context = self
+            .context
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut c| c.take());
         if let Ok(mut client) = self.client.try_borrow_mut() {
             client.take();
-        }
-        if let Ok(mut composition) = self.composition.try_borrow_mut() {
-            composition.take();
-        }
-        if let Ok(mut context) = self.context.try_borrow_mut() {
-            context.take();
         }
         if let Ok(mut preedit) = self.preedit.try_borrow_mut() {
             *preedit = Preedit::default();
         }
         if let Ok(mut observed) = self.observed.try_borrow_mut() {
             *observed = ipc::Context::default();
+        }
+        self.hide();
+        if let (Some(context), Some(composition)) = (context, composition) {
+            EndEdit::request(&context, self.tid.get(), composition, None);
         }
     }
     fn show(self: &Rc<Self>, page: &ipc::CandidatePage) {
@@ -841,7 +903,11 @@ impl Shared {
         };
         // Query input scope only: candidate polling never reads surrounding text.
         let epoch = self.focus_epoch.get();
-        let field = refresh_scope(self, &context, FieldScope::Ordinary, false);
+        let previous = self.field.get();
+        let Some(field) = try_refresh_scope(self, &context, FieldScope::Ordinary, false) else {
+            self.field.set(previous);
+            return;
+        };
         if epoch != self.focus_epoch.get() {
             return;
         }
@@ -906,7 +972,11 @@ impl Shared {
             .borrow()
             .as_ref()
             .map_or(self.focus_epoch.get(), |e| e.focus_epoch);
-        let field = refresh_scope(self, &context, FieldScope::Ordinary, false);
+        let previous = self.field.get();
+        let Some(field) = try_refresh_scope(self, &context, FieldScope::Ordinary, false) else {
+            self.field.set(previous);
+            return false;
+        };
         if !self.deliverable(Some(&context), epoch) {
             return false;
         }
@@ -933,6 +1003,7 @@ impl Shared {
 )]
 struct Tip {
     shared: Rc<Shared>,
+    presses: RefCell<Presses>,
     sink_cookie: Cell<Option<u32>>,
     mode: RefCell<Option<input_mode::Mode>>,
     button: RefCell<Option<language_bar::Item>>,
@@ -942,6 +1013,7 @@ impl Tip {
     fn new() -> Self {
         Self {
             shared: Shared::new(),
+            presses: RefCell::default(),
             sink_cookie: Cell::new(None),
             mode: RefCell::new(None),
             button: RefCell::new(None),
@@ -1042,6 +1114,7 @@ impl ITfTextInputProcessor_Impl for Tip_Impl {
         if let Ok(mut c) = self.shared.client.try_borrow_mut() {
             c.take();
         }
+        self.presses.take();
         Ok(())
     }
 }
@@ -1085,6 +1158,7 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
         let cookie =
             unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &sink) }.inspect_err(|_| {
                 let _ = unsafe { keys.UnadviseKeyEventSink(tid) };
+                self.presses.take();
             })?;
         self.sink_cookie.set(Some(cookie));
         self.shared.japanese.set(mode.japanese());
@@ -1120,20 +1194,59 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         Ok(())
     }
     fn OnTestKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        let press = self.presses.borrow_mut().begin(w, l);
+        let tested = self.test_down(context, w, l);
+        if !matches!(tested, Ok(true))
+            && let Some(press) = press
+        {
+            press.set(DownRoute::Application);
+        }
+        tested.map(BOOL::from)
+    }
+    fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        let press = self.presses.borrow_mut().begin(w, l);
+        let consumed = self.key_down(context, w, l);
+        if let Some(press) = press {
+            if !matches!(consumed, Ok(true)) {
+                press.set(DownRoute::Application);
+            } else if press.get() == DownRoute::NoDown {
+                press.set(DownRoute::Tip);
+            }
+        }
+        consumed.map(BOOL::from)
+    }
+    fn OnTestKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        self.shared.tested.set(None);
+        Ok(self.presses.borrow_mut().up(w, l, false).into())
+    }
+    fn OnKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+        self.shared.tested.set(None);
+        Ok(self.presses.borrow_mut().up(w, l, true).into())
+    }
+    fn OnPreservedKey(&self, context: Ref<ITfContext>, guid: *const GUID) -> Result<BOOL> {
+        if let Some(command) = unsafe { guid.as_ref() }.and_then(input_mode::preserved) {
+            self.set_input_mode(command, context.as_ref())?;
+            return Ok(true.into());
+        }
+        Ok(false.into())
+    }
+}
+impl Tip_Impl {
+    fn test_down(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<bool> {
         let previous = self.shared.tested.take();
         if !self.shared.busy() {
             self.refresh_button();
         }
         if input_mode::physical(w.0).is_some() {
-            return Ok(true.into());
+            return Ok(true);
         }
         if !self.shared.japanese.get() && !self.shared.mode_queued.get() {
-            return Ok(false.into());
+            return Ok(false);
         }
         let context = context.ok()?;
         let message = KeyMessage::current(context, w, l);
         if self.shared.busy() {
-            let key = translate(w, l, false);
+            let key = translate(w, l);
             let (owns, field) = key.as_ref().map_or((false, FieldScope::Bypass), |k| {
                 self.nested_key(context, w, k)
             });
@@ -1146,11 +1259,11 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
                 },
                 field,
             }));
-            return Ok(owns.into());
+            return Ok(owns);
         }
         if let Some(tested) = previous.filter(|prior| prior.message == message) {
             self.shared.tested.set(Some(tested));
-            return Ok((tested.decision != KeyTest::Passed).into());
+            return Ok(tested.decision != KeyTest::Passed);
         }
         let field = refresh_scope(&self.shared, context, FieldScope::Ordinary, false);
         if field == FieldScope::Bypass {
@@ -1160,19 +1273,22 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
                 decision: KeyTest::Passed,
                 field,
             }));
-            return Ok(false.into());
+            return Ok(false);
         }
         let connection = self.shared.connect(false);
-        let key = translate(w, l, true);
+        let key = translate(w, l);
         let engine_owns = key.as_ref().is_some_and(|k| {
-            self.shared.client.try_borrow().is_ok_and(|c| {
-                c.as_ref()
-                    .is_some_and(|c| c.would_consume(k, Privacy::Unknown))
-            })
+            // Keep keypad text and other host keys outside the TIP's keymap.
+            (starter_virtual_key(w.0 as u32)
+                || k.special != SpecialKey::None as i32
+                || ipc::frontend::is_conversion_control(k))
+                && self.shared.client.try_borrow().is_ok_and(|c| {
+                    c.as_ref()
+                        .is_some_and(|c| c.would_consume(k, Privacy::Unknown))
+                })
         });
-        let actual = translate(w, l, false);
         let outage_starter =
-            self.shared.outage_scope() && actual.as_ref().is_some_and(|k| is_starter(w, k));
+            self.shared.outage_scope() && key.as_ref().is_some_and(|k| is_starter(w, k));
         let test = if engine_owns {
             if outage_starter {
                 KeyTest::ConnectedStarter
@@ -1186,7 +1302,7 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         } else {
             // An unconsumed key may never reach Down. Observe it once using
             // the connection and learning policy already checked here.
-            if let Some(key) = actual
+            if let Some(key) = key
                 && !self.shared.can_start_offline()
             {
                 if refresh_scope(&self.shared, context, field, true) == FieldScope::Bypass {
@@ -1202,18 +1318,9 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             decision: test,
             field,
         }));
-        Ok((test != KeyTest::Passed).into())
+        Ok(test != KeyTest::Passed)
     }
-    fn OnTestKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, _: LPARAM) -> Result<BOOL> {
-        self.shared.tested.set(None);
-        Ok(self
-            .shared
-            .eaten_keys
-            .try_borrow()
-            .is_ok_and(|keys| keys.contains(&w.0))
-            .into())
-    }
-    fn OnKeyDown(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<BOOL> {
+    fn key_down(&self, context: Ref<ITfContext>, w: WPARAM, l: LPARAM) -> Result<bool> {
         let previous = self.shared.tested.take();
         if !self.shared.busy() {
             self.refresh_button();
@@ -1222,22 +1329,21 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
             if l.0 & (1 << 30) == 0 {
                 self.set_input_mode(command, context.as_ref())?;
             }
-            self.shared.eaten_keys.borrow_mut().insert(w.0);
-            return Ok(true.into());
+            return Ok(true);
         }
         if !self.shared.japanese.get() && !self.shared.mode_queued.get() {
-            return Ok(false.into());
+            return Ok(false);
         }
         let context = context.ok()?;
         let message = KeyMessage::current(context, w, l);
         let test = previous.filter(|prior| prior.message == message);
         if test.is_some_and(|key| key.decision == KeyTest::Passed) {
-            return Ok(false.into());
+            return Ok(false);
         }
         let consumed = if self.shared.busy() {
-            translate(w, l, false).is_some_and(|key| {
+            translate(w, l).is_some_and(|key| {
                 let (owns, field) = self.nested_key(context, w, &key);
-                if !owns && test.is_none() {
+                if field == FieldScope::Bypass || (!owns && test.is_none()) {
                     return false;
                 }
                 self.shared.enqueue(Action::Key {
@@ -1251,35 +1357,8 @@ impl ITfKeyEventSink_Impl for Tip_Impl {
         } else {
             self.process_key(context, w, l, test)
         };
-        if w.0 <= 255
-            && let Ok(mut keys) = self.shared.eaten_keys.try_borrow_mut()
-        {
-            if consumed {
-                keys.insert(w.0);
-            } else {
-                keys.remove(&w.0);
-            }
-        }
-        Ok(consumed.into())
+        Ok(consumed)
     }
-    fn OnKeyUp(&self, _: Ref<ITfContext>, w: WPARAM, _: LPARAM) -> Result<BOOL> {
-        self.shared.tested.set(None);
-        Ok(self
-            .shared
-            .eaten_keys
-            .try_borrow_mut()
-            .is_ok_and(|mut keys| keys.remove(&w.0))
-            .into())
-    }
-    fn OnPreservedKey(&self, context: Ref<ITfContext>, guid: *const GUID) -> Result<BOOL> {
-        if let Some(command) = unsafe { guid.as_ref() }.and_then(input_mode::preserved) {
-            self.set_input_mode(command, context.as_ref())?;
-            return Ok(true.into());
-        }
-        Ok(false.into())
-    }
-}
-impl Tip_Impl {
     fn nested_key(&self, context: &ITfContext, w: WPARAM, key: &Key) -> (bool, FieldScope) {
         let same = self.shared.context.borrow().as_ref() == Some(context);
         let editing = self.shared.active_edit().filter(|e| e.context == *context);
@@ -1354,21 +1433,23 @@ impl Tip_Impl {
         let test = tested.map(|key| key.decision);
         let offline_claim = matches!(test, Some(KeyTest::OfflineStarter { .. }));
         let claimed = offline_claim || test == Some(KeyTest::ConnectedStarter);
-        let field = refresh_scope(
-            &self.shared,
-            context,
-            tested.map_or(FieldScope::Ordinary, |key| key.field),
-            true,
-        );
-        if field == FieldScope::Bypass {
-            self.shared.suspend_secure();
-            return test.is_some();
-        }
+        let refresh = |limit| match try_refresh_scope(&self.shared, context, limit, true) {
+            Some(field) if field != FieldScope::Bypass => Ok(field),
+            blocked => {
+                self.shared.suspend_secure();
+                // A confirmed bypass also releases a starter claimed during an outage.
+                Err(blocked.is_none() && offline_claim)
+            }
+        };
+        let field = match refresh(tested.map_or(FieldScope::Ordinary, |key| key.field)) {
+            Ok(field) => field,
+            Err(consumed) => return consumed,
+        };
         if offline_claim && !self.shared.outage_scope() {
             return true;
         }
-        let Some(key) = translate(w, l, false) else {
-            return claimed;
+        let Some(key) = translate(w, l) else {
+            return offline_claim;
         };
         let starter = is_starter(w, &key);
         if test
@@ -1385,9 +1466,8 @@ impl Tip_Impl {
         let connection = self.shared.connect(starter && self.shared.outage_scope());
         if connection == Connection::Attached {
             // The welcome supplied the app learning policy for this first key.
-            if refresh_scope(&self.shared, context, field, true) == FieldScope::Bypass {
-                self.shared.suspend_secure();
-                return test.is_some();
+            if let Err(consumed) = refresh(field) {
+                return consumed;
             }
             if offline_claim && !self.shared.outage_scope() {
                 return true;
@@ -1638,22 +1718,6 @@ impl Editing {
 }
 
 impl NativeDocument<'_> {
-    fn request_write(
-        &self,
-        edit: &ITfEditSession,
-        mode: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
-    ) -> Result<HRESULT> {
-        unsafe {
-            self.editing.context.RequestEditSession(
-                self.shared.tid.get(),
-                edit,
-                mode | TF_ES_READWRITE,
-            )
-        }
-    }
-
-    // Capture the original composition: a deferred end must never touch a
-    // composition started by a later key.
     fn end_owned(&self, reading: Option<&str>) -> bool {
         if self.editing.terminated.get() {
             return true;
@@ -1662,23 +1726,12 @@ impl NativeDocument<'_> {
             return true;
         };
         let finish = reading.map(|r| (ipc::surface(&self.shared.preedit.borrow()), r.to_owned()));
-        let end = |finish| -> ITfEditSession {
-            EndEdit {
-                composition: composition.clone(),
-                finish,
-                _guard: ModuleGuard::new(),
-            }
-            .into()
-        };
-        let success = self
-            .request_write(&end(finish), TF_ES_SYNC)
-            .is_ok_and(|hr| hr == S_OK);
-        if !success {
-            // A store may deny synchronous writes while it owns the lock.
-            // Only ending the mark can be deferred, never the text edit.
-            let _ = self.request_write(&end(None), TF_ES_ASYNC);
-        }
-        success
+        EndEdit::request(
+            &self.editing.context,
+            self.shared.tid.get(),
+            composition,
+            finish,
+        )
     }
 }
 impl Document for NativeDocument<'_> {
@@ -1717,9 +1770,14 @@ impl Document for NativeDocument<'_> {
             _guard: ModuleGuard::new(),
         }
         .into();
-        let success = self
-            .request_write(&edit, TF_ES_SYNC)
-            .is_ok_and(|hr| hr == S_OK);
+        let success = unsafe {
+            self.editing.context.RequestEditSession(
+                self.shared.tid.get(),
+                &edit,
+                TF_ES_SYNC | TF_ES_READWRITE,
+            )
+        }
+        .is_ok_and(|hr| hr == S_OK);
         if self.editing.terminated.get() {
             return success;
         }
@@ -1758,6 +1816,31 @@ struct EndEdit {
     composition: ITfComposition,
     finish: Option<(String, String)>,
     _guard: ModuleGuard,
+}
+impl EndEdit {
+    fn request(
+        context: &ITfContext,
+        tid: u32,
+        composition: ITfComposition,
+        finish: Option<(String, String)>,
+    ) -> bool {
+        let end = |mode, finish| {
+            let edit: ITfEditSession = Self {
+                composition: composition.clone(),
+                finish,
+                _guard: ModuleGuard::new(),
+            }
+            .into();
+            unsafe { context.RequestEditSession(tid, &edit, mode | TF_ES_READWRITE) }
+        };
+        let success = end(TF_ES_SYNC, finish).is_ok_and(|hr| hr == S_OK);
+        if !success {
+            // Only end the original mark on a deferred grant. A later key may
+            // already own another mark, and the host may have changed the text.
+            let _ = end(TF_ES_ASYNC, None);
+        }
+        success
+    }
 }
 impl ITfEditSession_Impl for EndEdit_Impl {
     fn DoEditSession(&self, cookie: u32) -> Result<()> {
@@ -2193,7 +2276,7 @@ fn starter_virtual_key(vk: u32) -> bool {
 fn is_starter(w: WPARAM, key: &Key) -> bool {
     starter_virtual_key(w.0 as u32) && ipc::frontend::starts_composition(key)
 }
-fn translate(w: WPARAM, l: LPARAM, test: bool) -> Option<Key> {
+fn translate(w: WPARAM, l: LPARAM) -> Option<Key> {
     let vk = w.0 as u32;
     let special = match vk {
         0x20 => SpecialKey::Space,
@@ -2229,12 +2312,6 @@ fn translate(w: WPARAM, l: LPARAM, test: bool) -> Option<Key> {
         String::new()
     } else if modifiers == ipc::MOD_CONTROL && matches!(vk, 0x55 | 0x49 | 0x4f | 0x50 | 0x54) {
         char::from_u32(vk)?.to_ascii_lowercase().to_string()
-    } else if test {
-        if starter_virtual_key(vk) {
-            "x".into()
-        } else {
-            return None;
-        }
     } else {
         let mut keys = [0u8; 256];
         if unsafe { GetKeyboardState(&mut keys) }.is_err() {

@@ -681,33 +681,24 @@ impl Host {
     }
 
     fn test(&self, vk: usize) -> Result<bool> {
+        set_held(vk, true)?;
         let keys: ITfKeyEventSink = self.tip.to_interface();
         Ok(unsafe { keys.OnTestKeyDown(&self.context, WPARAM(vk), LPARAM(1))? }.as_bool())
     }
 
     fn down(&self, vk: usize) -> Result<bool> {
+        set_held(vk, true)?;
         let keys: ITfKeyEventSink = self.tip.to_interface();
         Ok(unsafe { keys.OnKeyDown(&self.context, WPARAM(vk), LPARAM(1))? }.as_bool())
     }
 
     fn check_up(&self, vk: usize, taken: bool) -> Result<()> {
+        KeySource::Wpf.key(vk, false).check_up(self, taken)?;
         let keys: ITfKeyEventSink = self.tip.to_interface();
         unsafe {
-            assert_eq!(
-                keys.OnTestKeyUp(&self.context, WPARAM(vk), LPARAM(0))?
-                    .as_bool(),
-                taken
-            );
-            // WPF delivers KeyUp only when TestKeyUp requested it.
-            if taken {
-                assert!(
-                    keys.OnKeyUp(&self.context, WPARAM(vk), LPARAM(0))?
-                        .as_bool()
-                );
-            }
             assert!(
                 !keys
-                    .OnTestKeyUp(&self.context, WPARAM(vk), LPARAM(0))?
+                    .OnTestKeyUp(&self.context, WPARAM(vk), LPARAM(0xc000_0001u32 as isize))?
                     .as_bool()
             );
         }
@@ -837,10 +828,378 @@ fn starter() -> Result<usize> {
     (0x41..=0x5a)
         .chain(0x30..=0x39)
         .find(|&vk| {
-            translate(WPARAM(vk), LPARAM(1), false)
+            translate(WPARAM(vk), LPARAM(1))
                 .is_some_and(|k| !k.text.is_empty() && k.text.is_ascii())
         })
         .ok_or_else(failure)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeySource {
+    Wpf,
+    Hook,
+}
+
+#[derive(Clone, Copy)]
+struct HostKey {
+    vk: usize,
+    flags: u32,
+    source: KeySource,
+}
+
+impl KeySource {
+    fn key(self, vk: usize, extended: bool) -> HostKey {
+        let (vk, flags) = match self {
+            Self::Wpf if vk == usize::from(VK_LSHIFT.0) => (usize::from(VK_SHIFT.0), 0x002a_0001),
+            Self::Wpf if vk == usize::from(VK_RSHIFT.0) => (usize::from(VK_SHIFT.0), 0x0036_0001),
+            Self::Wpf => (vk, 1),
+            Self::Hook => {
+                let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) };
+                let vk = match VIRTUAL_KEY(vk as u16) {
+                    VK_LCONTROL | VK_RCONTROL => usize::from(VK_CONTROL.0),
+                    _ => vk,
+                };
+                (vk, 1 | ((scan & 0xff) << 16) | (u32::from(extended) << 24))
+            }
+        };
+        HostKey {
+            vk,
+            flags,
+            source: self,
+        }
+    }
+}
+
+fn set_held(vk: usize, down: bool) -> Result<()> {
+    let mut state = [0; 256];
+    unsafe {
+        GetKeyboardState(&mut state)?;
+        *state.get_mut(vk).ok_or_else(failure)? = if down { 0x80 } else { 0 };
+        if matches!(VIRTUAL_KEY(vk as u16), VK_LCONTROL | VK_RCONTROL) {
+            let left = state.get(usize::from(VK_LCONTROL.0)).ok_or_else(failure)?;
+            let right = state.get(usize::from(VK_RCONTROL.0)).ok_or_else(failure)?;
+            *state
+                .get_mut(usize::from(VK_CONTROL.0))
+                .ok_or_else(failure)? = left | right;
+        }
+        SetKeyboardState(&state)
+    }
+}
+
+impl HostKey {
+    fn down(self, host: &Host, repeat: bool) -> Result<bool> {
+        self.deliver(&host.tip.to_interface(), &host.context, repeat)
+    }
+
+    fn deliver(self, keys: &ITfKeyEventSink, context: &ITfContext, repeat: bool) -> Result<bool> {
+        set_held(self.vk, true)?;
+        let flags = self.flags | (u32::from(repeat && self.source == KeySource::Hook) << 30);
+        let l = LPARAM(flags as isize);
+        unsafe {
+            Ok(keys.OnTestKeyDown(context, WPARAM(self.vk), l)?.as_bool()
+                && keys.OnKeyDown(context, WPARAM(self.vk), l)?.as_bool())
+        }
+    }
+
+    fn check_up(self, host: &Host, taken: bool) -> Result<()> {
+        set_held(self.vk, false)?;
+        let keys: ITfKeyEventSink = host.tip.to_interface();
+        let l = LPARAM((self.flags | 0xc000_0000) as isize);
+        unsafe {
+            assert_eq!(
+                keys.OnTestKeyUp(&host.context, WPARAM(self.vk), l)?
+                    .as_bool(),
+                taken
+            );
+            if taken {
+                assert!(keys.OnKeyUp(&host.context, WPARAM(self.vk), l)?.as_bool());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn key_routing_repeat_after_composition_ends() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        for (vk, replies) in [
+            (8, &[Reply::Compose, Reply::Cancel, Reply::PassBackspace]),
+            (0x0d, &[Reply::Compose, Reply::Commit, Reply::Pass]),
+        ] {
+            with_host(|host| {
+                let server = serve(replies)?;
+                press(&host.tip, &host.context, starter()?)?;
+                let key = source.key(vk, false);
+                assert!(key.down(host, false)?);
+                assert!(!key.down(host, true)?);
+                key.check_up(host, false)?;
+                host.tip.shared.client.borrow_mut().take();
+                finish(server)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_ctrl_while_a_character_is_held() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        for side in [VK_LCONTROL, VK_RCONTROL] {
+            with_host(|host| {
+                let server = serve(&[Reply::Compose, Reply::Pass])?;
+                let letter = source.key(starter()?, false);
+                let ctrl = source.key(usize::from(side.0), side == VK_RCONTROL);
+                assert!(letter.down(host, false)?);
+                assert!(!ctrl.down(host, false)?);
+                assert!(!letter.down(host, true)?);
+                ctrl.check_up(host, false)?;
+                letter.check_up(host, false)?;
+                host.tip.shared.client.borrow_mut().take();
+                finish(server)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_held_across_mode_changes() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        with_host(|host| unsafe {
+            let manager: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            let tid = host.tip.shared.tid.get();
+            let mode = input_mode::Mode::attach(&manager, tid, &host.tip.to_interface())?;
+            let switch = mode.switch();
+            let original = switch.japanese();
+            host.tip.mode.replace(Some(mode));
+            let key = source.key(starter()?, false);
+            for to_japanese in [true, false] {
+                use input_mode::Command::{Off, On};
+                switch.apply(tid, if to_japanese { Off } else { On })?;
+                let server = serve(&[Reply::Commit])?;
+                assert_eq!(key.down(host, false)?, !to_japanese);
+                switch.apply(tid, if to_japanese { On } else { Off })?;
+                assert_eq!(key.down(host, true)?, to_japanese);
+                key.check_up(host, false)?;
+                host.tip.shared.client.borrow_mut().take();
+                finish(server)?;
+            }
+            switch.apply(
+                tid,
+                if original {
+                    input_mode::Command::On
+                } else {
+                    input_mode::Command::Off
+                },
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_overlapping_return_keys() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        for (pad_up_first, intervening_down) in [(true, false), (false, false), (true, true)] {
+            with_host(|host| {
+                let server = serve(&[Reply::Compose, Reply::Commit, Reply::Pass])?;
+                press(&host.tip, &host.context, starter()?)?;
+                let main = source.key(0x0d, false);
+                let pad = source.key(0x0d, true);
+                assert!(main.down(host, false)?);
+                assert!(!pad.down(host, false)?);
+                if pad_up_first {
+                    pad.check_up(host, false)?;
+                }
+                if intervening_down {
+                    let ctrl = source.key(usize::from(VK_LCONTROL.0), false);
+                    assert!(!ctrl.down(host, false)?);
+                    ctrl.check_up(host, false)?;
+                }
+                main.check_up(host, source == KeySource::Hook && !intervening_down)?;
+                if !pad_up_first {
+                    pad.check_up(host, false)?;
+                }
+                host.tip.shared.client.borrow_mut().take();
+                finish(server)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_focus_and_sink_detachment() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        with_host(|host| unsafe {
+            let key = source.key(starter()?, false);
+            let keys: ITfKeyEventSink = host.tip.to_interface();
+            let server = serve(&[Reply::Commit])?;
+            assert!(key.down(host, false)?);
+            keys.OnSetFocus(false)?;
+            keys.OnSetFocus(true)?;
+            key.check_up(host, true)?;
+            finish(server)?;
+            let server = serve(&[Reply::Commit])?;
+            assert!(key.down(host, false)?);
+            host.tip
+                .to_interface::<ITfTextInputProcessorEx>()
+                .Deactivate()?;
+            key.check_up(host, false)?;
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_new_press_after_missed_release() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        with_host(|host| {
+            let key = source.key(starter()?, false);
+            let server = serve(&[Reply::Decline, Reply::Commit])?;
+            assert!(!key.down(host, false)?);
+            set_held(key.vk, false)?;
+            if source == KeySource::Wpf {
+                // Another Down observes the release that the sink missed.
+                let ctrl = source.key(usize::from(VK_LCONTROL.0), false);
+                assert!(!ctrl.down(host, false)?);
+                ctrl.check_up(host, false)?;
+            }
+            assert!(key.down(host, false)?);
+            key.check_up(host, true)?;
+            key.check_up(host, false)?;
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_wpf_passes_standalone_shift_downs_and_up() -> Result<()> {
+    with_host(|host| unsafe {
+        let keys: ITfKeyEventSink = host.tip.to_interface();
+        for side in [VK_LSHIFT, VK_RSHIFT] {
+            let shift = KeySource::Wpf.key(usize::from(side.0), false);
+            let w = WPARAM(shift.vk);
+            let l = LPARAM(shift.flags as isize);
+            set_held(shift.vk, true)?;
+            // WPF supplies the same flags for the first press and the repeat.
+            for _ in 0..2 {
+                assert!(!keys.OnTestKeyDown(&host.context, w, l)?.as_bool());
+                assert!(!keys.OnKeyDown(&host.context, w, l)?.as_bool());
+            }
+            assert!(!keys.OnKeyDown(&host.context, w, l)?.as_bool());
+            set_held(shift.vk, false)?;
+            let up = LPARAM((shift.flags | 0xc000_0000) as isize);
+            assert!(!keys.OnTestKeyUp(&host.context, w, up)?.as_bool());
+            assert!(!keys.OnKeyUp(&host.context, w, up)?.as_bool());
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn key_routing_engine_decline_then_consumed_repeat() -> Result<()> {
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        with_host(|host| unsafe {
+            let server = serve(&[Reply::Decline, Reply::Commit])?;
+            let key = source.key(starter()?, false);
+            let sink: ITfKeyEventSink = host.tip.to_interface();
+            let l = LPARAM(key.flags as isize);
+            set_held(key.vk, true)?;
+            assert!(
+                sink.OnTestKeyDown(&host.context, WPARAM(key.vk), l)?
+                    .as_bool()
+            );
+            assert!(!sink.OnKeyDown(&host.context, WPARAM(key.vk), l)?.as_bool());
+            assert!(key.down(host, true)?);
+            key.check_up(host, false)?;
+            host.tip.shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_prediction_uses_the_keyboard_layout() -> Result<()> {
+    with_host(|host| {
+        let server = serve(&[])?;
+        set_held(usize::from(VK_SHIFT.0), true)?;
+        // Shift+0 produces no character on JIS. Use a reserved VK on layouts
+        // where it does produce a character.
+        let vk = [0x30, 0x3a]
+            .into_iter()
+            .find(|&vk| translate(WPARAM(vk), LPARAM(1)).is_none())
+            .ok_or_else(failure)?;
+        assert!(!host.test(vk)?);
+        host.check_up(vk, false)?;
+        host.tip.shared.client.borrow_mut().take();
+        finish(server)
+    })
+}
+
+#[test]
+fn key_routing_denied_read_ends_the_mark_and_passes_composition_commands() -> Result<()> {
+    check_denied_read_during_composition(false)
+}
+
+#[test]
+fn key_routing_denied_read_defers_the_mark_end_after_a_refused_write() -> Result<()> {
+    check_denied_read_during_composition(true)
+}
+
+fn check_denied_read_during_composition(refuse_write: bool) -> Result<()> {
+    for deny_at_test in [true, false] {
+        for vk in [8, 0x0d, 0x1b, 0x20] {
+            with_host(|host| {
+                let server = serve(&[Reply::Converted])?;
+                press(&host.tip, &host.context, starter()?)?;
+                let displayed = host.store.text.borrow().clone();
+                assert_eq!(host.store.compositions.get(), 1);
+                if !deny_at_test {
+                    assert!(host.test(vk)?);
+                }
+                host.store.reject_lock_after.set(Some(0));
+                if refuse_write {
+                    host.store.refusal.set(Some(Refusal::WriteLock));
+                }
+                if deny_at_test {
+                    assert!(!host.test(vk)?);
+                } else {
+                    assert!(!host.down(vk)?);
+                }
+                if refuse_write {
+                    dispatch_pending();
+                }
+                assert_eq!(host.store.compositions.get(), 0);
+                assert_eq!(host.store.ends.get(), 1);
+                assert!(host.store.text.borrow().as_slice() == displayed);
+                host.check_up(vk, false)?;
+                finish(server)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_down_after_focus_moves_to_a_password_field() -> Result<()> {
+    with_host(|host| unsafe {
+        let vk = starter()?;
+        let server = serve(&[])?;
+        assert!(host.test(vk)?);
+        let keys: ITfKeyEventSink = host.tip.to_interface();
+        keys.OnSetFocus(false)?;
+        host.store.set_scope(IS_PASSWORD);
+        keys.OnSetFocus(true)?;
+        assert!(!host.down(vk)?);
+        host.check_up(vk, false)?;
+        finish(server)
+    })
 }
 
 #[test]
@@ -897,17 +1256,67 @@ fn protected_or_unreadable_field_passes_the_key_without_a_start_or_hint() -> Res
 }
 
 #[test]
-fn down_consumes_a_claim_without_sending_it_to_a_newly_protected_field() -> Result<()> {
+fn key_routing_down_passes_a_claim_in_a_newly_protected_field() -> Result<()> {
+    for connected in [false, true] {
+        with_host(|host| {
+            let vk = starter()?;
+            let server = connected.then(|| serve(&[])).transpose()?;
+            assert!(host.test(vk)?);
+            let opens = OPENS.get();
+            host.store.set_scope(IS_PASSWORD);
+            assert!(!host.down(vk)?);
+            host.check_up(vk, false)?;
+            assert_eq!(host.store.preceding_reads.get(), 0);
+            assert_eq!(OPENS.get(), opens);
+            assert_eq!(START_PROBES.get(), 0);
+            assert_eq!(HINTS.get(), 0);
+            if let Some(server) = server {
+                finish(server)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn key_routing_down_ends_the_displayed_mark_in_a_newly_protected_field() -> Result<()> {
+    with_host(|host| {
+        let server = serve(&[Reply::Converted])?;
+        press(&host.tip, &host.context, starter()?)?;
+        let displayed = host.store.text.borrow().clone();
+        assert_eq!(host.store.compositions.get(), 1);
+        assert!(host.test(0x0d)?);
+        host.store.set_scope(IS_PASSWORD);
+        assert!(!host.down(0x0d)?);
+        assert_eq!(host.store.compositions.get(), 0);
+        assert_eq!(host.store.ends.get(), 1);
+        assert!(host.store.text.borrow().as_slice() == displayed);
+        host.check_up(0x0d, false)?;
+        finish(server)
+    })
+}
+
+#[test]
+fn key_routing_down_passes_a_field_protected_during_reconnection() -> Result<()> {
     with_host(|host| {
         let vk = starter()?;
         assert!(host.test(vk)?);
-        let opens = OPENS.get();
-        host.store.set_scope(IS_PASSWORD);
-        assert!(host.down(vk)?);
-        host.check_up(vk, true)?;
-        assert_eq!(OPENS.get(), opens);
+        let server = serve(&[])?;
+        let store = host.store.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterReadLock,
+            Box::new(move || {
+                store.set_scope(IS_PASSWORD);
+                Ok(())
+            }),
+        )));
+        assert!(!host.down(vk)?);
+        host.check_up(vk, false)?;
+        assert_eq!(HELLOS.get(), 1);
+        assert_eq!(host.store.preceding_reads.get(), 0);
         assert_eq!(HINTS.get(), 0);
-        Ok(())
+        finish(server)
     })
 }
 
@@ -928,6 +1337,7 @@ enum Reply {
     PrivateCommit,
     PrivateCompose,
     NormalCommit,
+    Pass,
     PassBackspace,
     Decline,
     Lose,
@@ -1056,7 +1466,10 @@ fn reply_to_session(
                     .is_some_and(|k| k.special == *expected as i32)
             );
         }
-        assert_eq!(key.passed_through, step == Reply::PassBackspace);
+        assert_eq!(
+            key.passed_through,
+            matches!(step, Reply::Pass | Reply::PassBackspace)
+        );
         if matches!(
             step,
             Reply::PrivateCommit | Reply::PrivateCompose | Reply::NormalCommit
@@ -1208,13 +1621,18 @@ fn check_connected_commit(tip: &ComObject<Tip>, context: &ITfContext) -> Result<
 
 fn press(tip: &ComObject<Tip>, context: &ITfContext, vk: usize) -> Result<()> {
     let keys: ITfKeyEventSink = tip.to_interface();
+    set_held(vk, true)?;
     unsafe {
         assert!(
             keys.OnTestKeyDown(context, WPARAM(vk), LPARAM(1))?
                 .as_bool()
         );
         assert!(keys.OnKeyDown(context, WPARAM(vk), LPARAM(1))?.as_bool());
-        assert!(keys.OnKeyUp(context, WPARAM(vk), LPARAM(0))?.as_bool());
+        set_held(vk, false)?;
+        assert!(
+            keys.OnKeyUp(context, WPARAM(vk), LPARAM(0xc000_0001u32 as isize))?
+                .as_bool()
+        );
     }
     Ok(())
 }
@@ -1222,12 +1640,7 @@ fn press(tip: &ComObject<Tip>, context: &ITfContext, vk: usize) -> Result<()> {
 // These callbacks cross a COM boundary. Return their result to the test
 // before asserting anything about key ownership or document contents.
 fn deliver(keys: &ITfKeyEventSink, context: &ITfContext, vk: usize) -> Result<bool> {
-    unsafe {
-        Ok(keys
-            .OnTestKeyDown(context, WPARAM(vk), LPARAM(1))?
-            .as_bool()
-            && keys.OnKeyDown(context, WPARAM(vk), LPARAM(1))?.as_bool())
-    }
+    KeySource::Wpf.key(vk, false).deliver(keys, context, false)
 }
 
 fn compare_interrupted_keys(at: DuringEdit) -> Result<()> {
@@ -1394,12 +1807,27 @@ fn reentry_mode_queue_passes_modifiers_and_untranslated_keys() -> Result<()> {
             DuringEdit::AfterWriteLock,
             Box::new(move || {
                 let mut all = deliver(&keys, &context, 0x16)?;
-                for vk in [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN, VK_F1] {
-                    let w = WPARAM(vk.0 as usize);
-                    all &= !keys.OnTestKeyDown(&context, w, LPARAM(1))?.as_bool();
-                    all &= !keys.OnKeyDown(&context, w, LPARAM(1))?.as_bool();
-                    all &= !keys.OnKeyDown(&context, w, LPARAM(1))?.as_bool(); // No preceding Test.
-                    all &= !keys.OnKeyUp(&context, w, LPARAM(0))?.as_bool();
+                for vk in [
+                    VK_LSHIFT,
+                    VK_RSHIFT,
+                    VK_LCONTROL,
+                    VK_RCONTROL,
+                    VK_MENU,
+                    VK_LWIN,
+                    VK_RWIN,
+                    VK_F1,
+                ] {
+                    let key = KeySource::Wpf.key(usize::from(vk.0), false);
+                    let w = WPARAM(key.vk);
+                    let l = LPARAM(key.flags as isize);
+                    all &= !key.deliver(&keys, &context, false)?;
+                    all &= !key.deliver(&keys, &context, true)?;
+                    all &= !keys.OnKeyDown(&context, w, l)?.as_bool();
+                    all &= !keys.OnKeyDown(&context, w, l)?.as_bool(); // Repeat without Test.
+                    set_held(key.vk, false)?;
+                    let up = LPARAM((key.flags | 0xc000_0000) as isize);
+                    all &= !keys.OnTestKeyUp(&context, w, up)?.as_bool();
+                    all &= !keys.OnKeyUp(&context, w, up)?.as_bool();
                 }
                 nested.set(all);
                 Ok(())
@@ -1538,7 +1966,7 @@ fn reentry_rechecks_scope_before_sending_queued_key() -> Result<()> {
             let server = serve(if private {
                 &[Reply::Compose, Reply::PrivateCommit]
             } else {
-                &[Reply::Compose]
+                &[Reply::Converted]
             })?;
             let store = host.store.clone();
             let context = host.context.clone();
@@ -1562,11 +1990,57 @@ fn reentry_rechecks_scope_before_sending_queued_key() -> Result<()> {
             assert!(taken.get());
             assert_eq!(HINTS.get(), usize::from(!private && native_ui));
             assert_eq!(HELLOS.get(), 1);
+            if !private {
+                assert!(host.tip.shared.client.borrow().is_none());
+                assert!(
+                    host.store
+                        .text
+                        .borrow()
+                        .iter()
+                        .copied()
+                        .eq("AB漢字".encode_utf16())
+                );
+                // A password scope still grants the write to end the mark.
+                if !readonly {
+                    assert_eq!(host.store.compositions.get(), 0);
+                    assert_eq!(host.store.ends.get(), 1);
+                }
+            }
             host.tip.shared.client.borrow_mut().take();
             finish(server)
         })?;
     }
     Ok(())
+}
+
+#[test]
+fn key_routing_nested_down_passes_a_newly_protected_field() -> Result<()> {
+    with_host(|host| unsafe {
+        let manager: ITfThreadMgr =
+            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+        let (docs, other) = test_document(&manager, host.owner_id, host.tip.clone())?;
+        let server = serve(&[Reply::Compose, Reply::Commit])?;
+        let vk = starter()?;
+        press(&host.tip, &host.context, vk)?;
+        let routes = Rc::new(Cell::new(None));
+        let nested = routes.clone();
+        host.store.callback.set(Some((
+            DuringEdit::AfterWriteLock,
+            Box::new(move || {
+                let test = other.test(vk)?;
+                other.store.set_scope(IS_PASSWORD);
+                nested.set(Some((test, other.down(vk)?)));
+                Ok(())
+            }),
+        )));
+        press(&host.tip, &host.context, 0x0d)?;
+        assert_eq!(routes.get(), Some((true, false)));
+        host.check_up(vk, false)?;
+        assert_eq!(HINTS.get(), 0);
+        host.tip.shared.client.borrow_mut().take();
+        finish(server)?;
+        docs.Pop(TF_POPF_ALL)
+    })
 }
 
 #[test]
@@ -1805,40 +2279,47 @@ fn reentry_rejected_edit_processes_unsubmitted_key() -> Result<()> {
 
 #[test]
 fn reentry_foreground_loss_drains_the_attached_store() -> Result<()> {
-    with_host(|host| unsafe {
-        let original = serve_keys(
-            &[Reply::Compose, Reply::Converted, Reply::Commit],
-            None,
-            &[SpecialKey::None, SpecialKey::None, SpecialKey::Enter],
-        )?;
-        let vk = starter()?;
-        let keys: ITfKeyEventSink = host.tip.to_interface();
-        let context = host.context.clone();
-        host.store.callback.set(Some((
-            DuringEdit::AfterWriteLock,
-            Box::new(move || {
-                deliver(&keys, &context, vk)?
-                    .then_some(())
-                    .ok_or_else(failure)?;
-                deliver(&keys, &context, 0x0d)?
-                    .then_some(())
-                    .ok_or_else(failure)?;
-                keys.OnSetFocus(false)
-            }),
-        )));
-        assert!(host.test(vk)? && host.down(vk)?);
-        assert_eq!(HINTS.get(), 0);
-        assert_eq!(HELLOS.get(), 1);
-        assert!(
-            host.store
-                .text
-                .borrow()
-                .iter()
-                .copied()
-                .eq("AB字".encode_utf16())
-        );
-        finish(original)
-    })
+    for source in [KeySource::Wpf, KeySource::Hook] {
+        with_host(|host| unsafe {
+            let original = serve_keys(
+                &[Reply::Compose, Reply::Converted, Reply::Commit],
+                None,
+                &[SpecialKey::None, SpecialKey::None, SpecialKey::Enter],
+            )?;
+            let vk = starter()?;
+            let keys: ITfKeyEventSink = host.tip.to_interface();
+            let context = host.context.clone();
+            let enter = source.key(0x0d, false);
+            host.store.callback.set(Some((
+                DuringEdit::AfterWriteLock,
+                Box::new(move || {
+                    deliver(&keys, &context, vk)?
+                        .then_some(())
+                        .ok_or_else(failure)?;
+                    enter
+                        .deliver(&keys, &context, false)?
+                        .then_some(())
+                        .ok_or_else(failure)?;
+                    keys.OnSetFocus(false)
+                }),
+            )));
+            assert!(host.test(vk)? && host.down(vk)?);
+            enter.check_up(host, true)?;
+            host.check_up(vk, true)?;
+            assert_eq!(HINTS.get(), 0);
+            assert_eq!(HELLOS.get(), 1);
+            assert!(
+                host.store
+                    .text
+                    .borrow()
+                    .iter()
+                    .copied()
+                    .eq("AB字".encode_utf16())
+            );
+            finish(original)
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -2207,6 +2688,69 @@ fn test_candidate() -> ipc::CandidateHandle {
         candidate_revision: 1,
         slot: 0,
     }
+}
+
+fn check_refused_candidate_read(action: fn(&Rc<Shared>), expected_discards: usize) -> Result<()> {
+    for queued in [true, false] {
+        with_host(|host| unsafe {
+            let manager: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            manager.SetFocus(&host.context.GetDocumentMgr()?)?;
+            let shared = &host.tip.shared;
+            shared.manager.replace(Some(manager));
+            let server = serve(if queued {
+                &[Reply::Candidates, Reply::Candidates, Reply::Select]
+            } else {
+                &[Reply::Candidates, Reply::Select]
+            })?;
+            let vk = starter()?;
+            press(&host.tip, &host.context, vk)?;
+            let mark = shared.composition.borrow().clone().ok_or_else(failure)?;
+            let displayed = host.store.text.borrow().clone();
+            let field = shared.field.get();
+            let candidate_owner = shared.clone();
+            let store = host.store.clone();
+            let refuse_read = move || {
+                store.reject_lock_after.set(Some(0));
+                action(&candidate_owner);
+                Ok(())
+            };
+            if queued {
+                host.store
+                    .callback
+                    .set(Some((DuringEdit::AfterWriteLock, Box::new(refuse_read))));
+                press(&host.tip, &host.context, vk)?;
+            } else {
+                refuse_read()?;
+            }
+
+            assert_eq!(host.store.reject_lock_after.get(), None);
+            assert_eq!(host.store.compositions.get(), 1);
+            assert_eq!(host.store.ends.get(), 0);
+            assert!(shared.composition.borrow().as_ref() == Some(&mark));
+            assert!(host.store.text.borrow().as_slice() == displayed);
+            assert!(shared.field.get() == field);
+            assert!(shared.page.borrow().refinement_pending);
+            assert_eq!(HINTS.get(), expected_discards);
+            // The same candidate can still be selected on the original session.
+            shared.choose(test_candidate());
+            assert_eq!(host.store.ends.get(), 1);
+            assert_eq!(HELLOS.get(), 1);
+            shared.client.borrow_mut().take();
+            finish(server)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn candidate_click_keeps_the_mark_after_a_refused_read() -> Result<()> {
+    check_refused_candidate_read(|shared| shared.choose(test_candidate()), 1)
+}
+
+#[test]
+fn candidate_poll_keeps_the_mark_after_a_refused_read() -> Result<()> {
+    check_refused_candidate_read(|shared| shared.poll_refinement(true), 0)
 }
 
 #[test]
@@ -3398,15 +3942,15 @@ fn a_repeat_without_test_cannot_use_the_first_messages_claim() -> Result<()> {
 }
 
 #[test]
-fn connected_starter_claim_survives_a_denied_edit_lock_on_down() -> Result<()> {
+fn key_routing_connected_starter_passes_after_a_denied_read_on_down() -> Result<()> {
     with_host(|host| {
         let server = serve(&[])?;
         host.tip.shared.connect(false);
         let vk = starter()?;
         assert!(host.test(vk)?);
         host.store.busy.set(true);
-        assert!(host.down(vk)?);
-        host.check_up(vk, true)?;
+        assert!(!host.down(vk)?);
+        host.check_up(vk, false)?;
         assert_eq!(host.store.end(), 2);
         finish(server)
     })
@@ -3917,7 +4461,7 @@ fn outage_uses_the_connected_starter_policy_in_writable_fields() -> Result<()> {
             host.store.range_readonly.set(Some(false));
             let vk = (0x30..=0x39)
                 .find(|&vk| {
-                    translate(WPARAM(vk), LPARAM(1), false)
+                    translate(WPARAM(vk), LPARAM(1))
                         .is_some_and(|key| ipc::frontend::starts_composition(&key))
                 })
                 .unwrap_or(starter()?);
