@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 Set-StrictMode -Version Latest
 if (-not $env:GITHUB_ACTIONS) { throw 'Run only on a disposable CI runner' }
+. (Join-Path $PSScriptRoot 'windows-brand-icon.ps1')
 $msi = (Resolve-Path artifacts/windows/Kanade.msi).Path
 $setup = (Resolve-Path artifacts/release/kanade-ime-x86_64-pc-windows-msvc.exe).Path
 $class = '{6DAFA84E-C56A-42BE-983E-0D18F3DC5B21}'
@@ -132,6 +133,12 @@ try {
             finally { $key.Dispose() }
         } finally { $registry.Dispose() }
     }
+    # The input switcher and the taskbar read the brand icon from the installed DLL.
+    $icon = Get-RegisteredBrandIcon
+    if (-not $icon.Path.StartsWith((Join-Path $env:ProgramFiles 'Kanade\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The input profile's icon file is outside the installation: $($icon.Path)"
+    }
+    Write-Output "Installed input profile shows the brand icon of $($icon.Path), sizes $($icon.Sizes -join ', ')"
     # Windows Installer compares three fields of a version, which builds that
     # differ only in their preview number share. Another build with the same
     # version replaces the installed one instead of being installed beside it,

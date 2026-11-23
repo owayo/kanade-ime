@@ -42,6 +42,7 @@ mod programs;
 mod registration;
 mod uiless;
 use candidates::CandidateWindow;
+pub use registration::BRAND_ICON_INDEX;
 const CLSID: GUID = GUID::from_u128(0x6dafa84e_c56a_42be_983e_0d18f3dc5b21);
 const PROFILE: GUID = GUID::from_u128(0xa1c81465_d31b_41d4_b7c4_35641955f560);
 static MODULE: AtomicUsize = AtomicUsize::new(0);

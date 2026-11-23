@@ -2783,6 +2783,7 @@ name = "kanade-tip"
 version = "26.11.118"
 dependencies = [
  "kanade-ipc",
+ "kanade-winres",
  "windows 0.62.2",
  "windows-core 0.62.2",
 ]
@@ -2808,6 +2809,14 @@ dependencies = [
  "serde_json",
  "toml 1.2.1+spec-1.1.0",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "kanade-winres"
+version = "26.11.118"
+dependencies = [
+ "png 0.18.1",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

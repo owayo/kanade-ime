@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $env:GITHUB_ACTIONS) { throw 'Run only on a disposable CI runner' }
+. (Join-Path $PSScriptRoot 'windows-brand-icon.ps1')
 $class = '{6DAFA84E-C56A-42BE-983E-0D18F3DC5B21}'
 $servers = @{
     x64 = @("$env:WINDIR/System32/regsvr32.exe", (Resolve-Path target/x86_64-pc-windows-msvc/release/kanade_tip.dll).Path)
@@ -38,23 +39,41 @@ function Assert-Registered([bool]$Present) {
         } finally { $registry.Dispose() }
     }
 }
+# The input profile is shared by both architectures and keeps the icon file of
+# the DLL registered last. Windows shows the same brand icon either way only
+# if both DLLs hold it at the registered position.
+function Assert-BrandIcon([string]$Last) {
+    $icon = Get-RegisteredBrandIcon
+    if ((Get-Item -LiteralPath $icon.Path).FullName -ine $servers[$Last][1]) {
+        throw "The profile's icon file is not the DLL registered last ($Last): $($icon.Path)"
+    }
+    foreach ($architecture in $servers.Keys) {
+        if ((Get-BrandIcon $servers[$architecture][1] $icon.Index).Digest -ne $icon.Digest) {
+            throw "The $architecture DLL holds another icon at position $($icon.Index)"
+        }
+    }
+    return $icon
+}
 Assert-Registered $false
 $failure = $null
 $cleanupFailure = $null
+$orders = @(@('x64', 'x86'), @('x86', 'x64'))
 try {
-    foreach ($first in @('x64', 'x86')) {
-        $second = if ($first -eq 'x64') { 'x86' } else { 'x64' }
-        Invoke-Registration x64 $false
-        Invoke-Registration x86 $false
-        Assert-Registered $true
-        Invoke-Registration $first $true
-        Invoke-Registration $second $true
-        Assert-Registered $false
-        # An absent shared TSF registration is a successful no-op in either DLL.
-        Invoke-Registration $second $true
-        Invoke-Registration $first $true
-        Assert-Registered $false
-        Write-Output "Registration and repeated removal passed: $first then $second"
+    foreach ($registration in $orders) {
+        foreach ($removal in $orders) {
+            Invoke-Registration $registration[0] $false
+            Invoke-Registration $registration[1] $false
+            Assert-Registered $true
+            $icon = Assert-BrandIcon $registration[1]
+            Invoke-Registration $removal[0] $true
+            Invoke-Registration $removal[1] $true
+            Assert-Registered $false
+            # An absent shared TSF registration is a successful no-op in either DLL.
+            Invoke-Registration $removal[1] $true
+            Invoke-Registration $removal[0] $true
+            Assert-Registered $false
+            Write-Output "Registration ($($registration -join ' then ')) and repeated removal ($($removal -join ' then ')) passed; brand icon at position $($icon.Index) of the $($registration[1]) DLL, sizes $($icon.Sizes -join ', ')"
+        }
     }
 } catch { $failure = $_ }
 finally {

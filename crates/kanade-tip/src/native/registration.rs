@@ -6,6 +6,14 @@ use windows::{
 const KEY: PCWSTR = w!("Software\\Classes\\CLSID\\{6DAFA84E-C56A-42BE-983E-0D18F3DC5B21}");
 const SERVER: PCWSTR =
     w!("Software\\Classes\\CLSID\\{6DAFA84E-C56A-42BE-983E-0D18F3DC5B21}\\InprocServer32");
+/// Position of the brand icon among the icon groups that `build.rs` links
+/// into this DLL. Windows shows the icon in the input switcher and in the
+/// taskbar's input indicator.
+///
+/// The profile is shared by both architectures and keeps the path of the DLL
+/// registered last. The 64-bit and the 32-bit DLL carry the same icon at the
+/// same position, so the order of registration does not change what is shown.
+pub const BRAND_ICON_INDEX: u32 = 0;
 struct RegistryKey(HKEY);
 impl Drop for RegistryKey {
     fn drop(&mut self) {
@@ -75,7 +83,7 @@ pub fn register() -> Result<()> {
             &PROFILE,
             &"Kanade".encode_utf16().collect::<Vec<_>>(),
             &path,
-            0,
+            BRAND_ICON_INDEX,
         )?;
         profiles.EnableLanguageProfile(&CLSID, 0x0411, &PROFILE, true)?;
     }
