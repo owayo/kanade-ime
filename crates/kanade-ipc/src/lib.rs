@@ -170,6 +170,15 @@ pub fn surface(preedit: &Preedit) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn halfwidth_kana_do_not_start_composition() {
+        for kana in 'ｦ'..='ﾟ' {
+            assert!(!frontend::starts_composition(&Key {
+                text: kana.to_string(),
+                ..Default::default()
+            }));
+        }
+    }
+    #[test]
     fn fragmented_truncated_and_oversized_frames() {
         let mut data = Vec::new();
         write_frame(&mut data, b"abc").unwrap();
