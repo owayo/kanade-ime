@@ -129,7 +129,7 @@ impl Hint {
         } else {
             w!("A  半角英数")
         };
-        Self::with_label(context, tid, label, 1000)
+        Self::with_label(context, tid, label, 2000)
     }
     pub(super) fn for_outage(context: &ITfContext, tid: u32) -> Result<Self> {
         let mut hint = Self::with_label(
