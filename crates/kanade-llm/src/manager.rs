@@ -273,6 +273,23 @@ impl Manager {
     pub fn service(&self) -> Service {
         self.0.service.clone()
     }
+    /// State of live inference for the input menu. Reading it never wakes an idle worker.
+    pub fn ai_state(&self) -> kanade_ipc::AiState {
+        use kanade_ipc::AiState;
+        let state = self.lock();
+        if !state.enabled {
+            return AiState::Off;
+        }
+        match self.0.service.health() {
+            Health::Starting => AiState::Preparing,
+            Health::Running => AiState::Running,
+            Health::Idle => AiState::Idle,
+            Health::Backoff => AiState::Retrying,
+            Health::Faulted(_) => AiState::Stopped,
+            Health::Inactive if !state.loaded || state.busy() => AiState::Preparing,
+            Health::Inactive => AiState::SetupRequired,
+        }
+    }
     /// Whether `llm` may be enabled right now.
     pub fn ready(&self) -> bool {
         let state = self.lock();
@@ -1161,9 +1178,11 @@ mod tests {
         // Only an import helps. The engine measures nothing by itself.
         let (manager, status) = f.open(true);
         assert_eq!((status.reason, status.job), (Reason::ModelChanged, None));
+        assert_eq!(manager.ai_state(), kanade_ipc::AiState::SetupRequired);
         assert!(Rerank::setup_required(&manager.service()));
         drop(manager);
         let (manager, _) = f.open(false);
+        assert_eq!(manager.ai_state(), kanade_ipc::AiState::Off);
         assert!(!Rerank::setup_required(&manager.service()));
         drop(manager);
         // A completed measurement that failed the gates needs review.
@@ -1191,6 +1210,7 @@ mod tests {
         f.record(f.qualified(tsumugi));
         // The records qualify the model, so the manager serves it.
         let manager = f.unread(true, Stub::Refusing);
+        assert_eq!(manager.ai_state(), kanade_ipc::AiState::Preparing);
         assert_eq!(manager.reload(), None);
         let service = manager.service();
         assert!(service.active());
@@ -1204,6 +1224,7 @@ mod tests {
         let status = manager.status();
         assert_eq!((status.reason, status.ready), (Reason::ModelChanged, false));
         assert_eq!(service.submit(job()), None);
+        assert_eq!(manager.ai_state(), kanade_ipc::AiState::Stopped);
         assert!(Rerank::setup_required(&service));
         // Switched off, nothing is asked.
         manager.set_enabled(false);

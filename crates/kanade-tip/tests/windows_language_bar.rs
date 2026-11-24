@@ -156,12 +156,12 @@ fn installed_profile_shows_its_mode_in_the_language_bar() -> Result<()> {
         assert_eq!(pixels(button.GetIcon()?)?, japanese);
         assert_eq!(updates.borrow().len(), 2);
 
-        // The menu marks the mode and offers the installed settings.
+        // The two read-only status rows follow the commands.
         let lines = Rc::new(RefCell::new(Vec::new()));
         let menu: ITfMenu = Lines(lines.clone()).into();
         button.InitMenu(&menu)?;
         assert_eq!(
-            *lines.borrow(),
+            &lines.borrow()[..4],
             [
                 (TF_LBMENUF_RADIOCHECKED, "ひらがな".to_owned()),
                 (0, "半角英数".to_owned()),
@@ -169,6 +169,13 @@ fn installed_profile_shows_its_mode_in_the_language_bar() -> Result<()> {
                 (0, "Kanade の設定…".to_owned()),
             ]
         );
+        let lines = lines.borrow();
+        assert_eq!(lines.len(), 6);
+        for ((flags, label), prefix) in lines[4..].iter().zip(["変換エンジンの動作：", "AI："])
+        {
+            assert_eq!(*flags, TF_LBMENUF_GRAYED);
+            assert!(label.starts_with(prefix) && label.len() > prefix.len());
+        }
         button.OnMenuSelect(1)?;
         common::dispatch_pending();
         assert_eq!(opened()?, 0);

@@ -45,39 +45,52 @@ unsafe extern "C" {
     fn CFRelease(value: *const std::ffi::c_void);
 }
 type EngineClient = Client<DeadlineStream>;
+struct SettingsMenu {
+    menu: Retained<NSMenu>,
+    status_items: [Retained<NSMenuItem>; 2],
+}
 fn retained_settings_menu(
-    cache: &OnceCell<Retained<NSMenu>>,
+    cache: &OnceCell<SettingsMenu>,
     mtm: MainThreadMarker,
     target: &AnyObject,
+    status: RuntimeStatus,
 ) -> Retained<NSMenu> {
-    cache
-        .get_or_init(|| {
-            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Kanade"));
-            menu.setAutoenablesItems(false);
-            let item = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &NSString::from_str("Kanade の設定…"),
-                    Some(sel!(kanadeOpenSettings:)),
-                    &NSString::from_str(""),
-                )
-            };
-            // IMK routes custom actions through the document controller. Keep
-            // its menu/item identity stable while the system tracks that menu.
-            unsafe {
-                item.setTarget(Some(target));
-            }
-            item.setTag(1001);
-            item.setEnabled(true);
+    let cached = cache.get_or_init(|| {
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Kanade"));
+        menu.setAutoenablesItems(false);
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str("Kanade の設定…"),
+                Some(sel!(kanadeOpenSettings:)),
+                &NSString::from_str(""),
+            )
+        };
+        // IMK routes custom actions through the document controller. Keep
+        // its menu/item identity stable while the system tracks that menu.
+        unsafe {
+            item.setTarget(Some(target));
+        }
+        item.setTag(1001);
+        item.setEnabled(true);
+        menu.addItem(&item);
+        let status_items = std::array::from_fn(|_| {
+            let item = NSMenuItem::new(mtm);
+            item.setEnabled(false);
             menu.addItem(&item);
-            menu
-        })
-        .clone()
+            item
+        });
+        SettingsMenu { menu, status_items }
+    });
+    for (item, title) in cached.status_items.iter().zip(status.menu_labels()) {
+        item.setTitle(&NSString::from_str(title));
+    }
+    cached.menu.clone()
 }
 #[derive(Default)]
 struct State {
     refinement: refinement::Polling,
-    settings_menu: OnceCell<Retained<NSMenu>>,
+    settings_menu: OnceCell<SettingsMenu>,
     selecting_source: Cell<bool>,
     /// No connection attempt before this time, after one failed.
     connect_after: Cell<Option<Instant>>,
@@ -104,7 +117,11 @@ define_class!(
         #[unsafe(method_id(menu))]
         fn command_menu(&self) -> Option<Retained<NSMenu>> {
             guarded(|| {
-                Some(retained_settings_menu(&self.ivars().settings_menu, self.mtm(), self))
+                let status = ipc::unix::socket_path()
+                    .and_then(|path| DeadlineStream::connect(&path, MENU_STATUS_TIMEOUT))
+                    .and_then(|mut stream| RuntimeStatus::query(&mut stream))
+                    .unwrap_or_default();
+                Some(retained_settings_menu(&self.ivars().settings_menu, self.mtm(), self, status))
             })
         }
         #[unsafe(method(kanadeOpenSettings:))]
@@ -686,12 +703,23 @@ pub fn run() -> Result<()> {
             }
             let cache = OnceCell::new();
             let target = NSObject::new();
-            let menu = retained_settings_menu(&cache, mtm, &target);
+            let menu = retained_settings_menu(&cache, mtm, &target, RuntimeStatus::default());
             let item = menu.itemAtIndex(0).unwrap();
-            for _ in 0..100 {
-                let repeated = retained_settings_menu(&cache, mtm, &target);
+            for ai in [AiState::Running, AiState::Idle, AiState::Off] {
+                let status = RuntimeStatus {
+                    engine_running: Some(true),
+                    ai: ai as i32,
+                };
+                let repeated = retained_settings_menu(&cache, mtm, &target, status);
                 assert!(std::ptr::eq(&*menu, &*repeated));
                 assert!(std::ptr::eq(&*item, &*repeated.itemAtIndex(0).unwrap()));
+                assert_eq!(repeated.numberOfItems(), 3);
+                for (index, label) in (1..).zip(status.menu_labels()) {
+                    let line = repeated.itemAtIndex(index).unwrap();
+                    assert_eq!(line.title().to_string(), label);
+                    assert!(!line.isEnabled());
+                    assert_eq!(line.action(), None);
+                }
             }
             assert_eq!(item.tag(), 1001);
             assert_eq!(item.action(), Some(sel!(kanadeOpenSettings:)));

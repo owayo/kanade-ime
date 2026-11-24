@@ -491,6 +491,10 @@ impl Mozc {
         *self = fresh;
         self.set_privacy(Privacy::Unknown)
     }
+    /// Observes the worker without sending it a conversion command.
+    pub fn running(&mut self) -> std::io::Result<bool> {
+        Ok(!self.process.failed && self.process.child.try_wait()?.is_none())
+    }
     pub fn terminate(&mut self) -> Result<()> {
         self.process.child.kill()?;
         self.process.child.wait()?;

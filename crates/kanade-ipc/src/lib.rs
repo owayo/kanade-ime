@@ -52,6 +52,44 @@ pub const MOD_CONTROL: u32 = 2;
 pub const MOD_ALT: u32 = 4;
 pub const MOD_META: u32 = 8;
 
+/// A menu can still show its commands if the engine is busy or unreachable.
+pub const MENU_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+impl RuntimeStatus {
+    /// Reads a snapshot over a fresh, peer-verified stream with a menu deadline.
+    pub fn query(stream: &mut (impl Read + Write)) -> io::Result<Self> {
+        send(
+            stream,
+            &Request {
+                body: Some(request::Body::RuntimeStatus(RuntimeStatusRequest {})),
+            },
+        )?;
+        match receive::<Response, _>(stream)?.body {
+            Some(response::Body::RuntimeStatus(status)) => Ok(status),
+            _ => Err(io::ErrorKind::InvalidData.into()),
+        }
+    }
+
+    pub fn menu_labels(&self) -> [&'static str; 2] {
+        let engine = match self.engine_running {
+            Some(true) => "変換エンジンの動作：動作中",
+            Some(false) => "変換エンジンの動作：停止中",
+            None => "変換エンジンの動作：状態不明",
+        };
+        let ai = match self.ai() {
+            AiState::Off => "AI：オフ",
+            AiState::Preparing => "AI：準備中",
+            AiState::Running => "AI：動作中",
+            AiState::Idle => "AI：待機中",
+            AiState::Retrying => "AI：再試行待ち",
+            AiState::SetupRequired => "AI：要設定",
+            AiState::Stopped => "AI：停止中",
+            AiState::Unspecified => "AI：状態不明",
+        };
+        [engine, ai]
+    }
+}
+
 impl CandidatePage {
     /// Visible feedback for this list. The footer field on the wire holds the reading.
     pub fn status_line(&self) -> String {

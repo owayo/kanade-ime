@@ -270,10 +270,22 @@ pub struct CandidatePoll {
     #[prost(uint64, optional, tag = "3")]
     pub preview_event_seq: ::core::option::Option<u64>,
 }
+/// One read-only exchange on a fresh connection. No Hello, conversion session or document context.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RuntimeStatusRequest {}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RuntimeStatus {
+    #[prost(bool, optional, tag = "1")]
+    pub engine_running: ::core::option::Option<bool>,
+    #[prost(enumeration = "AiState", tag = "2")]
+    pub ai: i32,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Request {
-    #[prost(oneof = "request::Body", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "request::Body", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub body: ::core::option::Option<request::Body>,
 }
 /// Nested message and enum types in `Request`.
@@ -299,6 +311,8 @@ pub mod request {
         Poll(super::CandidatePoll),
         #[prost(message, tag = "9")]
         Restore(super::RestoreRequest),
+        #[prost(message, tag = "10")]
+        RuntimeStatus(super::RuntimeStatusRequest),
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -503,7 +517,7 @@ pub struct CandidateUpdate {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Response {
-    #[prost(oneof = "response::Body", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "response::Body", tags = "1, 2, 3, 4, 5, 6, 7")]
     pub body: ::core::option::Option<response::Body>,
 }
 /// Nested message and enum types in `Response`.
@@ -523,6 +537,8 @@ pub mod response {
         Management(super::Management),
         #[prost(message, tag = "6")]
         Candidates(super::CandidateUpdate),
+        #[prost(message, tag = "7")]
+        RuntimeStatus(super::RuntimeStatus),
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -614,6 +630,51 @@ impl SpecialKey {
             "DELETE" => Some(Self::Delete),
             "HOME" => Some(Self::Home),
             "END" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AiState {
+    Unspecified = 0,
+    Off = 1,
+    Preparing = 2,
+    Running = 3,
+    Idle = 4,
+    Retrying = 5,
+    SetupRequired = 6,
+    Stopped = 7,
+}
+impl AiState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AI_STATE_UNSPECIFIED",
+            Self::Off => "AI_STATE_OFF",
+            Self::Preparing => "AI_STATE_PREPARING",
+            Self::Running => "AI_STATE_RUNNING",
+            Self::Idle => "AI_STATE_IDLE",
+            Self::Retrying => "AI_STATE_RETRYING",
+            Self::SetupRequired => "AI_STATE_SETUP_REQUIRED",
+            Self::Stopped => "AI_STATE_STOPPED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AI_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "AI_STATE_OFF" => Some(Self::Off),
+            "AI_STATE_PREPARING" => Some(Self::Preparing),
+            "AI_STATE_RUNNING" => Some(Self::Running),
+            "AI_STATE_IDLE" => Some(Self::Idle),
+            "AI_STATE_RETRYING" => Some(Self::Retrying),
+            "AI_STATE_SETUP_REQUIRED" => Some(Self::SetupRequired),
+            "AI_STATE_STOPPED" => Some(Self::Stopped),
             _ => None,
         }
     }

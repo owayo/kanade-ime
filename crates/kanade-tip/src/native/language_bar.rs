@@ -44,7 +44,7 @@ pub(super) enum Choice {
     Settings,
 }
 
-/// A line of the menu. A line without a choice is a separator.
+/// A line of the menu. Separators have no label; status lines have no choice.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Entry {
     pub choice: Option<Choice>,
@@ -113,7 +113,7 @@ fn popup(entries: &[Entry], at: POINT, exclude: Option<RECT>) -> Option<Choice> 
         let menu = CreatePopupMenu().ok()?;
         let mut built = true;
         for (id, entry) in (1usize..).zip(entries) {
-            let added = if entry.choice.is_none() {
+            let added = if entry.label.is_empty() {
                 AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
             } else {
                 let label: Vec<u16> = entry.label.encode_utf16().chain(Some(0)).collect();
@@ -152,14 +152,15 @@ fn popup(entries: &[Entry], at: POINT, exclude: Option<RECT>) -> Option<Choice> 
     }
 }
 
-/// How the button reaches the settings application.
-pub(super) struct Settings {
+/// Operations available to the menu in the current host.
+pub(super) struct MenuHost {
     /// Whether the menu offers the settings now.
     pub available: Box<dyn Fn() -> bool>,
     pub open: Box<dyn Fn() -> Result<()>>,
+    pub status: Box<dyn Fn() -> ipc::RuntimeStatus>,
 }
 
-impl Settings {
+impl MenuHost {
     /// The installed settings application, when this host may start it.
     /// `secure` is the activation flag of the secure desktop.
     pub(super) fn of_host(secure: bool) -> Self {
@@ -167,6 +168,17 @@ impl Settings {
         Self {
             available: Box::new(move || allowed && programs::settings_installed()),
             open: Box::new(programs::open_settings),
+            status: Box::new(move || {
+                if secure {
+                    return ipc::RuntimeStatus::default();
+                }
+                programs::engine(false)
+                    .and_then(|mut pipe| {
+                        pipe.begin(ipc::MENU_STATUS_TIMEOUT);
+                        ipc::RuntimeStatus::query(&mut pipe).ok()
+                    })
+                    .unwrap_or_default()
+            }),
         }
     }
 }
@@ -176,7 +188,7 @@ pub(super) struct ModeButton {
     /// Empty once the text service is deactivated.
     switch: RefCell<Option<input_mode::Switch>>,
     tid: u32,
-    settings: Settings,
+    host: MenuHost,
     sink: RefCell<Option<ITfLangBarItemSink>>,
     /// Reads the colour of the taskbar text.
     colours: Box<dyn Fn() -> mode_icon::Palette>,
@@ -197,22 +209,22 @@ type Look = (bool, i32, mode_icon::Palette);
 const DRAWN_LIMIT: usize = 8;
 
 impl ModeButton {
-    fn new(switch: input_mode::Switch, tid: u32, settings: Settings) -> Self {
+    fn new(switch: input_mode::Switch, tid: u32, host: MenuHost) -> Self {
         let colours = Box::new(mode_icon::Palette::of_taskbar);
-        Self::with_colours(switch, tid, settings, colours)
+        Self::with_colours(switch, tid, host, colours)
     }
 
     fn with_colours(
         switch: input_mode::Switch,
         tid: u32,
-        settings: Settings,
+        host: MenuHost,
         colours: Box<dyn Fn() -> mode_icon::Palette>,
     ) -> Self {
         let shown = (switch.japanese(), colours());
         Self {
             switch: RefCell::new(Some(switch)),
             tid,
-            settings,
+            host,
             sink: RefCell::new(None),
             colours,
             shown: Cell::new(Some(shown)),
@@ -260,8 +272,19 @@ impl ModeButton {
         Ok(self.switch()?.japanese())
     }
 
-    fn entries(&self) -> Result<[Entry; 4]> {
-        Ok(menu(self.japanese()?, (self.settings.available)()))
+    fn commands(&self) -> Result<[Entry; 4]> {
+        Ok(menu(self.japanese()?, (self.host.available)()))
+    }
+
+    fn entries(&self) -> Result<Vec<Entry>> {
+        let mut entries = self.commands()?.to_vec();
+        entries.extend((self.host.status)().menu_labels().map(|label| Entry {
+            choice: None,
+            label,
+            checked: false,
+            enabled: false,
+        }));
+        Ok(entries)
     }
 
     /// The compartment change reaches the text service, which calls `sync`.
@@ -273,7 +296,7 @@ impl ModeButton {
         match choice {
             Choice::Hiragana => self.apply(input_mode::Command::On),
             Choice::Direct => self.apply(input_mode::Command::Off),
-            Choice::Settings if (self.settings.available)() => (self.settings.open)(),
+            Choice::Settings if (self.host.available)() => (self.host.open)(),
             Choice::Settings => Err(E_ACCESSDENIED.into()),
         }
     }
@@ -365,7 +388,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
         let menu = menu.ok()?;
         for (id, entry) in (0u32..).zip(self.entries()?) {
             let flags = match entry {
-                Entry { choice: None, .. } => TF_LBMENUF_SEPARATOR,
+                Entry { label: "", .. } => TF_LBMENUF_SEPARATOR,
                 Entry { enabled: false, .. } => TF_LBMENUF_GRAYED,
                 Entry { checked: true, .. } => TF_LBMENUF_RADIOCHECKED,
                 _ => 0,
@@ -385,7 +408,7 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
         Ok(())
     }
     fn OnMenuSelect(&self, id: u32) -> Result<()> {
-        match self.entries()?.get(id as usize) {
+        match self.commands()?.get(id as usize) {
             Some(Entry {
                 choice: Some(choice),
                 enabled: true,
@@ -443,10 +466,10 @@ impl Item {
         manager: &ITfThreadMgr,
         tid: u32,
         switch: input_mode::Switch,
-        settings: Settings,
+        host: MenuHost,
     ) -> Result<Self> {
         let items = manager.cast::<ITfLangBarItemMgr>()?;
-        let button = ComObject::new(ModeButton::new(switch, tid, settings));
+        let button = ComObject::new(ModeButton::new(switch, tid, host));
         let item = ITfLangBarItem::from(button.to_interface::<ITfLangBarItemButton>());
         unsafe { items.AddItem(&item)? };
         Ok(Self {
@@ -513,9 +536,10 @@ mod tests {
     }
 
     /// A settings application that counts its openings instead of starting.
-    fn settings(available: &Rc<Cell<bool>>, opened: &Rc<Cell<u32>>) -> Settings {
+    fn settings(available: &Rc<Cell<bool>>, opened: &Rc<Cell<u32>>) -> MenuHost {
         let (available, opened) = (available.clone(), opened.clone());
-        Settings {
+        MenuHost {
+            status: Box::new(ipc::RuntimeStatus::default),
             available: Box::new(move || available.get()),
             open: Box::new(move || {
                 opened.set(opened.get() + 1);
@@ -860,7 +884,14 @@ mod tests {
     fn the_menu_switches_modes_and_opens_the_settings() -> Result<()> {
         with_tip(|tip, thread, tid, switch| unsafe {
             let (available, opened) = (Rc::new(Cell::new(true)), Rc::new(Cell::new(0)));
-            let installed = Item::add(thread, tid, switch, settings(&available, &opened))?;
+            let snapshot = Rc::new(Cell::new(ipc::RuntimeStatus {
+                engine_running: Some(true),
+                ai: ipc::AiState::Running as i32,
+            }));
+            let mut host = settings(&available, &opened);
+            let status = snapshot.clone();
+            host.status = Box::new(move || status.get());
+            let installed = Item::add(thread, tid, switch, host)?;
             let item = installed.button().to_interface::<ITfLangBarItemButton>();
             *tip.button.borrow_mut() = Some(installed);
             let lines = Rc::new(RefCell::new(Vec::new()));
@@ -873,6 +904,12 @@ mod tests {
                     (1, 0, "半角英数".to_owned()),
                     (2, TF_LBMENUF_SEPARATOR, String::new()),
                     (3, 0, "Kanade の設定…".to_owned()),
+                    (
+                        4,
+                        TF_LBMENUF_GRAYED,
+                        "変換エンジンの動作：動作中".to_owned()
+                    ),
+                    (5, TF_LBMENUF_GRAYED, "AI：動作中".to_owned()),
                 ]
             );
             item.OnMenuSelect(1)?;
@@ -884,11 +921,12 @@ mod tests {
             assert!(tip.shared.japanese.get());
             item.OnMenuSelect(3)?;
             assert_eq!(opened.get(), 1);
-            // The separator and a line that does not exist are not commands.
-            assert_eq!(code(item.OnMenuSelect(2)), Some(E_INVALIDARG));
-            assert_eq!(code(item.OnMenuSelect(4)), Some(E_INVALIDARG));
+            for id in [2, 4, 5, 6] {
+                assert_eq!(code(item.OnMenuSelect(id)), Some(E_INVALIDARG));
+            }
             // A host that may not start the settings shows the line greyed.
             available.set(false);
+            snapshot.set(ipc::RuntimeStatus::default());
             item.OnMenuSelect(1)?;
             lines.borrow_mut().clear();
             item.InitMenu(&menu)?;
@@ -899,6 +937,12 @@ mod tests {
                     (1, TF_LBMENUF_RADIOCHECKED, "半角英数".to_owned()),
                     (2, TF_LBMENUF_SEPARATOR, String::new()),
                     (3, TF_LBMENUF_GRAYED, "Kanade の設定…".to_owned()),
+                    (
+                        4,
+                        TF_LBMENUF_GRAYED,
+                        "変換エンジンの動作：状態不明".to_owned()
+                    ),
+                    (5, TF_LBMENUF_GRAYED, "AI：状態不明".to_owned()),
                 ]
             );
             assert_eq!(code(item.OnMenuSelect(3)), Some(E_INVALIDARG));
@@ -930,7 +974,7 @@ mod tests {
     fn the_settings_of_a_test_host_are_not_installed() {
         // The test program has no settings application beside it, and the
         // secure desktop never offers one.
-        assert!(!(Settings::of_host(false).available)());
-        assert!(!(Settings::of_host(true).available)());
+        assert!(!(MenuHost::of_host(false).available)());
+        assert!(!(MenuHost::of_host(true).available)());
     }
 }

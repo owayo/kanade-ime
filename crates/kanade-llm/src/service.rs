@@ -105,6 +105,8 @@ pub enum Health {
     Inactive,
     Starting,
     Running,
+    /// The idle worker was released and can restart on demand.
+    Idle,
     /// Waiting before another start attempt.
     Backoff,
     /// Stopped after repeated failures or an identity mismatch.
@@ -397,6 +399,7 @@ fn run(shared: Arc<Shared>, spawner: Box<dyn Spawner>) {
                         }
                         let idle = now.saturating_duration_since(last_use);
                         if idle >= tuning.idle {
+                            state.health = Health::Idle;
                             break Action::Sleep;
                         }
                         Some(tuning.idle - idle)
@@ -947,6 +950,7 @@ mod tests {
         }
         assert_eq!(script.stops.load(Ordering::SeqCst), 1);
         assert_eq!(script.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(service.health(), Health::Idle);
         let second = service.submit(job("b")).unwrap();
         assert!(matches!(wait(&service, second), Poll::Ready(_)));
         assert_eq!(script.starts.load(Ordering::SeqCst), 2);

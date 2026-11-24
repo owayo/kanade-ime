@@ -62,6 +62,18 @@ struct ModelQualification {
     activate: bool,
 }
 impl Administration {
+    pub(super) fn runtime_status(&self, tx: &SyncSender<Work>) -> RuntimeStatus {
+        let (reply, response) = mpsc::sync_channel(1);
+        let engine_running = tx
+            .try_send(Work::WorkerRunning(reply))
+            .ok()
+            .and_then(|()| response.recv_timeout(ipc::MENU_STATUS_TIMEOUT).ok())
+            .flatten();
+        RuntimeStatus {
+            engine_running,
+            ai: self.llm.ai_state() as i32,
+        }
+    }
     /// `settings` is `None` when the settings file could not be read.
     pub(super) fn new(
         data: PathBuf,

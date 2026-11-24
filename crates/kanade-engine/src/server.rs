@@ -70,6 +70,7 @@ enum Work {
     ),
     Projects(Arc<kanade_indexer::Catalog>, SyncSender<()>),
     Configure(config::Config, SyncSender<()>),
+    WorkerRunning(SyncSender<Option<bool>>),
     Open(Hello, SyncSender<Result<Welcome, failure::Code>>),
     Request(
         u64,
@@ -565,6 +566,9 @@ fn turn(
             engine.configure(settings);
             let _ = ack.send(());
         }
+        Ok(Work::WorkerRunning(reply)) => {
+            let _ = reply.send(engine.backend.running().ok());
+        }
         Ok(Work::Open(hello, reply)) => {
             let result = engine.open(&hello);
             let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
@@ -632,9 +636,18 @@ fn serve_connection(
     stream.set_write_timeout(Some(ipc::KEY_TIMEOUT))?;
     #[cfg(windows)]
     stream.begin(ipc::FRAME_TIMEOUT);
-    let hello: Request = ipc::receive(&mut stream)?;
-    let Some(request::Body::Hello(hello)) = hello.body else {
-        return Err(io::ErrorKind::InvalidData.into());
+    let first: Request = ipc::receive(&mut stream)?;
+    let hello = match first.body {
+        Some(request::Body::RuntimeStatus(_)) => {
+            return ipc::send(
+                &mut stream,
+                &Response {
+                    body: Some(response::Body::RuntimeStatus(admin.runtime_status(tx))),
+                },
+            );
+        }
+        Some(request::Body::Hello(hello)) => hello,
+        _ => return Err(io::ErrorKind::InvalidData.into()),
     };
     let (reply, response) = mpsc::sync_channel(1);
     tx.try_send(Work::Open(hello, reply))

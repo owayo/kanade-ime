@@ -1146,7 +1146,7 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
             manager,
             tid,
             mode.switch(),
-            language_bar::Settings::of_host(flags & TF_TMAE_SECUREMODE != 0),
+            language_bar::MenuHost::of_host(flags & TF_TMAE_SECUREMODE != 0),
         )
         .ok();
         let keys = manager.cast::<ITfKeystrokeMgr>()?;

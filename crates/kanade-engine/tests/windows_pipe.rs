@@ -99,6 +99,29 @@ fn hello() -> Vec<u8> {
 
 #[test]
 #[ignore = "requires the locked worker and a debug engine; cargo xtask build-worker"]
+fn menu_status_observes_the_worker_without_changing_composition() {
+    let engine = Engine::start("menu-status");
+    let mut client = engine.client().unwrap();
+    let mut editor = Editor::default();
+    assert!(letters(&mut client, &mut editor, "ni"));
+    let status = || RuntimeStatus::query(&mut engine.pipe().unwrap()).unwrap();
+    assert_eq!(
+        status().menu_labels(),
+        ["変換エンジンの動作：動作中", "AI：オフ"]
+    );
+    assert!(letters(&mut client, &mut editor, "hon"));
+    assert!(press(&mut client, &mut editor, SpecialKey::Space));
+    assert!(press(&mut client, &mut editor, SpecialKey::Enter));
+    assert_eq!(editor.committed, "日本");
+    let [worker] = children(engine.id(), WORKER)[..] else {
+        panic!("expected one worker")
+    };
+    windows_support::terminate(worker);
+    assert_eq!(status().engine_running, Some(false));
+}
+
+#[test]
+#[ignore = "requires the locked worker and a debug engine; cargo xtask build-worker"]
 fn a_peer_that_connects_and_leaves_does_not_stop_the_listener() {
     let engine = Engine::start("leave");
     assert!(fresh_frontend_converts(&engine));
