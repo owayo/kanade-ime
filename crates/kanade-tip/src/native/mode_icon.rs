@@ -68,7 +68,7 @@ impl Palette {
     }
 }
 
-fn contrast_theme() -> Option<u32> {
+pub(super) fn contrast_theme() -> Option<u32> {
     let mut state = HIGHCONTRASTW {
         cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
         ..Default::default()
@@ -225,6 +225,43 @@ fn bitmap(dc: Option<HDC>, side: i32) -> Result<(Object, *mut u8)> {
         return Err(failure());
     }
     Ok((bitmap, bits.cast()))
+}
+
+/// ITfMenu supports a colour bitmap and a monochrome mask beside its plain text.
+pub(super) struct RunningDot {
+    colour: Object,
+    mask: Object,
+}
+impl RunningDot {
+    pub(super) fn new() -> Result<Self> {
+        let side = small_icon_size().clamp(8, 128);
+        let (colour, bits) = bitmap(None, side)?;
+        let pixels =
+            unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), (side * side) as usize) };
+        let radius = side / 2;
+        for (i, pixel) in pixels.iter_mut().enumerate() {
+            let x = 2 * (i as i32 % side) + 1 - side;
+            let y = 2 * (i as i32 / side) + 1 - side;
+            *pixel = if x * x + y * y <= radius * radius {
+                0xff168048
+            } else {
+                0
+            };
+        }
+        // The monochrome rows are word-aligned. Black preserves the colour.
+        let black = vec![0u16; (side as usize).div_ceil(16) * side as usize];
+        let mask = unsafe { CreateBitmap(side, side, 1, 1, Some(black.as_ptr().cast())) };
+        if mask.is_invalid() {
+            return Err(failure());
+        }
+        Ok(Self {
+            colour,
+            mask: Object(mask.into()),
+        })
+    }
+    pub(super) fn handles(&self) -> (HBITMAP, HBITMAP) {
+        (HBITMAP(self.colour.0.0), HBITMAP(self.mask.0.0))
+    }
 }
 
 /// Which way the glyph contrasts with the taskbar. DirectWrite shapes the

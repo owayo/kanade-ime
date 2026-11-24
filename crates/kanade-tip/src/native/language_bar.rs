@@ -7,7 +7,6 @@ use super::*;
 use std::time::{Duration, Instant};
 use windows::{
     Win32::{
-        Graphics::Gdi::HBITMAP,
         System::Ole::{CONNECT_E_ADVISELIMIT, CONNECT_E_CANNOTCONNECT, CONNECT_E_NOCONNECTION},
         UI::WindowsAndMessaging::*,
     },
@@ -51,6 +50,7 @@ pub(super) struct Entry {
     pub label: &'static str,
     pub checked: bool,
     pub enabled: bool,
+    pub running: bool,
 }
 
 /// The menu of the button. `settings` tells whether this host may start the
@@ -61,6 +61,7 @@ pub(super) fn menu(japanese: bool, settings: bool) -> [Entry; 4] {
         label: face.name,
         checked,
         enabled: true,
+        running: false,
     };
     [
         mode(Choice::Hiragana, &HIRAGANA, japanese),
@@ -70,12 +71,14 @@ pub(super) fn menu(japanese: bool, settings: bool) -> [Entry; 4] {
             label: "",
             checked: false,
             enabled: false,
+            running: false,
         },
         Entry {
             choice: Some(Choice::Settings),
             label: "Kanade の設定…",
             checked: false,
             enabled: settings,
+            running: false,
         },
     ]
 }
@@ -111,16 +114,36 @@ fn popup(entries: &[Entry], at: POINT, exclude: Option<RECT>) -> Option<Choice> 
             .into_iter()
             .find(|window| !window.is_invalid())?;
         let menu = CreatePopupMenu().ok()?;
+        // Keep the menu bitmap alive until after DestroyMenu.
+        let dot = running_dot(entries);
         let mut built = true;
         for (id, entry) in (1usize..).zip(entries) {
             let added = if entry.label.is_empty() {
                 AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
             } else {
                 let label: Vec<u16> = entry.label.encode_utf16().chain(Some(0)).collect();
-                let state = if entry.enabled { MF_ENABLED } else { MF_GRAYED };
+                let state = if entry.enabled {
+                    MF_ENABLED
+                } else if entry.running && dot.is_some() {
+                    // Both flags disable selection, but MF_GRAYED also removes the bitmap's colour.
+                    MF_DISABLED
+                } else {
+                    MF_GRAYED
+                };
                 AppendMenuW(menu, MF_STRING | state, id, PCWSTR(label.as_ptr()))
             };
             built &= added.is_ok();
+            if entry.running
+                && let Some(dot) = &dot
+            {
+                let info = MENUITEMINFOW {
+                    cbSize: size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_BITMAP,
+                    hbmpItem: dot.handles().0,
+                    ..Default::default()
+                };
+                let _ = SetMenuItemInfoW(menu, id as u32, false, &info);
+            }
             if entry.checked {
                 let id = id as u32;
                 built &= CheckMenuRadioItem(menu, id, id, id, MF_BYCOMMAND.0).is_ok();
@@ -150,6 +173,12 @@ fn popup(entries: &[Entry], at: POINT, exclude: Option<RECT>) -> Option<Choice> 
             .get(usize::try_from(chosen).ok()?.checked_sub(1)?)?
             .choice
     }
+}
+
+fn running_dot(entries: &[Entry]) -> Option<mode_icon::RunningDot> {
+    (entries.iter().any(|entry| entry.running) && mode_icon::contrast_theme().is_none())
+        .then(mode_icon::RunningDot::new)
+        .and_then(Result::ok)
 }
 
 /// Operations available to the menu in the current host.
@@ -278,12 +307,17 @@ impl ModeButton {
 
     fn entries(&self) -> Result<Vec<Entry>> {
         let mut entries = self.commands()?.to_vec();
-        entries.extend((self.host.status)().menu_labels().map(|label| Entry {
-            choice: None,
-            label,
-            checked: false,
-            enabled: false,
-        }));
+        entries.extend(
+            (self.host.status)()
+                .menu_rows()
+                .map(|(label, running)| Entry {
+                    choice: None,
+                    label,
+                    checked: false,
+                    enabled: false,
+                    running,
+                }),
+        );
         Ok(entries)
     }
 
@@ -386,7 +420,9 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
     // A host that presents the button as a menu gets the same lines.
     fn InitMenu(&self, menu: Ref<ITfMenu>) -> Result<()> {
         let menu = menu.ok()?;
-        for (id, entry) in (0u32..).zip(self.entries()?) {
+        let entries = self.entries()?;
+        let dot = running_dot(&entries);
+        for (id, entry) in (0u32..).zip(entries) {
             let flags = match entry {
                 Entry { label: "", .. } => TF_LBMENUF_SEPARATOR,
                 Entry { enabled: false, .. } => TF_LBMENUF_GRAYED,
@@ -394,15 +430,13 @@ impl ITfLangBarItemButton_Impl for ModeButton_Impl {
                 _ => 0,
             };
             let label: Vec<u16> = entry.label.encode_utf16().collect();
+            let (colour, mask) = dot
+                .as_ref()
+                .filter(|_| entry.running)
+                .map(mode_icon::RunningDot::handles)
+                .unwrap_or_default();
             unsafe {
-                menu.AddMenuItem(
-                    id,
-                    flags,
-                    HBITMAP::default(),
-                    HBITMAP::default(),
-                    &label,
-                    std::ptr::null_mut(),
-                )?;
+                menu.AddMenuItem(id, flags, colour, mask, &label, std::ptr::null_mut())?;
             }
         }
         Ok(())
@@ -494,6 +528,7 @@ impl Drop for Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Gdi::HBITMAP;
     use windows_core::OutRef;
 
     const CHANGED: u32 = TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP;
@@ -514,8 +549,8 @@ mod tests {
             &self,
             id: u32,
             flags: u32,
-            _: HBITMAP,
-            _: HBITMAP,
+            colour: HBITMAP,
+            mask: HBITMAP,
             text: &PCWSTR,
             len: u32,
             _: OutRef<ITfMenu>,
@@ -527,6 +562,10 @@ mod tests {
                     std::slice::from_raw_parts(text.0, len as usize)
                 })
             };
+            let green = text.ends_with("：動作中") && mode_icon::contrast_theme().is_none();
+            if (!colour.is_invalid(), !mask.is_invalid()) != (green, green) {
+                return Err(Error::new(E_FAIL, "unexpected status bitmap or mask"));
+            }
             self.0
                 .try_borrow_mut()
                 .map_err(|_| failure())?

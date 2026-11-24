@@ -20,8 +20,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPanel, NSScreen,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags,
+    NSEventType, NSImage, NSImageNameStatusAvailable, NSMenu, NSMenuItem, NSPanel, NSScreen,
     NSWindowStyleMask, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{
@@ -58,6 +59,7 @@ fn retained_settings_menu(
     let cached = cache.get_or_init(|| {
         let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Kanade"));
         menu.setAutoenablesItems(false);
+        menu.setShowsStateColumn(true);
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
@@ -74,16 +76,28 @@ fn retained_settings_menu(
         item.setTag(1001);
         item.setEnabled(true);
         menu.addItem(&item);
+        // Use the state column so the dot is independent of menu icon visibility.
+        let dot = NSImage::imageNamed(unsafe { NSImageNameStatusAvailable });
         let status_items = std::array::from_fn(|_| {
             let item = NSMenuItem::new(mtm);
+            if let Some(dot) = &dot {
+                unsafe {
+                    item.setOnStateImage(Some(dot));
+                }
+            }
             item.setEnabled(false);
             menu.addItem(&item);
             item
         });
         SettingsMenu { menu, status_items }
     });
-    for (item, title) in cached.status_items.iter().zip(status.menu_labels()) {
-        item.setTitle(&NSString::from_str(title));
+    for (item, (label, running)) in cached.status_items.iter().zip(status.menu_rows()) {
+        item.setTitle(&NSString::from_str(label));
+        item.setState(if running {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
     }
     cached.menu.clone()
 }
@@ -705,6 +719,8 @@ pub fn run() -> Result<()> {
             let target = NSObject::new();
             let menu = retained_settings_menu(&cache, mtm, &target, RuntimeStatus::default());
             let item = menu.itemAtIndex(0).unwrap();
+            let dot = NSImage::imageNamed(unsafe { NSImageNameStatusAvailable })
+                .context("missing status indicator")?;
             for ai in [AiState::Running, AiState::Idle, AiState::Off] {
                 let status = RuntimeStatus {
                     engine_running: Some(true),
@@ -714,9 +730,11 @@ pub fn run() -> Result<()> {
                 assert!(std::ptr::eq(&*menu, &*repeated));
                 assert!(std::ptr::eq(&*item, &*repeated.itemAtIndex(0).unwrap()));
                 assert_eq!(repeated.numberOfItems(), 3);
-                for (index, label) in (1..).zip(status.menu_labels()) {
+                for (index, (label, running)) in (1..).zip(status.menu_rows()) {
                     let line = repeated.itemAtIndex(index).unwrap();
                     assert_eq!(line.title().to_string(), label);
+                    assert_eq!(line.state() == NSControlStateValueOn, running);
+                    assert_eq!(line.onStateImage().as_deref(), Some(&*dot));
                     assert!(!line.isEnabled());
                     assert_eq!(line.action(), None);
                 }

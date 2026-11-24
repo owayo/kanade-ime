@@ -88,6 +88,15 @@ impl RuntimeStatus {
         };
         [engine, ai]
     }
+
+    /// Each native menu shows a green indicator beside the components that are running.
+    pub fn menu_rows(&self) -> [(&'static str, bool); 2] {
+        let [engine, ai] = self.menu_labels();
+        [
+            (engine, self.engine_running == Some(true)),
+            (ai, self.ai() == AiState::Running),
+        ]
+    }
 }
 
 impl CandidatePage {
@@ -207,6 +216,32 @@ pub fn surface(preedit: &Preedit) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_running_components_have_a_menu_indicator() {
+        for engine_running in [None, Some(false), Some(true)] {
+            for ai in [
+                AiState::Running,
+                AiState::Idle,
+                AiState::Off,
+                AiState::Preparing,
+                AiState::Retrying,
+                AiState::SetupRequired,
+                AiState::Stopped,
+                AiState::Unspecified,
+            ] {
+                let status = RuntimeStatus {
+                    engine_running,
+                    ai: ai as i32,
+                };
+                let [engine_row, ai_row] = status.menu_rows();
+                assert_eq!(engine_row.1, engine_running == Some(true));
+                assert_eq!(ai_row.1, ai == AiState::Running);
+                for (label, marked) in [engine_row, ai_row] {
+                    assert_eq!(label.ends_with("：動作中"), marked);
+                }
+            }
+        }
+    }
     #[test]
     fn halfwidth_kana_do_not_start_composition() {
         for kana in 'ｦ'..='ﾟ' {

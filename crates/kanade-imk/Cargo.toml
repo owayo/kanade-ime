@@ -15,7 +15,7 @@ serde_json.workspace = true
 block2 = "0.6.2"
 objc2 = { version = "0.6.5", features = ["exception"] }
 objc2-foundation = { version = "0.3.2", features = ["NSAttributedString", "NSBundle", "NSRange", "NSString", "NSDictionary", "NSDate", "NSTimer"] }
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSEvent", "NSPanel", "NSView", "NSTextField", "NSButton", "NSFont", "NSColor", "NSWindow", "NSScreen", "NSBox", "NSText", "NSParagraphStyle", "NSAttributedString"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSEvent", "NSPanel", "NSView", "NSTextField", "NSButton", "NSFont", "NSColor", "NSImage", "NSWindow", "NSScreen", "NSBox", "NSText", "NSParagraphStyle", "NSAttributedString"] }
 objc2-input-method-kit = "0.3.2"
 
 [lints]
