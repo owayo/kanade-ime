@@ -102,7 +102,7 @@ make install
 `make install` は `INSTALL_DIR` にアプリを入れます (既定の場所は `Makefile` にあります)。場所を変えるときは `INSTALL_DIR` を指定します。
 <!-- standard:install:end -->
 
-Windows のセットアップ EXE と macOS の DMG は Tsumugi を同梱しています。Windows では「半角／全角」でかな入力と半角英数を切り替えられます。ビルド済みのセットアップがあるチェックアウトで `install.bat` を実行できます。配布EXEをバッチの隣に置いても実行できます。
+Windows のセットアップ EXE と macOS の DMG は Tsumugi を同梱しています。Windows では「半角／全角」でかな入力と半角英数を切り替えられます。チェックアウトで `install.bat` を実行すると、現在の HEAD からインストーラーを作って起動します。同じコミットで作成済みの EXE は SHA-256 を照合して再利用します。配布 EXE を使う場合は、チェックアウトの外でバッチと EXE を同じフォルダーに置いてください。
 
 Macのプレビュー版はPKGを開きます。警告が出た場合の許可手順と、インストール後の入力ソースの追加方法は配布ガイドにあります。[macOS プレビュー版のインストール手順](docs/distribution.md#macos-プレビュー版のpkg)
 

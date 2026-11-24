@@ -1,5 +1,7 @@
 @echo off
 setlocal
+set "PSModulePath=%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+if exist "%~dp0.git" goto checkout
 set "setup=%~dp0artifacts\release\kanade-ime-x86_64-pc-windows-msvc.exe"
 if not exist "%setup%" set "setup=%~dp0kanade-ime-x86_64-pc-windows-msvc.exe"
 if not exist "%setup%" (
@@ -8,13 +10,18 @@ if not exist "%setup%" (
     exit /b 2
 )
 start "" /wait "%setup%" /install /passive /norestart
+goto installed
+:checkout
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0packaging\windows\install-head.ps1"
+:installed
 set "status=%errorlevel%"
 if "%status%"=="3010" echo Kanade is installed. Restart Windows to finish.
-if not "%status%"=="0" exit /b %status%
+if not "%status%"=="0" if not "%status%"=="3010" exit /b %status%
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%ProgramW6432%\Kanade\enable-profile.ps1"
 if errorlevel 1 exit /b 1
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%ProgramW6432%\Kanade\start-engine.ps1"
 if errorlevel 1 exit /b 1
+if "%status%"=="3010" exit /b 3010
 echo Kanade IME is installed. Restart apps that were open during the update.
 echo For apps in the system tray, choose Quit before reopening them.
 echo Select Kanade in the Japanese input methods.
