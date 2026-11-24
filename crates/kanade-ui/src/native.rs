@@ -18,6 +18,8 @@ mod macos;
 mod model_panel;
 mod records_panel;
 mod text_field;
+#[cfg(windows)]
+mod windows_input;
 const WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(680.0), px(700.0));
 const WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(560.0), px(420.0));
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,6 +52,8 @@ impl SettingsPage {
 }
 
 struct Settings {
+    #[cfg(windows)]
+    default_input: windows_input::DefaultInput,
     learning_editor: Option<learning_panel::Editor>,
     learning_busy: bool,
     learning_epoch: u64,
@@ -74,6 +78,8 @@ struct Settings {
 impl Settings {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            #[cfg(windows)]
+            default_input: Default::default(),
             learning_editor: None,
             learning_busy: false,
             learning_epoch: 0,
@@ -533,7 +539,10 @@ impl Settings {
     }
 
     fn conversion_page(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div().flex().flex_col().gap_4()
+        let page = div().flex().flex_col().gap_4();
+        #[cfg(windows)]
+        let page = page.child(self.default_input_section(cx));
+        page
             .child(self.model_section(cx))
             .child(section("入力と追加候補").child(
                 card()
@@ -788,9 +797,16 @@ fn show_settings(cx: &mut App) {
                         );
                     })
                     .detach();
-                    #[cfg(not(target_os = "macos"))]
-                    let _ = window;
+                    #[cfg(windows)]
+                    cx.observe_window_activation(window, |this: &mut Settings, window, cx| {
+                        if window.is_window_active() {
+                            this.update_default_input(false, cx);
+                        }
+                    })
+                    .detach();
                     let mut state = Settings::new(cx);
+                    #[cfg(windows)]
+                    state.update_default_input(false, cx);
                     window.focus(&state.navigation_focus, cx);
                     state.refresh(cx);
                     state.monitor_models(cx);
