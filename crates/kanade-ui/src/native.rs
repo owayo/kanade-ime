@@ -44,7 +44,7 @@ impl SettingsPage {
             Self::Appearance => "候補表示",
             Self::Dictionary => "ユーザー辞書",
             Self::Learning => "学習設定",
-            Self::Records => "学習記録",
+            Self::Records => "候補・訂正記録",
         }
     }
 }

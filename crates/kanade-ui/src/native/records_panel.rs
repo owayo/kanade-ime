@@ -65,7 +65,7 @@ impl Settings {
                         records.notice = if deletion_failed {
                             Some("削除の完了を確認できませんでした。更新した一覧で確認してください。")
                         } else if delete.is_some() {
-                            Some("学習記録を削除しました。")
+                            Some("記録を削除しました。")
                         } else {
                             None
                         };
@@ -74,7 +74,7 @@ impl Settings {
                         }
                     }
                     Err(_) => {
-                        records.notice = Some("学習記録を取得できませんでした。「更新」を押してください。");
+                        records.notice = Some("記録を取得できませんでした。「更新」を押してください。");
                     }
                 }
                 cx.notify();
@@ -95,11 +95,11 @@ impl Settings {
         let summary = if records.loading {
             "取得中…".into()
         } else if records.unreadable {
-            "学習記録を読み込めません".into()
+            "記録を読み込めません".into()
         } else if !records.loaded {
-            "学習記録は未取得です".into()
+            "記録は未取得です".into()
         } else if records.total == 0 {
-            "学習記録はありません".into()
+            "記録はありません".into()
         } else {
             format!(
                 "{} 件中 {}〜{} 件",
@@ -108,21 +108,21 @@ impl Settings {
                 end
             )
         };
-        let refresh = button("refresh-records", "更新", "学習記録を更新する")
+        let refresh = button("refresh-records", "更新", "記録を更新する")
             .inactive(records.loading)
             .on_click(cx.listener(|this, _, _, cx| this.reload_records(cx)));
         let mut actions = div().flex().gap_2();
         if offset > 0 || end < records.total {
             actions = actions
                 .child(
-                    button("previous-records", "前へ", "学習記録の前のページ")
+                    button("previous-records", "前へ", "記録の前のページ")
                         .inactive(records.loading || offset == 0)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.load_records(offset.saturating_sub(PAGE_SIZE), None, cx);
                         })),
                 )
                 .child(
-                    button("next-records", "次へ", "学習記録の次のページ")
+                    button("next-records", "次へ", "記録の次のページ")
                         .inactive(records.loading || end >= records.total)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.load_records(offset.saturating_add(PAGE_SIZE), None, cx);
@@ -197,7 +197,7 @@ impl Settings {
                                     button(
                                         ("register-correction", id),
                                         "辞書へ登録…",
-                                        "この学習した語をユーザー辞書に登録する",
+                                        "この語をユーザー辞書に登録する",
                                     )
                                     .inactive(loading)
                                     .on_click(cx.listener(
@@ -211,7 +211,7 @@ impl Settings {
                                     )),
                                 )
                                 .child(
-                                    button(("delete-record", id), "削除", "この学習記録を削除する")
+                                    button(("delete-record", id), "削除", "この記録を削除する")
                                         .text_color(rgb(DANGER))
                                         .inactive(loading)
                                         .on_click(cx.listener(move |this, _, _, cx| {
