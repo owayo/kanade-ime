@@ -28,7 +28,7 @@ flowchart LR
 | Engine integration | `crates/kanade-engine/src/refine.rs` | Queues jobs, answers polls, applies an order |
 | Management | `crates/kanade-engine/src/server/admin.rs` | `LLM_STATUS`, `LLM_IMPORT`, `LLM_QUALIFY`, `LLM_REMOVE` |
 
-`models status` reports current consent as `installed.consent_current`. A settings job that activates a qualified model can report phase `activating` or error `activation_failed`. The latter means the job could not confirm activation. Check `ready` and `enabled` for the resulting state.
+`models status` reports current consent as `installed.consent_current`. A settings job reports phase `activating` while saving the preference to enable AI conversion. When `enabled` is true, the engine starts qualification in the background if the approved model has missing or obsolete evidence. The model is usable when `ready` is also true. An `activation_failed` error means the job could not confirm the settings update.
 
 The key loop copies a few short strings into a queue of two jobs and later looks a result up. Both operations take a lock that is only held for a few memory operations. Spawning, loading, hashing, timeouts and restarts happen on the service and management threads.
 

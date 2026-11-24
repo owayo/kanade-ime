@@ -199,9 +199,9 @@ struct State {
     serving: bool,
     job: Option<JobStatus>,
     next_job: u64,
-    /// The engine has started a measurement by itself. It does so once per
-    /// process, so a measurement that fails does not repeat itself.
-    renewed: bool,
+    /// A measurement has already been scheduled automatically or attempted.
+    /// A failure must not start another measurement in this process.
+    measured: bool,
 }
 impl State {
     /// A job holds the one slot until it has finished.
@@ -264,7 +264,7 @@ impl Manager {
                 serving: false,
                 job: None,
                 next_job: 0,
-                renewed: false,
+                measured: false,
             }),
             tasks: Mutex::new(None),
             catalog: OnceLock::new(),
@@ -535,7 +535,7 @@ impl Manager {
         } else {
             None
         };
-        state.renewed |= renewal.is_some();
+        state.measured |= renewal.is_some();
         self.serve(state);
         renewal
     }
@@ -657,6 +657,9 @@ impl Manager {
                 ImportError::Storage => JobError::Storage,
             })
             .and_then(|install| {
+                // Publish the accepted model only after saving its requested
+                // on/off setting, so a restart can resume its first measurement.
+                self.save_activation(id, activation)?;
                 self.0
                     .store
                     .save_install(&install)
@@ -670,23 +673,21 @@ impl Manager {
         }
         self.phase(id, JobPhase::Copying, Some(100));
         self.refresh();
-        self.run_qualify(id, activation);
+        self.run_qualify(id, None);
     }
     fn run_qualify(&self, id: u64, activation: Option<Activation>) {
-        let mut error = self.measure(id).err().unwrap_or(JobError::None);
+        let error = self.measure(id, activation).err().unwrap_or(JobError::None);
         self.refresh();
-        if error == JobError::None
-            && let Some(activate) = activation
-        {
-            self.phase(id, JobPhase::Activating, None);
-            let qualified = self.lock().reason == Reason::None;
-            if !qualified || activate().is_err() {
-                error = JobError::ActivationFailed;
-            }
-        }
         self.finish(id, error);
     }
-    fn measure(&self, id: u64) -> Result<(), JobError> {
+    fn save_activation(&self, id: u64, activation: Option<Activation>) -> Result<(), JobError> {
+        if let Some(activate) = activation {
+            self.phase(id, JobPhase::Activating, None);
+            activate().map_err(|_| JobError::ActivationFailed)?;
+        }
+        Ok(())
+    }
+    fn measure(&self, id: u64, activation: Option<Activation>) -> Result<(), JobError> {
         let install = self.0.store.install().ok_or(JobError::NotInstalled)?;
         let model = profile::model(&install.model).ok_or(JobError::ModelMismatch)?;
         if !install.names(model) {
@@ -706,7 +707,9 @@ impl Manager {
             self.0.service.deactivate();
             state.serving = false;
             state.reason = Reason::ReportMissing;
+            state.measured = true;
         }
+        self.save_activation(id, activation)?;
         self.0.store.clear_qualification();
         let worker_sha256 =
             store::sha256_file(&self.0.worker).map_err(|_| JobError::WorkerMissing)?;
@@ -750,27 +753,23 @@ fn ready(state: &State, health: Health) -> bool {
         && !matches!(health, Health::Faulted(_))
         && !state.busy()
 }
-/// Whether the engine owes a measurement that nobody asked for.
-///
-/// The stored one is intact and names the installed file, but another worker
-/// or runtime made it. An update of Kanade leaves exactly that: every release
-/// builds the worker again. The reason does not say that nothing else of the
-/// build changed. It is found before the profile, the prompt and the corpora
-/// are compared, so those may differ as well. That is no obstacle. The engine
-/// measures with the profile this build registers, as it would if the user
-/// asked for it; the file is still the registered one and the consent still
-/// covers the current terms, or the reason would be another; and a
-/// measurement reads no text of the user and stays on this computer.
-///
-/// A measurement that ends, passed or failed, leaves another reason. The
-/// engine starts one once per process even so, whatever a later reading of
-/// the records says.
+/// Resume an interrupted measurement or replace obsolete evidence for an
+/// enabled model. These reasons are reached only after checking the file,
+/// worker and consent. A recorded failure still requires user action.
 fn renewal_owed(state: &State) -> bool {
     state.loaded
         && state.enabled
-        && !state.renewed
+        && state.install.is_some()
+        && !state.measured
         && !state.busy()
-        && state.reason == Reason::RuntimeChanged
+        && matches!(
+            state.reason,
+            Reason::ReportMissing
+                | Reason::ReportInvalid
+                | Reason::RuntimeChanged
+                | Reason::ProfileChanged
+                | Reason::PromptChanged
+        )
 }
 
 #[cfg(test)]
@@ -946,13 +945,13 @@ mod tests {
         f.write("qualification.json", &legacy_qualification(tsumugi));
         let install_before = std::fs::read(f.data.join("install.json")).unwrap();
 
-        // The model had been switched on. It is not served, and not ready.
-        let (manager, status) = f.open(true);
+        // The model is switched off, so it waits for an explicit request.
+        let (manager, status) = f.open(false);
         assert_eq!(
             (status.state, status.reason, status.ready),
             (Lifecycle::Installed, Reason::ProfileChanged, false)
         );
-        assert!(!manager.ready() && status.enabled);
+        assert!(!manager.ready() && !status.enabled && status.job.is_none());
         let installed = status.installed.as_ref().unwrap();
         assert_eq!(installed.id, tsumugi.id);
         assert_eq!(
@@ -981,6 +980,27 @@ mod tests {
             std::fs::read(f.data.join("install.json")).unwrap(),
             install_before
         );
+    }
+    #[test]
+    fn an_enabled_install_resumes_when_qualification_is_missing() {
+        let f = fixture();
+        f.install(&CATALOG[0]);
+
+        let (_, off) = f.open(false);
+        assert_eq!((off.reason, off.job), (Reason::ReportMissing, None));
+
+        let manager = f.unread(true, Stub::Serving);
+        let renewal = manager.reload();
+        let pending = manager.status();
+        assert_eq!(pending.state, Lifecycle::Qualifying);
+        assert_eq!(renewal, Some(pending.job.unwrap().id));
+        assert!(!pending.ready && !manager.service().active());
+        assert!(!Rerank::setup_required(&manager.service()));
+
+        manager.dispatch(renewal);
+        let failed = finished(&manager);
+        assert_eq!(failed.job.unwrap().error, JobError::WorkerFailed);
+        assert_eq!(manager.reload(), None);
     }
     #[test]
     fn a_measurement_by_another_worker_is_renewed_once_without_being_asked() {
@@ -1146,14 +1166,13 @@ mod tests {
         let (manager, _) = f.open(false);
         assert!(!Rerank::setup_required(&manager.service()));
         drop(manager);
-        // Neither does it for a record that names this worker and another
-        // profile: no update of Kanade leaves that.
+        // A completed measurement that failed the gates needs review.
         f.install(tsumugi);
-        let mut other = f.qualified(tsumugi);
-        other.profile_version += 1;
-        f.record(other);
+        let mut failed = f.qualified(tsumugi);
+        failed.measurement.ranking_top1 = 0;
+        f.record(failed);
         let (manager, status) = f.open(true);
-        assert_eq!((status.reason, status.job), (Reason::ProfileChanged, None));
+        assert_eq!((status.reason, status.job), (Reason::QualityGate, None));
         assert!(Rerank::setup_required(&manager.service()));
         drop(manager);
         // A model that is served needs nothing.
@@ -1234,7 +1253,7 @@ mod tests {
         let mut wrong = f.qualified(alt);
         wrong.model = tsumugi.id.into();
         f.record(wrong);
-        let (_, status) = f.open(true);
+        let (_, status) = f.open(false);
         assert_eq!(
             (status.state, status.reason, status.ready),
             (Lifecycle::Installed, Reason::ProfileChanged, false)

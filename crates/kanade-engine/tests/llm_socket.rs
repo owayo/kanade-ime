@@ -2,7 +2,7 @@
 #![cfg(unix)]
 use kanade_ipc::{frontend::*, unix::DeadlineStream, *};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -76,6 +76,50 @@ fn manage(socket: &Path, action: manage::Action, value: serde_json::Value) -> se
     serde_json::from_str(&response.json).unwrap()
 }
 
+fn start_server(temp: &Path, worker: &Path) -> (Server, PathBuf) {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_kanade-engine"))
+            .env("TMPDIR", temp)
+            .env("KANADE_DATA_DIR", temp.join("data"))
+            .env("KANADE_MOZC_WORKER", kanade_mozc::default_worker())
+            .env("KANADE_LLM_WORKER", worker)
+            .env("KANADE_ALLOW_UNSIGNED", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = temp.join("kanade-ime/engine.sock");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return (server, socket);
+        }
+        assert!(Instant::now() < deadline, "engine socket deadline");
+        assert!(server.0.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_ready(socket: &Path) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let status = manage(socket, manage::Action::LlmStatus, serde_json::Value::Null);
+        assert_ne!(
+            status["job"]["phase"], "failed",
+            "model qualification failed: category={}, reason={}, measurement={}",
+            status["job"]["error"], status["reason"], status["qualification"]
+        );
+        if status["ready"] == true {
+            assert_eq!(status["enabled"], true);
+            assert_eq!(status["installed"]["consent_current"], true);
+            return status;
+        }
+        assert!(Instant::now() < deadline, "model qualification deadline");
+        std::thread::sleep(Duration::from_millis(80));
+    }
+}
+
 #[test]
 #[ignore = "requires KANADE_LLM_MODEL, KANADE_LLM_WORKER and the locked Mozc worker"]
 fn real_model_refines_candidates_after_ack_without_editing_the_document() {
@@ -86,25 +130,8 @@ fn real_model_refines_candidates_after_ack_without_editing_the_document() {
         .tempdir_in("/tmp")
         .unwrap();
     let data = temp.path().join("data");
-    let mut server = Server(
-        Command::new(env!("CARGO_BIN_EXE_kanade-engine"))
-            .env("TMPDIR", temp.path())
-            .env("KANADE_DATA_DIR", &data)
-            .env("KANADE_MOZC_WORKER", kanade_mozc::default_worker())
-            .env("KANADE_LLM_WORKER", worker)
-            .env("KANADE_ALLOW_UNSIGNED", "1")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let socket = temp.path().join("kanade-ime/engine.sock");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline);
-        assert!(server.0.try_wait().unwrap().is_none());
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let worker = PathBuf::from(worker);
+    let (server, socket) = start_server(temp.path(), &worker);
     use manage::Action;
     let status = manage(&socket, Action::LlmStatus, serde_json::Value::Null);
     let entry = &status["catalog"][0];
@@ -125,22 +152,7 @@ fn real_model_refines_candidates_after_ack_without_editing_the_document() {
         Action::SetSettings,
         serde_json::json!({"changes": {"font_size": 22.0}}),
     );
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let status = manage(&socket, Action::LlmStatus, serde_json::Value::Null);
-        assert_ne!(
-            status["job"]["phase"], "failed",
-            "model qualification failed: category={}, reason={}, measurement={}",
-            status["job"]["error"], status["reason"], status["qualification"]
-        );
-        if status["ready"] == true {
-            assert_eq!(status["enabled"], true);
-            assert_eq!(status["installed"]["consent_current"], true);
-            break;
-        }
-        assert!(Instant::now() < deadline, "model qualification deadline");
-        std::thread::sleep(Duration::from_millis(80));
-    }
+    wait_for_ready(&socket);
     let settings_path = data.join("kanade/settings.toml");
     let saved = kanade_engine::config::Config::load(&settings_path).unwrap();
     assert!(saved.llm);
@@ -161,6 +173,19 @@ fn real_model_refines_candidates_after_ack_without_editing_the_document() {
             enabled
         );
     }
+    // A shutdown between writing the consent and completing qualification
+    // leaves the imported model and enabled setting, but no measurement.
+    drop(server);
+    let model_dir = data.join("kanade/llm");
+    let consent = std::fs::read(model_dir.join("install.json")).unwrap();
+    std::fs::remove_file(model_dir.join("qualification.json")).unwrap();
+    let (_restarted, socket) = start_server(temp.path(), &worker);
+    let recovered = wait_for_ready(&socket);
+    assert_eq!(recovered["job"]["kind"], "qualify");
+    assert_eq!(
+        std::fs::read(model_dir.join("install.json")).unwrap(),
+        consent
+    );
     // This contract measures a warm refinement. A cold worker may legitimately
     // miss the display deadline and leave Mozc's order untouched.
     std::thread::sleep(Duration::from_secs(1));

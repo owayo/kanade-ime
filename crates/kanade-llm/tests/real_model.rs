@@ -626,7 +626,7 @@ fn import_needs_consent_and_readiness_is_tied_to_every_identity() {
         let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
         edit(&mut value);
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let manager = Manager::open(dir.clone(), worker.clone(), true);
+        let manager = Manager::open(dir.clone(), worker.clone(), false);
         let status = wait_until(&manager, false);
         assert_eq!(manager.service().submit(job_for_service()), None);
         std::fs::write(&path, original).unwrap();
@@ -647,8 +647,7 @@ fn import_needs_consent_and_readiness_is_tied_to_every_identity() {
         installed(Reason::ReportMissing)
     );
     // A record of the format before profiles is bound to no profile. It is
-    // refused, and measuring again with the real worker makes the model
-    // ready without a new import or consent.
+    // renewed automatically with the real worker when AI conversion is on.
     {
         let path = dir.join("qualification.json");
         let original = std::fs::read(&path).unwrap();
@@ -666,13 +665,6 @@ fn import_needs_consent_and_readiness_is_tied_to_every_identity() {
         assert_eq!(store.qualification(), Recorded::Unbound);
         let consent = std::fs::read(dir.join("install.json")).unwrap();
         let manager = Manager::open(dir.clone(), worker.clone(), true);
-        let status = wait_until(&manager, false);
-        assert_eq!(
-            (status.state, status.reason),
-            installed(Reason::ProfileChanged)
-        );
-        assert_eq!(manager.service().submit(job_for_service()), None);
-        assert_eq!(manager.qualify().result, StartResult::Started);
         let status = wait_for_job(&manager);
         assert_eq!(status.job.unwrap().error, JobError::None);
         assert!(wait_until(&manager, true).ready);

@@ -94,12 +94,12 @@ impl Status {
                 "tokenizer" => return "モデルの文字処理を検証しています。",
                 "bounds" => return "モデルの処理量の上限を検証しています。",
                 "ranking" | "timing" => return "候補の評価結果と応答時間を検証しています。",
-                "activating" => return "検証が完了しました。AI変換をオンにしています。",
+                "activating" => return "AI変換をオンにする設定を保存しています。",
                 "failed" => {
                     return match job.error.as_str() {
                         "activation_failed" if self.enabled && self.ready => "AI変換はオンです。",
                         "activation_failed" => {
-                            "検証は完了しました。設定を保存できなかったため、AI変換をオンにしてください。"
+                            "AI変換をオンにする設定を保存できませんでした。設定の状態を確認して、もう一度お試しください。"
                         }
                         "source_unreadable" => {
                             "モデルのファイルを読み込めませんでした。ファイルを確認してもう一度お試しください。"
