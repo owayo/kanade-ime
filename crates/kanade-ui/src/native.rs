@@ -25,13 +25,15 @@ enum SettingsPage {
     #[default]
     Conversion,
     Appearance,
+    Dictionary,
     Learning,
     Records,
 }
 impl SettingsPage {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Conversion,
         Self::Appearance,
+        Self::Dictionary,
         Self::Learning,
         Self::Records,
     ];
@@ -40,7 +42,8 @@ impl SettingsPage {
         match self {
             Self::Conversion => "入力・変換",
             Self::Appearance => "候補表示",
-            Self::Learning => "学習",
+            Self::Dictionary => "ユーザー辞書",
+            Self::Learning => "学習設定",
             Self::Records => "学習記録",
         }
     }
@@ -66,7 +69,6 @@ struct Settings {
     records: records_panel::Records,
     status: String,
     pending_clear: Option<Action>,
-    dictionary_open: bool,
     dictionary: dictionary_panel::DictionaryPanel,
 }
 impl Settings {
@@ -90,7 +92,6 @@ impl Settings {
             records: Default::default(),
             status: String::new(),
             pending_clear: None,
-            dictionary_open: false,
             dictionary: Default::default(),
         }
     }
@@ -488,7 +489,10 @@ impl Settings {
 }
 impl Settings {
     fn select_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
-        if self.page == page || self.learning_editor.is_some() {
+        if self.page == page
+            || self.learning_editor.is_some()
+            || (self.page == SettingsPage::Dictionary && !self.leave_dictionary(page, cx))
+        {
             return;
         }
         self.page = page;
@@ -499,6 +503,7 @@ impl Settings {
         self.model_remove_confirm = false;
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
         match page {
+            SettingsPage::Dictionary => self.reload_dictionary(cx),
             SettingsPage::Records => self.reload_records(cx),
             SettingsPage::Conversion => self.monitor_models(cx),
             _ => {}
@@ -525,18 +530,6 @@ impl Settings {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
             }))
-            .child(
-                button(
-                    "open-user-dictionary",
-                    "ユーザー辞書",
-                    "ユーザー辞書を管理する",
-                )
-                .inactive(self.learning_editor.is_some())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.dictionary_open = true;
-                    this.load_dictionary(0, cx);
-                })),
-            )
     }
 
     fn conversion_page(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -625,17 +618,20 @@ impl Settings {
 }
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.dictionary_open {
-            return self
-                .dictionary_panel(window, cx)
-                .track_focus(&self.navigation_focus)
-                .into_any_element();
-        }
         let body = match self.page {
             SettingsPage::Conversion => self.conversion_page(cx),
             SettingsPage::Appearance => self.appearance_page(cx),
+            SettingsPage::Dictionary => self.dictionary_list(cx),
             SettingsPage::Learning => self.learning_page(cx),
             SettingsPage::Records => self.records_list(cx),
+        };
+        let (toolbar, scroll) = match self.page {
+            SettingsPage::Dictionary => (
+                Some(self.dictionary_toolbar(cx)),
+                self.dictionary.scroll.clone(),
+            ),
+            SettingsPage::Records => (Some(self.records_toolbar(cx)), self.scroll.clone()),
+            _ => (None, self.scroll.clone()),
         };
         div()
             .size_full()
@@ -693,13 +689,11 @@ impl Render for Settings {
                         header.child(notice)
                     }),
             )
-            .when(self.page == SettingsPage::Records, |root| {
-                root.child(self.records_toolbar(cx))
-            })
+            .children(toolbar)
             .child(
                 div()
                     .id("settings-body")
-                    .track_scroll(&self.scroll)
+                    .track_scroll(&scroll)
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -710,9 +704,8 @@ impl Render for Settings {
                     .pb_6()
                     .child(control::scroll_begin())
                     .child(body.flex_none())
-                    .child(control::scroll_end(self.scroll.clone())),
+                    .child(control::scroll_end(scroll)),
             )
-            .into_any_element()
     }
 }
 pub fn run() -> Result<()> {

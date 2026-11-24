@@ -201,11 +201,10 @@ impl Settings {
                                     )
                                     .inactive(loading)
                                     .on_click(cx.listener(
-                                        move |this, _, window, cx| {
+                                        move |this, _, _, cx| {
                                             this.register_correction(
                                                 proposal_reading.clone(),
                                                 proposal_word.clone(),
-                                                window,
                                                 cx,
                                             );
                                         },

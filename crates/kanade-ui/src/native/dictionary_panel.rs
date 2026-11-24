@@ -51,6 +51,13 @@ impl Editor {
         self.fields.iter().any(|f| f.read(cx).composing())
     }
 }
+#[derive(Clone, Copy)]
+enum Discard {
+    Stay,
+    Navigate(SettingsPage),
+    Close,
+}
+
 #[derive(Default)]
 pub(super) struct DictionaryPanel {
     page: Option<Page>,
@@ -62,13 +69,15 @@ pub(super) struct DictionaryPanel {
     offset: u32,
     message: String,
     confirm_delete: Option<(Edit, String)>,
-    confirm_discard: bool,
+    confirm_discard: Option<Discard>,
     proposal: Option<(String, String)>,
-    return_after_discard: bool,
-    close_after_discard: bool,
-    scroll: gpui::ScrollHandle,
+    pub(super) scroll: gpui::ScrollHandle,
 }
 impl DictionaryPanel {
+    fn has_draft(&self) -> bool {
+        self.editor.as_ref().is_some_and(|editor| !editor.frozen)
+    }
+
     fn available(&self) -> bool {
         !self.pending && self.page.is_some() && self.job.as_ref().is_none_or(Job::finished)
     }
@@ -78,25 +87,31 @@ impl Settings {
         if !self.confirm_learning_close(cx) {
             return false;
         }
-        if self
-            .dictionary
-            .editor
-            .as_ref()
-            .is_some_and(|editor| !editor.frozen)
-        {
-            self.dictionary_open = true;
-            self.dictionary.confirm_discard = true;
-            self.dictionary.close_after_discard = true;
-            self.dictionary.return_after_discard = false;
-            self.dictionary.message =
-                "保存前の編集内容があります。破棄するか、編集を続けるか選んでください。".into();
+        if self.dictionary.has_draft() {
+            self.dictionary.confirm_discard = Some(Discard::Close);
             cx.notify();
-            false
-        } else {
-            true
+            return false;
         }
+        true
     }
-    pub(super) fn load_dictionary(&mut self, offset: u32, cx: &mut Context<Self>) {
+
+    pub(super) fn leave_dictionary(&mut self, page: SettingsPage, cx: &mut Context<Self>) -> bool {
+        if self.dictionary.has_draft() {
+            self.dictionary.confirm_discard = Some(Discard::Navigate(page));
+            cx.notify();
+            return false;
+        }
+        self.dictionary.confirm_delete = None;
+        self.dictionary.confirm_discard = None;
+        self.dictionary.proposal = None;
+        true
+    }
+
+    pub(super) fn reload_dictionary(&mut self, cx: &mut Context<Self>) {
+        self.load_dictionary(self.dictionary.offset, cx);
+    }
+
+    fn load_dictionary(&mut self, offset: u32, cx: &mut Context<Self>) {
         if self.dictionary.pending {
             return;
         }
@@ -113,8 +128,12 @@ impl Settings {
                 this.dictionary.pending = false;
                 match result {
                     (Ok(page), Ok(jobs)) => {
+                        if this.dictionary.offset != page.offset {
+                            this.dictionary.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                        }
                         this.dictionary.offset = page.offset;
                         this.dictionary.page = Some(page);
+                        this.dictionary.message.clear();
                         let job = dictionary::observed_job(this.dictionary.job.as_ref(),&jobs);
                         this.dictionary.owned_job &= job.as_ref().map(|j|&j.id)==this.dictionary.job.as_ref().map(|j|&j.id);
                         if let Some(job)=&job {
@@ -132,7 +151,6 @@ impl Settings {
                             draft.reading=reading;draft.value=value;
                             this.dictionary.editor=Some(Editor::new(draft,cx));
                             this.dictionary.scroll.set_offset(gpui::point(px(0.),px(0.)));
-                            this.dictionary.message="内容を確認して保存してください。".into();
                         }
                     }
                     _ => {
@@ -149,12 +167,7 @@ impl Settings {
         if !self.dictionary.available() {
             return;
         }
-        if self
-            .dictionary
-            .editor
-            .as_ref()
-            .is_some_and(|editor| !editor.frozen)
-        {
+        if self.dictionary.has_draft() {
             self.dictionary.message =
                 "現在の編集を保存するか、キャンセルしてから別の編集を開いてください。".into();
             cx.notify();
@@ -170,9 +183,7 @@ impl Settings {
         self.dictionary.owned_job = false;
         self.dictionary.proposal = None;
         self.dictionary.confirm_delete = None;
-        self.dictionary.confirm_discard = false;
-        self.dictionary.return_after_discard = false;
-        self.dictionary.close_after_discard = false;
+        self.dictionary.confirm_discard = None;
         self.dictionary.message.clear();
         cx.notify();
     }
@@ -180,34 +191,12 @@ impl Settings {
         &mut self,
         reading: String,
         value: String,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A displayed correction is a proposal, never an automatic promotion.
-        if self
-            .dictionary
-            .editor
-            .as_ref()
-            .is_some_and(|editor| !editor.frozen)
-        {
-            self.dictionary_open = true;
-            self.dictionary.message =
-                "編集中の内容があります。保存するかキャンセルしてください。".into();
-            cx.notify();
-            return;
-        }
-        self.dictionary_open = true;
-        if let Some(page) = &self.dictionary.page {
-            let mut draft = Draft::new(page, None);
-            draft.reading = reading;
-            draft.value = value;
-            self.edit_dictionary_draft(draft, window, cx);
-        } else {
-            self.dictionary.proposal = Some((reading, value));
-            self.dictionary.message = "辞書を取得しています。".into();
-            self.load_dictionary(0, cx);
-        }
+        self.dictionary.proposal = Some((reading, value));
+        self.select_page(SettingsPage::Dictionary, cx);
     }
+
     fn start_dictionary(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
         if !self.dictionary.available()
             || self
@@ -230,7 +219,7 @@ impl Settings {
         }
         self.dictionary.pending = true;
         self.dictionary.confirm_delete = None;
-        self.dictionary.confirm_discard = false;
+        self.dictionary.confirm_discard = None;
         if let Some(editor) = &mut self.dictionary.editor {
             editor.frozen = true;
             for field in &editor.fields {
@@ -513,36 +502,27 @@ impl Settings {
                 .child(
                     button("dictionary-discard", "キャンセル", "編集中の内容を破棄する").on_click(
                         cx.listener(|this, _, _, cx| {
-                            this.dictionary.confirm_discard = true;
-                            this.dictionary.return_after_discard = false;
+                            this.dictionary.confirm_discard = Some(Discard::Stay);
                             cx.notify();
                         }),
                     ),
                 ),
         )
     }
-    pub(super) fn dictionary_panel(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        let available = self.dictionary.available();
-        let no_draft = self.dictionary.editor.as_ref().is_none_or(|e| e.frozen);
-        let revision = self
-            .dictionary
-            .page
-            .as_ref()
-            .map(|p| p.revision.clone())
-            .unwrap_or_default();
-        let mut body = div()
-            .id("user-dictionary-body")
-            .track_scroll(&self.dictionary.scroll)
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
+    pub(super) fn dictionary_toolbar(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let can_edit = self.dictionary.available() && !self.dictionary.has_draft();
+        let status = if self.dictionary.pending && self.dictionary.message.is_empty() {
+            "辞書を取得しています…"
+        } else {
+            self.dictionary.message.as_str()
+        };
+        let mut toolbar = div()
+            .flex_none()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_2()
             .px_6()
-            .pb_6()
-            .child(control::scroll_begin())
+            .pb_3()
             .child(
                 div()
                     .flex()
@@ -554,7 +534,7 @@ impl Settings {
                             "単語を登録…",
                             "単語の登録画面を開く",
                         )
-                        .inactive(!available || !no_draft)
+                        .inactive(!can_edit)
                         .on_click(cx.listener(|this, _, window, cx| {
                             if let Some(p) = &this.dictionary.page {
                                 this.edit_dictionary_draft(Draft::new(p, None), window, cx);
@@ -563,7 +543,7 @@ impl Settings {
                     )
                     .child(
                         button("dictionary-add", "辞書を作成…", "辞書の作成画面を開く")
-                            .inactive(!available || !no_draft)
+                            .inactive(!can_edit)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(p) = &this.dictionary.page {
                                     this.edit_dictionary_draft(
@@ -581,35 +561,150 @@ impl Settings {
                             "辞書一覧と処理状況を更新する",
                         )
                         .inactive(self.dictionary.pending)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.load_dictionary(this.dictionary.offset, cx)
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.reload_dictionary(cx))),
                     ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child("入力を確定し、操作が落ち着くと変更が反映されます。"),
-            );
-        if let Some(job) = &self.dictionary.job {
-            body = body.child(card().p_3().gap_2().child(job.message()).when(
-                !job.finished(),
-                |v| {
-                    v.child(
-                        button(
-                            "dictionary-cancel-job",
-                            "保存前の変更をキャンセル",
-                            "保存前の辞書変更をキャンセルする",
-                        )
-                        .inactive(self.dictionary.pending || job.saved_revision.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_dictionary(cx))),
+            .when(!status.is_empty(), |toolbar| {
+                toolbar.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child(status.to_owned()),
+                )
+            });
+        if let Some(job) = self.dictionary.job.as_ref().filter(|job| !job.finished()) {
+            toolbar = toolbar.child(
+                div().child(
+                    button(
+                        "dictionary-cancel-job",
+                        "保存前の変更をキャンセル",
+                        "保存前の辞書変更をキャンセルする",
                     )
-                },
-            ));
+                    .inactive(self.dictionary.pending || job.saved_revision.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_dictionary(cx))),
+                ),
+            );
+        }
+        if let Some((edit, message)) = &self.dictionary.confirm_delete {
+            let edit = edit.clone();
+            toolbar =
+                toolbar.child(
+                    card()
+                        .p_3()
+                        .bg(rgb(0xffecee))
+                        .gap_2()
+                        .child(message.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    button(
+                                        "dictionary-confirm-delete",
+                                        "削除する",
+                                        "確認した辞書の内容を削除する",
+                                    )
+                                    .inactive(
+                                        !self.dictionary.available()
+                                            || self.dictionary.page.as_ref().is_none_or(|page| {
+                                                edit.revision() != page.revision
+                                            }),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.start_dictionary(edit.clone(), window, cx)
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    button(
+                                        "dictionary-cancel-delete",
+                                        "キャンセル",
+                                        "削除をキャンセルする",
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.dictionary.confirm_delete = None;
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
+                        ),
+                );
+        }
+        if let Some(action) = self.dictionary.confirm_discard {
+            let (message, label) = match action {
+                Discard::Stay if !self.dictionary.has_draft() => (
+                    "送信済みの変更はそのまま処理されます。編集フォームを閉じますか？".into(),
+                    "フォームを閉じる",
+                ),
+                Discard::Stay => (
+                    "保存していない編集内容を破棄しますか？".into(),
+                    "編集を破棄",
+                ),
+                Discard::Navigate(page) => (
+                    format!(
+                        "保存していない編集内容を破棄して「{}」に移動しますか？",
+                        page.label()
+                    ),
+                    "破棄して移動",
+                ),
+                Discard::Close => (
+                    "保存していない編集内容を破棄して設定を閉じますか？".into(),
+                    "破棄して閉じる",
+                ),
+            };
+            toolbar = toolbar.child(
+                card().p_3().gap_2().child(message).child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            button("dictionary-keep-draft", "編集を続ける", "編集に戻る").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.dictionary.confirm_discard = None;
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(button("dictionary-confirm-discard", label, label).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                let Some(action) = this.dictionary.confirm_discard.take() else {
+                                    return;
+                                };
+                                this.dictionary.editor = None;
+                                this.dictionary.proposal = None;
+                                window.focus(&this.navigation_focus, cx);
+                                match action {
+                                    Discard::Stay => cx.notify(),
+                                    Discard::Navigate(page) => this.select_page(page, cx),
+                                    Discard::Close => cx.quit(),
+                                }
+                            }),
+                        )),
+                ),
+            );
+        }
+        toolbar
+    }
+
+    pub(super) fn dictionary_list(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let available = self.dictionary.available();
+        let no_draft = !self.dictionary.has_draft();
+        let revision = self
+            .dictionary
+            .page
+            .as_ref()
+            .map(|p| p.revision.clone())
+            .unwrap_or_default();
+        let mut body = div().flex().flex_col().gap_4();
+        if self.dictionary.editor.is_some() {
+            body = body.child(self.dictionary_editor(cx));
         }
         if let Some(page) = &self.dictionary.page {
-            body=body.child(section("辞書").child(div().id("dictionary-names").max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap_2().children(page.dictionaries.iter().map(|d|{
+            if !page.dictionaries.is_empty() {
+                body=body.child(section("辞書").child(div().id("dictionary-names").max_h(px(140.)).overflow_y_scroll().flex().flex_col().gap_2().children(page.dictionaries.iter().map(|d|{
                 let info=d.clone(); let deletion=Edit::DeleteDictionary{revision:revision.clone(),dictionary_index:d.index};
                 let message=format!("「{}」と、その中の{}件の単語を削除します。この操作は取り消せません。",d.name,d.entries);
                 card().p_3().flex_row().flex_wrap().gap_2().items_center()
@@ -617,21 +712,20 @@ impl Settings {
                     .child(button(("dictionary-rename",d.index as u64),"名前を変更…","辞書名を変更する").inactive(!available || !no_draft).on_click(cx.listener(move |this,_,window,cx| {if let Some(page)=&this.dictionary.page {this.edit_dictionary_draft(Draft::dictionary(page,Some(&info)),window,cx);}})))
                     .child(button(("dictionary-delete",d.index as u64),"削除…","辞書の削除を確認する").inactive(!available || !no_draft).on_click(cx.listener(move |this,_,_,cx|{if this.dictionary.available() && this.dictionary.editor.as_ref().is_none_or(|e|e.frozen) {this.dictionary.confirm_delete=Some((deletion.clone(),message.clone()));cx.notify();}})))
             }))));
-            body = body.child(self.dictionary_editor(cx));
+            }
             body = body.child(
                 section("登録した単語")
-                    .child(format!(
-                        "{}件中 {}〜{}件",
-                        page.total,
-                        if page.entries.is_empty() {
-                            0
-                        } else {
-                            page.offset + 1
-                        },
-                        page.offset + page.entries.len() as u32
-                    ))
-                    .when(page.entries.is_empty(), |v| {
-                        v.child("このページに登録済みの単語はありません。")
+                    .child(if page.total == 0 {
+                        "登録済みの単語はありません。".into()
+                    } else if page.entries.is_empty() {
+                        "このページに登録済みの単語はありません。".into()
+                    } else {
+                        format!(
+                            "{}件中 {}〜{}件",
+                            page.total,
+                            page.offset + 1,
+                            page.offset + page.entries.len() as u32,
+                        )
                     })
                     .children(page.entries.iter().map(|entry| {
                         let entry: Entry = entry.clone();
@@ -720,151 +814,54 @@ impl Settings {
             );
             let previous = page.offset.saturating_sub(dictionary::PAGE_SIZE);
             let next = page.offset.saturating_add(dictionary::PAGE_SIZE);
-            body = body.child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        button(
-                            "dictionary-previous",
-                            "前のページ",
-                            "辞書の前のページを表示する",
-                        )
-                        .inactive(!available || !no_draft || page.offset == 0)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.dictionary.available()
-                                && this.dictionary.editor.as_ref().is_none_or(|e| e.frozen)
-                                && this.dictionary.offset > 0
-                            {
-                                this.load_dictionary(previous, cx);
-                            }
-                        })),
-                    )
-                    .child(
-                        button(
-                            "dictionary-next",
-                            "次のページ",
-                            "辞書の次のページを表示する",
-                        )
-                        .inactive(!available || !no_draft || next >= page.total)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.dictionary.available()
-                                && this.dictionary.editor.as_ref().is_none_or(|e| e.frozen)
-                                && this
-                                    .dictionary
-                                    .page
-                                    .as_ref()
-                                    .is_some_and(|p| next < p.total)
-                            {
-                                this.load_dictionary(next, cx);
-                            }
-                        })),
-                    ),
-            );
-        }
-        // Keep confirmations visible even when the list is scrolled away.
-        body = body.child(control::scroll_end(self.dictionary.scroll.clone()));
-        let mut confirmation = div().flex_none().px_6().gap_2().flex().flex_col();
-        if let Some((edit, message)) = &self.dictionary.confirm_delete {
-            let edit = edit.clone();
-            confirmation = confirmation.child(
-                card()
-                    .p_3()
-                    .bg(rgb(0xffecee))
-                    .gap_2()
-                    .child(message.clone())
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                button(
-                                    "dictionary-confirm-delete",
-                                    "削除する",
-                                    "確認した辞書の内容を削除する",
-                                )
-                                .inactive(!available || edit.revision() != revision)
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.start_dictionary(edit.clone(), window, cx)
-                                    },
-                                )),
+            if page.offset > 0 || next < page.total {
+                body = body.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            button(
+                                "dictionary-previous",
+                                "前のページ",
+                                "辞書の前のページを表示する",
                             )
-                            .child(
-                                button(
-                                    "dictionary-cancel-delete",
-                                    "キャンセル",
-                                    "削除をキャンセルする",
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.dictionary.confirm_delete = None;
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    ),
-            );
-        }
-        if self.dictionary.confirm_discard {
-            confirmation=confirmation.child(card().p_3().gap_2().child("保存していない編集内容を破棄しますか？送信済みの処理は、この操作では取り消しません。")
-                .child(div().flex().gap_2()
-                    .child(button("dictionary-confirm-discard","編集を破棄","未保存の編集内容を破棄する").on_click(cx.listener(|this,_,window,cx|{this.dictionary.editor=None;this.dictionary.confirm_discard=false;this.dictionary.proposal=None;if this.dictionary.return_after_discard {this.dictionary_open=false;}this.dictionary.return_after_discard=false;window.blur(cx);if this.dictionary.close_after_discard {cx.quit();}else{cx.notify();}})))
-                    .child(button("dictionary-keep-draft","編集を続ける","編集に戻る").on_click(cx.listener(|this,_,_,cx|{this.dictionary.confirm_discard=false;this.dictionary.return_after_discard=false;this.dictionary.close_after_discard=false;cx.notify();})))));
-        }
-        div()
-            .size_full()
-            .bg(rgb(PAGE))
-            .text_color(rgb(INK))
-            .font_family(if cfg!(target_os = "macos") {
-                "Hiragino Sans"
-            } else {
-                "Yu Gothic UI"
-            })
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_none()
-                    .p_6()
-                    .gap_3()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .justify_between()
-                            .items_center()
-                            .gap_2()
-                            .child(app_heading("ユーザー辞書", window))
-                            .child(
-                                button("dictionary-back", "設定へ戻る", "辞書画面から設定へ戻る")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if this
+                            .inactive(!available || !no_draft || page.offset == 0)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if this.dictionary.available()
+                                        && this.dictionary.editor.as_ref().is_none_or(|e| e.frozen)
+                                        && this.dictionary.offset > 0
+                                    {
+                                        this.load_dictionary(previous, cx);
+                                    }
+                                },
+                            )),
+                        )
+                        .child(
+                            button(
+                                "dictionary-next",
+                                "次のページ",
+                                "辞書の次のページを表示する",
+                            )
+                            .inactive(!available || !no_draft || next >= page.total)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if this.dictionary.available()
+                                        && this.dictionary.editor.as_ref().is_none_or(|e| e.frozen)
+                                        && this
                                             .dictionary
-                                            .editor
+                                            .page
                                             .as_ref()
-                                            .is_some_and(|e| !e.frozen)
-                                        {
-                                            this.dictionary.confirm_discard = true;
-                                            this.dictionary.return_after_discard = true;
-                                            this.dictionary.close_after_discard = false;
-                                        } else {
-                                            this.dictionary_open = false;
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(ACCENT))
-                            .child(self.dictionary.message.clone()),
-                    ),
-            )
-            .child(confirmation)
-            .child(body)
+                                            .is_some_and(|p| next < p.total)
+                                    {
+                                        this.load_dictionary(next, cx);
+                                    }
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+        body
     }
 }
