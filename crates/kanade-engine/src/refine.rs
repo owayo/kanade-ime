@@ -32,7 +32,7 @@ pub(super) struct Frozen {
     segment: usize,
     reading: String,
     values: Vec<String>,
-    hint: Option<String>,
+    pub(super) hint: Option<String>,
     pub(super) evaluated: bool,
 }
 impl Frozen {

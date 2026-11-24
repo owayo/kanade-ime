@@ -1020,9 +1020,13 @@ fn alternatives<C: ConversionEngine>(
                         .map(|p| vec![p]);
                 }
             } else {
-                if snap.candidates.first()?.value != parts[pos].value {
-                    return None;
-                }
+                // The disposable profile has no conversion history. Anchor the
+                // comparison to the visible spelling, even if it ranks lower here.
+                let displayed = snap
+                    .candidates
+                    .iter()
+                    .position(|c| c.value == parts[pos].value)?;
+                snap.candidates[..=displayed].rotate_right(1);
                 let mut list = Vec::<FocusCandidate>::new();
                 for c in &snap.candidates {
                     if !list.iter().any(|other| other.value == c.value) {
@@ -1268,6 +1272,11 @@ impl<C: ConversionEngine> Engine<C> {
         let choice =
             candidates::Choice::sentence(value, reading(&session.snapshot.preedit), source);
         let preview = self.choose(session, &choice, false)?;
+        if source == CandidateSource::Llm && session.snapshot.preedit.segments.len() == 1 {
+            session
+                .choices
+                .retain(|c| c.source != CandidateSource::Mozc || c.value != choice.value);
+        }
         session.choices.insert(0, choice);
         session.selected_choice = 0;
         session.automatic = true;

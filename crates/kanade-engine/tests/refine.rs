@@ -21,6 +21,7 @@ struct Calls {
 #[derive(Default)]
 struct Backend {
     probe: Option<Box<Backend>>,
+    history_first: Option<&'static str>,
     probe_binary: Option<std::path::PathBuf>,
     calls: Arc<Mutex<Calls>>,
     reading: String,
@@ -195,6 +196,12 @@ impl ConversionEngine for Backend {
             SpecialKey::None if !self.converting => self.reading.push_str(&key.text),
             SpecialKey::Space if !self.converting && !self.reading.is_empty() => {
                 self.segments = table(&self.reading);
+                if let Some(history) = self.history_first {
+                    let list = &mut self.segments[0].1;
+                    if let Some(index) = list.iter().position(|&value| value == history) {
+                        list[..=index].rotate_right(1);
+                    }
+                }
                 self.converting = true;
             }
             SpecialKey::Right if self.converting => {
@@ -715,6 +722,8 @@ fn an_update_reorders_unselected_mozc_choices_and_keeps_the_displayed_surface() 
             && item.handle.unwrap().candidate_revision == after.candidate_revision
     }));
     assert_eq!(after.items[1].annotation, "文脈");
+    assert_eq!(after.items.iter().filter(|c| c.ai_recommended).count(), 1);
+    assert!(after.items[1].ai_recommended);
     assert!(after.items[2].annotation.is_empty());
     // A poll never reaches the conversion backend and changes no revision.
     assert_eq!(f.calls.lock().unwrap().keys, keys);
@@ -988,6 +997,7 @@ fn navigation_after_an_update_keeps_the_order_and_selects_real_candidates() {
     assert_eq!(values(page(&next)), ["公園", "後援", "公演", "講演"]);
     assert_eq!(page(&next).selected, 1);
     assert_eq!(page(&next).items[1].annotation, "文脈");
+    assert!(page(&next).items[1].ai_recommended);
     assert_eq!(
         page(&next).refinement_outcome(),
         RefinementOutcome::Evaluated
@@ -1303,6 +1313,38 @@ fn sentence_preview_is_acknowledged_once_and_plain_enter_commits_it() {
     let commit = committed.commit.as_ref().unwrap();
     assert_eq!(commit.value, "カメラで撮ります");
     assert!(commit.transient);
+}
+
+#[test]
+fn a_history_first_spelling_is_compared_with_context_before_enter() {
+    let backend = Backend {
+        history_first: Some("後援"),
+        ..Default::default()
+    };
+    let mut f = fixture_with_backend(settings(true), backend);
+    let initial = f.convert("こうえん");
+    assert_eq!(page(&initial).items[0].value, "後援");
+    assert!(page(&initial).items.iter().all(|c| !c.ai_recommended));
+    f.llm.want(&["公演"]);
+    let response::Body::Key(preview) = preview_poll(&mut f, &initial) else {
+        panic!("expected an acknowledged preview");
+    };
+    assert_eq!(surface(preview.preedit.as_ref().unwrap()), "公演");
+    let updated = page(&preview);
+    assert_eq!(updated.selected, 0);
+    assert_eq!(updated.items[0].value, "公演");
+    assert_eq!(updated.items[0].annotation, "文脈");
+    assert!(updated.items[0].ai_recommended);
+    assert!(
+        updated.items[1..]
+            .iter()
+            .all(|c| !c.ai_recommended && c.value != "公演")
+    );
+    f.seq = preview.event_seq;
+    f.revision = preview.revision.unwrap();
+    f.ack(&preview);
+    let enter = f.special(SpecialKey::Enter);
+    assert_eq!(enter.commit.unwrap().value, "公演");
 }
 
 #[test]

@@ -18,6 +18,9 @@ use windows::{
 fn first_conversion_uses_the_reading_and_other_segments() -> Result<()> {
     let mut mismatches = Vec::new();
     for (initial, prefix, romaji, converted) in [
+        (w!("車に"), "車に", "NORIMASU", "乗ります"),
+        (w!("雑誌に"), "雑誌に", "NORIMASU", "載ります"),
+        (w!("電車に"), "電車に", "NORIMASU", "乗ります"),
         (w!(""), "", "KURUMANINORIMASU", "車に乗ります"),
         (w!(""), "", "ZASSHININORIMASU", "雑誌に載ります"),
         (w!(""), "", "KURUMANINORIMASU.", "車に乗ります。"),

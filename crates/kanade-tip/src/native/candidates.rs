@@ -24,6 +24,7 @@ struct Paint {
     factory: ID2D1Factory,
     text: RefCell<IDWriteTextFormat>,
     footer: IDWriteTextFormat,
+    badge: IDWriteTextFormat,
     fonts: IDWriteFactory,
     target: RefCell<Option<ID2D1HwndRenderTarget>>,
     select: Box<dyn Fn(ipc::CandidateHandle)>,
@@ -79,12 +80,18 @@ impl CandidateWindow {
         let fonts: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         let text = text_format(&fonts, 17.0)?;
         let footer = text_format(&fonts, 13.0)?;
+        let badge = text_format(&fonts, 13.0)?;
+        unsafe {
+            badge.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            badge.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        }
         let state = Rc::new(Paint {
             _guard: ModuleGuard::new(),
             page: RefCell::new(ipc::CandidatePage::default()),
             factory,
             text: RefCell::new(text),
             footer,
+            badge,
             fonts,
             target: RefCell::new(None),
             select: Box::new(select),
@@ -340,7 +347,7 @@ impl Paint {
         }
         for (row, item) in page.items.iter().enumerate() {
             let top = row as f32 * row_height;
-            let rect = D2D_RECT_F {
+            let mut rect = D2D_RECT_F {
                 left: 8.0,
                 top,
                 right: 512.0,
@@ -350,6 +357,31 @@ impl Paint {
                 unsafe {
                     rt.FillRectangle(&rect, &accent);
                 }
+            }
+            if item.ai_recommended {
+                let center = top + row_height / 2.0;
+                let badge = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: rect.right - 34.0,
+                        top: center - 10.0,
+                        right: rect.right - 4.0,
+                        bottom: center + 10.0,
+                    },
+                    radiusX: 5.0,
+                    radiusY: 5.0,
+                };
+                unsafe {
+                    rt.DrawRoundedRectangle(&badge, &ink, 1.0, None);
+                    rt.DrawText(
+                        &[b'A' as u16, b'I' as u16],
+                        &self.badge,
+                        &badge.rect,
+                        &ink,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                rect.right = badge.rect.left - 6.0;
             }
             let annotation = match item.annotation.as_str() {
                 "ひらがな" | "カタカナ" | "アルファベット" => "",

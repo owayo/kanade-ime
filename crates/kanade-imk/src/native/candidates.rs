@@ -1,11 +1,13 @@
 use kanade_ipc::CandidatePage;
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, rc::Retained, runtime::AnyObject, sel};
 use objc2_app_kit::{
-    NSBox, NSBoxType, NSButton, NSColor, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSLineBreakMode, NSTextAlignment, NSTextField, NSView,
+    NSBackgroundColorAttributeName, NSBox, NSBoxType, NSButton, NSColor, NSFont,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSLineBreakMode, NSTextAlignment,
+    NSTextField, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSDictionary, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString,
+    NSAttributedString, NSDictionary, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize,
+    NSString,
 };
 
 fn text(value: &str, font: &NSFont, color: &NSColor) -> Retained<NSAttributedString> {
@@ -57,6 +59,19 @@ pub(super) fn content(
             NSMutableAttributedString::alloc(),
             &text(&format!("{}   ", item.number), &small, &secondary),
         );
+        if item.ai_recommended {
+            let badge = text(" AI ", &small, &NSColor::textBackgroundColor());
+            let range = NSRange::new(title.length(), badge.length());
+            title.appendAttributedString(&badge);
+            unsafe {
+                title.addAttribute_value_range(
+                    NSBackgroundColorAttributeName,
+                    &NSColor::labelColor(),
+                    range,
+                );
+            }
+            title.appendAttributedString(&text("  ", &small, &secondary));
+        }
         title.appendAttributedString(&text(&item.value, &font, &color));
         if !item.annotation.is_empty()
             && !matches!(

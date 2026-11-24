@@ -1002,6 +1002,10 @@ impl<C> Engine<C> {
                     reading: c.reading.clone(),
                     annotation: c.annotation.clone(),
                     source: c.source as i32,
+                    ai_recommended: c.source == CandidateSource::Llm
+                        || (c.source == CandidateSource::Mozc
+                            && session.frozen.as_ref().and_then(|f| f.hint.as_ref())
+                                == Some(&c.value)),
                     number: (slot - start + 1) as u32,
                 })
                 .collect(),

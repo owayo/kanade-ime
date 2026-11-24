@@ -35,7 +35,7 @@ fn main() {
             || std::env::var_os("KANADE_PREVIEW_LARGE").is_some();
         let page = CandidatePage {
             items: [
-                ("日本語", ""),
+                ("日本語", "文脈"),
                 ("にほんご", "ひらがな"),
                 ("ニホンゴ", "カタカナ"),
                 ("nihongo", "アルファベット"),
@@ -54,6 +54,7 @@ fn main() {
                 value: value.into(),
                 reading: "このよみはひょうじしない".into(),
                 annotation: annotation.into(),
+                ai_recommended: i == 0,
                 number: i as u32 + 1,
                 ..Default::default()
             })

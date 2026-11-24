@@ -133,6 +133,7 @@ fn generate(root: &Path) -> Result<()> {
         .protoc_executable(compiler)
         .out_dir(target)
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .field_attribute("kanade.CandidateItem.ai_recommended", "#[serde(default)]")
         .field_attribute(
             "kanade.CandidatePage.refinement_outcome",
             "#[serde(default)]",

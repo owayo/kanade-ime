@@ -358,6 +358,9 @@ pub struct CandidateItem {
     pub source: i32,
     #[prost(uint32, tag = "6")]
     pub number: u32,
+    #[prost(bool, tag = "7")]
+    #[serde(default)]
+    pub ai_recommended: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
