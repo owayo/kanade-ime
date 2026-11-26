@@ -17,6 +17,36 @@ function Test-Registered {
     return $false
 }
 if (Test-Registered) { throw 'Runner already has Kanade installed' }
+$scheduler = New-Object -ComObject Schedule.Service
+$scheduler.Connect()
+$taskFolder = $scheduler.GetFolder('\')
+function Get-LogonTask {
+    try { return $taskFolder.GetTask('Kanade IME') }
+    catch [System.IO.FileNotFoundException] { return $null }
+}
+function Assert-LogonTask {
+    $task = Get-LogonTask
+    if (-not $task) { throw 'The engine logon task is missing' }
+    $definition = $task.Definition
+    $trigger = $definition.Triggers.Item(1)
+    $action = $definition.Actions.Item(1)
+    $settings = $definition.Settings
+    $group = $definition.Principal.GroupId
+    if ($group -notlike 'S-1-*') {
+        $group = [Security.Principal.NTAccount]::new($group).Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    if (-not $task.Enabled -or $definition.Triggers.Count -ne 1 -or $trigger.Type -ne 9 -or
+        -not $trigger.Enabled -or $trigger.UserId -or ($trigger.Delay -and $trigger.Delay -ne 'PT0S') -or
+        $group -ne 'S-1-5-32-545' -or $definition.Principal.RunLevel -ne 0 -or
+        $settings.MultipleInstances -ne 0 -or $settings.DisallowStartIfOnBatteries -or
+        $settings.StopIfGoingOnBatteries -or $settings.ExecutionTimeLimit -ne 'PT0S' -or
+        $settings.Priority -ne 5 -or $definition.Actions.Count -ne 1 -or
+        $action.Path -ne (Join-Path $env:ProgramFiles 'Kanade/kanade-engine.exe') -or
+        $action.Arguments -ne '--supervise') {
+        throw 'The installed task does not start the supervisor at interactive logon'
+    }
+}
+if (Get-LogonTask) { throw 'Runner already has a Kanade logon task' }
 # The settings application is reachable from the Start menu of every user.
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Kanade の設定.lnk'
 function Invoke-Installer([string]$File, [string[]]$Arguments, [int[]]$Expected) {
@@ -86,6 +116,21 @@ function New-LegacyMsi {
     }
     $package.SelectSingleNode('w:MajorUpgrade', $names).SetAttribute('Schedule', 'afterInstallInitialize')
     $package.SelectSingleNode("w:InstallExecuteSequence/w:Custom[@Action='Rollback64']", $names).SetAttribute('After', 'InstallFiles')
+    # Older packages owned the Run value and had no logon task.
+    foreach ($node in $package.SelectNodes("w:InstallExecuteSequence/w:Custom[starts-with(@Action,'ApplyLogonTask')]|w:SetProperty[@Id='KanadeLogonAction']|w:CustomAction[starts-with(@Id,'ApplyLogonTask')]", $names)) {
+        [void]$node.ParentNode.RemoveChild($node)
+    }
+    $directory = $package.SelectSingleNode(".//w:Directory[@Id='INSTALLDIR']", $names)
+    $oldStartup = $legacy.CreateDocumentFragment()
+    $oldStartup.InnerXml = @'
+<Component xmlns="http://wixtoolset.org/schemas/v4/wxs" Id="Startup" Guid="3C1F580E-90DC-4CFA-BB52-562A326C079B" Bitness="always64">
+  <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Kanade" Type="string" Value="&quot;[INSTALLDIR]kanade-engine.exe&quot; --supervise" KeyPath="yes" />
+</Component>
+'@
+    [void]$directory.AppendChild($oldStartup)
+    $reference = $legacy.CreateElement('ComponentRef', $legacy.DocumentElement.NamespaceURI)
+    $reference.SetAttribute('Id', 'Startup')
+    [void]$package.SelectSingleNode('w:Feature', $names).AppendChild($reference)
     $legacy.Save((Join-Path (Get-Location) 'artifacts/windows/legacy.wxs'))
     $saved = $env:DOTNET_ROLL_FORWARD
     try {
@@ -105,10 +150,13 @@ try {
     Invoke-Msi @('/i', $msi, '/qn', '/norestart', 'KANADE_TEST_ROLLBACK=1', '/l*v', 'artifacts/windows/rollback.log') @(1603)
     if (-not (Select-String -Path artifacts/windows/rollback.log -SimpleMatch 'CustomAction TestRollback returned actual error code 1' -Quiet)) { throw 'The requested failure action did not execute' }
     if (Test-Registered) { throw 'Rollback left a COM registration' }
+    if (Get-LogonTask) { throw 'Rollback left an engine logon task' }
     if (Test-Path -LiteralPath $shortcut) { throw 'Rollback left the Start menu shortcut' }
     Write-Output 'MSI failure rollback removed both COM registrations'
     $legacyMsi = New-LegacyMsi
     Invoke-Msi @('/i', $legacyMsi, '/qn', '/norestart', '/l*v', 'artifacts/windows/legacy.log') @(0, 3010)
+    $runKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (-not (Get-ItemPropertyValue $runKey -Name Kanade) -or (Get-LogonTask)) { throw 'Unexpected legacy startup state' }
     $readyFile = Join-Path $env:RUNNER_TEMP ('editor-ready-' + [Guid]::NewGuid())
     $holder = (Resolve-Path .github/scripts/hold-installed-tip.ps1).Path
     $editor = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -STA -File `"$holder`" -ReadyFile `"$readyFile`""
@@ -119,6 +167,8 @@ try {
     if (-not (Test-Path $readyFile)) { throw 'Test editor did not load the installed TIP' }
     Invoke-Setup @('/install', '/quiet', '/norestart', '/log', 'artifacts/windows/install.log') @(0, 3010)
     if ($editor.HasExited) { throw 'Silent major upgrade closed the running editor' }
+    Assert-LogonTask
+    if (Get-ItemProperty $runKey -Name Kanade -ErrorAction SilentlyContinue) { throw 'Upgrade left the legacy Run entry' }
     $installer = New-Object -ComObject WindowsInstaller.Installer
     $legacyCode = Get-MsiProperty $installer $legacyMsi 'ProductCode'
     if ($installer.ProductState($legacyCode) -eq 5) { throw 'Legacy product was not removed by the upgrade' }
@@ -178,11 +228,7 @@ try {
         $settingsImage = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($target))
         if ($settingsImage -notmatch 'consoleAllocationPolicy[^<>]*>detached<') { throw 'The installed settings would open a console window from the Start menu' }
         if ($settingsImage -notmatch 'dpiAwareness[^<>]*>PerMonitorV2<') { throw 'The installed settings lost their DPI awareness' }
-        $startup = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade
-        $supervisor = '"{0}" --supervise' -f (Join-Path $application 'kanade-engine.exe')
-        if (-not $startup.Equals($supervisor, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Installed startup entry does not launch the engine supervisor.'
-        }
+        Assert-LogonTask
         if (-not (Test-Path -LiteralPath (Join-Path $application 'start-engine.ps1'))) {
             throw 'The setup launcher is not installed.'
         }
@@ -235,6 +281,7 @@ finally {
 if ($failure) { throw $failure }
 if ($cleanupFailure) { throw $cleanupFailure }
 if (Test-Registered) { throw 'Uninstall left a COM registration' }
+if (Get-LogonTask) { throw 'Uninstall left an engine logon task' }
 if (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Kanade -ErrorAction SilentlyContinue) { throw 'Uninstall left a startup entry' }
 if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall left the Start menu shortcut' }
 Write-Output 'EXE uninstallation removed both COM registrations, startup entry and Start menu shortcut'

@@ -17,6 +17,7 @@ function Run-Wix([scriptblock]$Command) {
 Run-Native { rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc }
 Run-Native { cargo build --release --locked --target x86_64-pc-windows-msvc -p kanade-engine -p kanade-ui -p kanade-llm -p kanade-indexer -p kanade-tip --features kanade-ui/native,kanade-llm/llama }
 Run-Native { cargo build --release --locked --target i686-pc-windows-msvc -p kanade-tip }
+Run-Native { cargo build --release --locked --target x86_64-pc-windows-msvc -p xtask --bin kanade-installer }
 Run-Native { cargo xtask build-worker }
 Run-Native { cargo xtask stage-windows }
 $payload = (Resolve-Path artifacts/windows/payload).Path
@@ -32,6 +33,8 @@ function Sign-File([string]$Path) {
     if ($result.Status -ne 'Valid') { throw 'Authenticode signing failed' }
 }
 Get-ChildItem $payload -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' } | ForEach-Object { Sign-File $_.FullName }
+Copy-Item target/x86_64-pc-windows-msvc/release/kanade-installer.exe artifacts/windows/kanade-installer.exe
+Sign-File (Resolve-Path artifacts/windows/kanade-installer.exe).Path
 $modelArgs = @()
 if ($ModelPath) { $modelArgs = @('--model', $ModelPath) }
 Run-Native { python .github/scripts/bundled_model.py (Join-Path $payload models) @modelArgs }

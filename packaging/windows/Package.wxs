@@ -31,12 +31,6 @@
     <Icon Id="Kanade.ico" SourceFile="artifacts/windows/Kanade.ico" />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLDIR" Name="Kanade">
-        <Component Id="Startup" Guid="3C1F580E-90DC-4CFA-BB52-562A326C079B" Bitness="always64">
-          <!-- The engine's own executable supervises it. It has no console
-               window that could be closed, and it runs where scripts are
-               restricted. -->
-          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Kanade" Type="string" Value="&quot;[INSTALLDIR]kanade-engine.exe&quot; --supervise" KeyPath="yes" />
-        </Component>
         <!-- Opens the settings from the Start menu. The package is per-machine, so
              the shortcut is in the menu of every user. Windows Installer
              validation (ICE43, ICE57) requires a key path under HKCU for a
@@ -50,9 +44,16 @@
     <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Main" Title="Kanade" Level="1">
       <ComponentGroupRef Id="Payload" />
-      <ComponentRef Id="Startup" />
       <ComponentRef Id="SettingsShortcut" />
     </Feature>
+    <!-- Change the logon task only once the file/TSF transaction succeeds.
+         The outgoing MSI leaves the task to its replacement on a major upgrade.
+         The embedded helper is also available after RemoveFiles on uninstall. -->
+    <Binary Id="LogonTaskHelper" SourceFile="artifacts/windows/kanade-installer.exe" />
+    <Property Id="KanadeLogonAction" Value="remove-logon-task" />
+    <SetProperty Id="KanadeLogonAction" Value="register-logon-task &quot;[INSTALLDIR]kanade-engine.exe&quot;" Before="ApplyLogonTask" Sequence="execute" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    <CustomAction Id="ApplyLogonTask" BinaryRef="LogonTaskHelper" ExeCommand="[KanadeLogonAction]" Execute="commit" Impersonate="no" Return="check" />
+    <CustomAction Id="ApplyLogonTaskWithoutRollback" BinaryRef="LogonTaskHelper" ExeCommand="[KanadeLogonAction]" Execute="deferred" Impersonate="no" Return="check" />
     <!-- Rollback actions are scheduled before the corresponding registration. -->
     <CustomAction Id="Rollback64" Directory="INSTALLDIR" ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLDIR]kanade_tip.dll&quot;" Execute="rollback" Impersonate="no" Return="ignore" />
     <CustomAction Id="Rollback32" Directory="INSTALLDIR" ExeCommand="&quot;[SystemFolder]regsvr32.exe&quot; /s /u &quot;[INSTALLDIR]x86\kanade_tip.dll&quot;" Execute="rollback" Impersonate="no" Return="ignore" />
@@ -70,6 +71,8 @@
       <Custom Action="Rollback32" After="Register64" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="Register32" After="Rollback32" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="TestRollback" After="Register32" Condition="KANADE_TEST_ROLLBACK = 1" />
+      <Custom Action="ApplyLogonTask" After="TestRollback" Condition="NOT UPGRADINGPRODUCTCODE AND NOT RollbackDisabled" />
+      <Custom Action="ApplyLogonTaskWithoutRollback" After="ApplyLogonTask" Condition="NOT UPGRADINGPRODUCTCODE AND RollbackDisabled" />
       <Custom Action="Restore64" Before="Unregister64" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="Unregister64" Before="Restore32" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="Restore32" Before="Unregister32" Condition="REMOVE~=&quot;ALL&quot;" />

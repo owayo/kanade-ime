@@ -1,6 +1,8 @@
+use anyhow::Result;
 #[cfg(not(target_os = "macos"))]
 use anyhow::bail;
-use anyhow::{Result, ensure};
+#[cfg(not(windows))]
+use anyhow::ensure;
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use {
@@ -8,8 +10,13 @@ use {
     std::{fs, path::PathBuf, process::Command},
 };
 
+#[cfg(not(windows))]
 #[path = "../install.rs"]
 mod install;
+
+#[cfg(windows)]
+#[path = "../install/logon_task.rs"]
+mod logon_task;
 
 #[cfg(target_os = "macos")]
 fn run(command: &mut Command) -> Result<()> {
@@ -24,6 +31,19 @@ fn output(command: &mut Command) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_owned())
 }
 
+#[cfg(windows)]
+fn main() -> Result<()> {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    match arguments.as_slice() {
+        [op, engine] if op == "register-logon-task" => {
+            logon_task::configure(Some(Path::new(engine)))
+        }
+        [op] if op == "remove-logon-task" => logon_task::configure(None),
+        _ => bail!("usage: kanade-installer register-logon-task ENGINE | remove-logon-task"),
+    }
+}
+
+#[cfg(not(windows))]
 fn main() -> Result<()> {
     let arguments: Vec<_> = std::env::args().collect();
     ensure!(

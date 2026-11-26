@@ -21,6 +21,7 @@ try {
         Copy-Item "$env:WINDIR/System32/cmd.exe" "$payload/$name"
     }
     Copy-Item "$env:WINDIR/SysWOW64/cmd.exe" "$payload/x86/kanade_tip.dll"
+    Copy-Item "$env:WINDIR/System32/cmd.exe" artifacts/windows/kanade-installer.exe
     foreach ($name in @('manifest.json', 'project-analyzer.json')) { Set-Content "$payload/$name" '{}' }
     Run-Native { python "$source/.github/scripts/windows-payload.py" }
     & packaging/windows/build-icon.ps1 -Source "$source/assets/icons/app.png" -Destination artifacts/windows/Kanade.ico
