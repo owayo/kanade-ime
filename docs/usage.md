@@ -146,7 +146,7 @@ macOS では、入力メニューの「Kanade の設定…」から開けます�
 
 接続切断・変換ワーカーの再起動・エンジンの終了理由は、データディレクトリの `logs/engine-events.log` に保存します。標準のmacOSインストールでは `~/Library/Application Support/kanade-ime/logs/engine-events.log`、Windowsでは `%LOCALAPPDATA%\kanade-ime\logs\engine-events.log` です。入力側の復旧とライフサイクルは `~/Library/Logs/Kanade/input-events.log` に記録します。いずれも時刻・プロセスID・あらかじめ決めた出来事の名前・同じ出来事が続いた回数だけで、入力文字、キー、アプリや文書の名前は記録しません。出来事によっては、終了コード、再起動の回数、panic が起きたスレッドの種類とソース上の位置が付きます。panic のメッセージは入力中の文字を含むことがあるので記録しません。64 KiBで古い記録を消去します。
 
-Windowsでエンジンが止まったときは、このファイルの次の記録を見ます。各行の先頭は UNIX 時刻（秒）と、書いたプロセスのIDです。
+変換できないときは、エンジンのログで次の記録を確認できます。監視プロセスやパイプに関する記録は Windows 用です。各行の先頭は UNIX 時刻（秒）と、書いたプロセスのIDです。
 
 | 記録 | 意味 |
 |---|---|
@@ -156,6 +156,8 @@ Windowsでエンジンが止まったときは、このファイルの次の記�
 | `engine-restarted count=…` | 監視がエンジンを起動し直した。回数は監視が起動するたびに数え直し、最初の再起動を1回とする |
 | `panicked thread=… at=…` | panic が起きたスレッドの種類と、ソースのファイル名・行番号 |
 | `recovered-from-panic` | panic の後、全セッションを破棄し変換ワーカーを入れ替えて続行した |
+| `worker-restarted` | 変換ワーカーの再起動に成功した。入力メニューの表示時や待機中にワーカーの停止を検知した場合も復旧する |
+| `request-abandoned-by-connection` | 接続元がエンジンの応答を待ち切れなかった。セッションを開く途中だった場合は、そのセッションを解放する |
 | `connection-refused-at-capacity` | 同時に接続できるアプリの上限（32）に達し、新しい接続を断った |
 | `connection-rejected` | 接続直後に相手が終了した、または同じユーザー・セッションのプロセスではなかった |
 | `listener-failed`・`fatal-listener-lost` | 接続を受け付けるパイプを用意できなかった。続いた場合はエンジンを終了し、監視が起動し直す |

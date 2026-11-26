@@ -567,12 +567,21 @@ fn turn(
             let _ = ack.send(());
         }
         Ok(Work::WorkerRunning(reply)) => {
-            let _ = reply.send(engine.backend.running().ok());
+            let running = engine.backend.running().ok();
+            let _ = reply.send(running);
+            if running == Some(false) {
+                recover(engine)?;
+            }
         }
         Ok(Work::Open(hello, reply)) => {
             let result = engine.open(&hello);
             let failed = result == Err(failure::Code::Unavailable) && !engine.worker_healthy();
-            let _ = reply.send(result);
+            if let Err(mpsc::SendError(Ok(welcome))) = reply.send(result) {
+                // The handshake timed out while waiting for the engine.
+                // No connection took ownership of the session.
+                record(Event::RequestAbandonedByConnection);
+                engine.close(welcome.connection);
+            }
             if failed {
                 recover(engine)?;
             }
@@ -606,7 +615,9 @@ fn turn(
             );
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            if sync_due(last_sync.elapsed(), engine.composing()) {
+            if matches!(engine.backend.running(), Ok(false)) {
+                recover(engine)?;
+            } else if sync_due(last_sync.elapsed(), engine.composing()) {
                 if engine.sync().is_err() {
                     record(Event::SyncFailed);
                     recover(engine)?;
@@ -649,7 +660,9 @@ fn serve_connection(
         Some(request::Body::Hello(hello)) => hello,
         _ => return Err(io::ErrorKind::InvalidData.into()),
     };
-    let (reply, response) = mpsc::sync_channel(1);
+    // Transfer ownership directly to the waiting connection. A buffered
+    // welcome could be dropped after recv_timeout without closing its session.
+    let (reply, response) = mpsc::sync_channel(0);
     tx.try_send(Work::Open(hello, reply))
         .map_err(|_| io::ErrorKind::WouldBlock)?;
     let welcome = response
@@ -763,6 +776,50 @@ fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires the locked Mozc worker"]
+    fn an_abandoned_handshake_releases_its_session() {
+        let profile = tempfile::tempdir().unwrap();
+        let worker = Mozc::start(&kanade_mozc::default_worker(), profile.path()).unwrap();
+        let mut engine = Engine::new(worker, None);
+        let hello = Hello {
+            min_version: CURRENT_VERSION,
+            max_version: CURRENT_VERSION,
+        };
+        let (tx, rx) = mpsc::sync_channel(0);
+        drop(rx);
+        turn(&mut engine, Ok(Work::Open(hello, tx)), &mut Instant::now()).unwrap();
+        assert!(engine.sessions.is_empty());
+    }
+    #[test]
+    #[ignore = "requires the locked Mozc worker"]
+    fn a_stopped_worker_recovers_before_the_next_input() {
+        let profile = tempfile::tempdir().unwrap();
+        let worker = Mozc::start(&kanade_mozc::default_worker(), profile.path()).unwrap();
+        let mut engine = Engine::new(worker, None);
+        let mut last_sync = Instant::now();
+        for menu_open in [true, false] {
+            engine.backend.terminate().unwrap();
+            let (tx, rx) = mpsc::sync_channel(1);
+            let work = if menu_open {
+                Ok(Work::WorkerRunning(tx))
+            } else {
+                Err(mpsc::RecvTimeoutError::Timeout)
+            };
+            turn(&mut engine, work, &mut last_sync).unwrap();
+            if menu_open {
+                assert_eq!(rx.recv().unwrap(), Some(false));
+            }
+            assert!(engine.backend.running().unwrap());
+            let welcome = engine
+                .open(&Hello {
+                    min_version: CURRENT_VERSION,
+                    max_version: CURRENT_VERSION,
+                })
+                .unwrap();
+            engine.close(welcome.connection);
+        }
+    }
     #[test]
     fn history_sync_waits_for_an_open_composition_but_not_for_ever() {
         let seconds = Duration::from_secs;

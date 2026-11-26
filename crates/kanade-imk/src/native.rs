@@ -560,6 +560,15 @@ impl Document for NativeDocument<'_> {
         if unsafe { IsSecureEventInputEnabled() } {
             return false;
         }
+        // An unhandled idle key has no edit to apply. Setting an empty
+        // marked string here could replace the host's current selection.
+        if !reply.consumed
+            && reply.commit.is_none()
+            && reply.preedit.as_ref().is_none_or(|p| p.segments.is_empty())
+            && !self.controller.composing()
+        {
+            return true;
+        }
         let result = catch_unwind(AssertUnwindSafe(|| {
             objc2::exception::catch(AssertUnwindSafe(|| unsafe {
                 if let Some(commit) = &reply.commit {

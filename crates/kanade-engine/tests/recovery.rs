@@ -446,12 +446,13 @@ fn a_failure_in_one_session_keeps_the_worker_and_other_compositions() {
 fn a_key_left_to_the_application_cannot_start_a_composition() {
     let (mut engine, calls) = engine();
     let peer = open(&mut engine, CURRENT_VERSION);
-    // The scripted worker, like the real one for some keys, consumes it.
+    // Sending this to the scripted worker would start a composition.
     let passed = reply(engine.handle(peer.connection, key(peer.revision, 1, typed("¥"), true)));
     assert!(!passed.consumed);
     assert!(passed.commit.is_none());
     assert!(passed.preedit.unwrap().segments.is_empty());
-    assert_eq!(count(&calls, "reset"), 1);
+    assert_eq!(count(&calls, "key"), 0);
+    assert_eq!(count(&calls, "reset"), 0);
     assert!(engine.worker_healthy());
     engine
         .handle(

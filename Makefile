@@ -161,7 +161,7 @@ contract: worker ## 実ワーカーの変換・反映・復旧を検証する
 	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-eval -- --ignored
 	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-mozc --test learning --test symbols -- --ignored
 	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-mozc --lib -- --ignored
-	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-engine --test contracts --test selection_learning -- --ignored --skip dictionary_
+	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-engine --lib --test contracts --test selection_learning -- --ignored --skip dictionary_
 	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-engine --test socket -- --ignored
 	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-engine --test windows_pipe --test windows_supervisor --test windows_sandbox -- --ignored
 	$(RUN) cargo test $(CARGO_FLAGS) -p kanade-engine --test dictionary -- --ignored --skip project_approval_and_rebuild

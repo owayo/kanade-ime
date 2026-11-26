@@ -392,6 +392,9 @@ impl<C: ConversionEngine> Engine<C> {
                 session.manual |= overlay.is_some() && !history_delete;
                 let mut snapshot = match overlay {
                     Some(snapshot) => snapshot,
+                    // The application owns this key. In particular, Mozc
+                    // would commit a space even with an empty composition.
+                    None if key.passed_through && !was_composing => Snapshot::default(),
                     None => {
                         let snapshot = self
                             .backend
@@ -404,16 +407,7 @@ impl<C: ConversionEngine> Engine<C> {
                     }
                 };
                 if key.passed_through && (snapshot.consumed || snapshot.commit.is_some()) {
-                    if was_composing || snapshot.commit.is_some() {
-                        return Err(Code::Unavailable);
-                    }
-                    // The frontend left this key to the application, but the
-                    // worker started a composition with it. Nothing was shown,
-                    // so discard that composition and report the key unused.
-                    self.backend
-                        .reset(session.id)
-                        .map_err(|_| Code::Unavailable)?;
-                    snapshot = Snapshot::default();
+                    return Err(Code::Unavailable);
                 }
                 if self.settings.punctuation_commit
                     && !history_delete

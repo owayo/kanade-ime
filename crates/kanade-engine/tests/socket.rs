@@ -112,6 +112,18 @@ fn socket_conversion_and_engine_loss_preserve_the_last_applied_reading() {
     ] {
         assert_eq!(manage(&socket, action)["cleared"], true);
     }
+    // An idle Space belongs to the application. Mozc's standalone Space
+    // binding would commit a fullwidth space if it received this key.
+    let space = Key {
+        special: SpecialKey::Space as i32,
+        ..Default::default()
+    };
+    assert!(!client.would_consume(&space, Privacy::Private));
+    assert_eq!(
+        client.key_result(space, context(), true, &mut editor),
+        Some(false)
+    );
+    assert!(editor.committed.is_empty() && editor.preedit.is_empty());
     for ch in "nihon".chars() {
         assert!(client.key(
             Key {
