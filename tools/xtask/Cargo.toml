@@ -18,6 +18,9 @@ sha2.workspace = true
 hasami.workspace = true
 kanade-emoji = { path = "../../crates/kanade-emoji" }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication"] }
