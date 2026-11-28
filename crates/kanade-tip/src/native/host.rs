@@ -571,6 +571,9 @@ impl ITextStoreACP_Impl for Store_Impl {
 }
 
 thread_local! {
+    // Windows can accept SetKeyboardState on an inactive desktop and read
+    // back all keys released. Only the synthetic host supplies its own state.
+    pub(super) static HOST_KEYBOARD: Cell<Option<[u8; 256]>> = const { Cell::new(None) };
     static ENDPOINT: RefCell<Option<String>> = const { RefCell::new(None) };
     static OPENS: Cell<usize> = const { Cell::new(0) };
     static START_PROBES: Cell<usize> = const { Cell::new(0) };
@@ -782,9 +785,6 @@ fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
             .cast::<ITfThreadMgrEx>()?
             .ActivateEx(&mut id, TF_TMAE_NOACTIVATETIP)?;
         let (documents, host) = test_document(&manager, id, test_tip(&manager)?)?;
-        let mut keyboard = [0; 256];
-        GetKeyboardState(&mut keyboard)?;
-        SetKeyboardState(&[0; 256])?;
         // The tooltip needs a focus owner on this thread.
         let window = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -807,9 +807,10 @@ fn with_host(check: impl FnOnce(&Host) -> Result<()>) -> Result<()> {
         START_PROBES.set(0);
         CLOSE_AFTER_PROBE.set(false);
         HELLOS.set(0);
+        let keyboard = HOST_KEYBOARD.replace(Some([0; 256]));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(&host)));
+        HOST_KEYBOARD.set(keyboard);
         ENDPOINT.with_borrow_mut(Option::take);
-        SetKeyboardState(&keyboard)?;
         drop(host);
         DestroyWindow(window)?;
         documents.Pop(TF_POPF_ALL)?;
@@ -871,18 +872,20 @@ impl KeySource {
 }
 
 fn set_held(vk: usize, down: bool) -> Result<()> {
-    let mut state = [0; 256];
-    unsafe {
-        GetKeyboardState(&mut state)?;
-        *state.get_mut(vk).ok_or_else(failure)? = if down { 0x80 } else { 0 };
-        if matches!(VIRTUAL_KEY(vk as u16), VK_LCONTROL | VK_RCONTROL) {
-            let left = state.get(usize::from(VK_LCONTROL.0)).ok_or_else(failure)?;
-            let right = state.get(usize::from(VK_RCONTROL.0)).ok_or_else(failure)?;
-            *state
-                .get_mut(usize::from(VK_CONTROL.0))
-                .ok_or_else(failure)? = left | right;
-        }
-        SetKeyboardState(&state)
+    let mut state = keyboard_state()?;
+    *state.get_mut(vk).ok_or_else(failure)? = if down { 0x80 } else { 0 };
+    if matches!(VIRTUAL_KEY(vk as u16), VK_LCONTROL | VK_RCONTROL) {
+        let left = state.get(usize::from(VK_LCONTROL.0)).ok_or_else(failure)?;
+        let right = state.get(usize::from(VK_RCONTROL.0)).ok_or_else(failure)?;
+        *state
+            .get_mut(usize::from(VK_CONTROL.0))
+            .ok_or_else(failure)? = left | right;
+    }
+    if HOST_KEYBOARD.get().is_some() {
+        HOST_KEYBOARD.set(Some(state));
+        Ok(())
+    } else {
+        unsafe { SetKeyboardState(&state) }
     }
 }
 
@@ -1097,6 +1100,19 @@ fn key_routing_wpf_passes_standalone_shift_downs_and_up() -> Result<()> {
             assert!(!keys.OnTestKeyUp(&host.context, w, up)?.as_bool());
             assert!(!keys.OnKeyUp(&host.context, w, up)?.as_bool());
         }
+        Ok(())
+    })
+}
+
+#[test]
+fn key_routing_host_owns_its_keyboard_state() -> Result<()> {
+    with_host(|_| {
+        let vk = usize::from(VK_F24.0);
+        let os_down = || unsafe { GetKeyState(i32::from(VK_F24.0)) < 0 };
+        let initial = os_down();
+        set_held(vk, !initial)?;
+        assert_eq!(key_down(VK_F24), !initial);
+        assert_eq!(os_down(), initial);
         Ok(())
     })
 }

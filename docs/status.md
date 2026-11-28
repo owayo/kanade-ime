@@ -100,6 +100,8 @@ Signed macOS version `26.11.100` supersedes bundle 30 / Settings 15. Both apps n
 
 ### Manual Windows RichEdit tests
 
+For a same-version update, run `.github/scripts/test-windows-upgrade-input.ps1 -Stage BeforeUpdate` in a disposable Windows desktop session with the Kanade profile enabled. Repeat with `AfterUpdate` immediately after setup, then with `AfterReboot` after restarting the same VM and signing in as the same user. Keep the checkout and test binaries across all three runs. Compare the Windows boot times, the actual setup exit code (3010 requests a reboot), and the separate exit codes for the in-process test host and installed Rich Edit profile. CI exercises the first two stages while an editor holds the installed DLL open.
+
 All three tests passed individually on Windows x64 and x86. They require a Windows desktop with Japanese input installed and are ignored in CI. Each command starts a fresh process because TSF can retain resources on the first hidden desktop until process exit. Each test checks for the installed Kanade TIP DLL in the test process's loaded modules and fails if it finds it. RichEdit can load the thread's default input service.
 
 ```powershell

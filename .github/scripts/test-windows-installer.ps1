@@ -49,7 +49,7 @@ function Assert-LogonTask {
 if (Get-LogonTask) { throw 'Runner already has a Kanade logon task' }
 # The settings application is reachable from the Start menu of every user.
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Kanade の設定.lnk'
-function Invoke-Installer([string]$File, [string[]]$Arguments, [int[]]$Expected) {
+function Invoke-Installer([string]$File, [string[]]$Arguments, [int[]]$Expected, [switch]$PassThru) {
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $File
     $start.UseShellExecute = $false
@@ -61,6 +61,7 @@ function Invoke-Installer([string]$File, [string[]]$Arguments, [int[]]$Expected)
             throw 'Installer process timed out'
         }
         if ($process.ExitCode -notin $Expected) { throw "Installer failed ($($process.ExitCode))" }
+        if ($PassThru) { return $process.ExitCode }
     } finally { $process.Dispose() }
 }
 function Invoke-Msi([string[]]$Arguments, [int[]]$Expected) {
@@ -198,7 +199,15 @@ try {
     $sameMsi = New-SameVersionMsi $version
     if ((Get-MsiProperty $installer $sameMsi 'ProductCode') -eq $installedCode) { throw 'The same-version fixture has the installed product code' }
     $sameSetup = New-SameVersionSetup $version $sameMsi
-    Invoke-Installer $sameSetup @('/install', '/quiet', '/norestart', '/log', 'artifacts/windows/same-version.log') @(0, 3010)
+    # install.bat enables the input profile for the user after installing the package.
+    & (Join-Path $env:ProgramFiles 'Kanade/enable-profile.ps1')
+    $probe = Join-Path $PSScriptRoot 'test-windows-upgrade-input.ps1'
+    & $probe -Stage BeforeUpdate
+    $before = $LASTEXITCODE
+    $setupExit = Invoke-Installer $sameSetup @('/install', '/quiet', '/norestart', '/log', 'artifacts/windows/same-version.log') @(0, 3010) -PassThru
+    Write-Output "Same-version setup exit code: $setupExit"
+    & $probe -Stage AfterUpdate
+    if ($before -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Input checks failed during the same-version upgrade rehearsal' }
     if ($installer.ProductState($installedCode) -eq 5) { throw 'A build with the same version did not replace the installed one' }
     if ($installer.ProductState((Get-MsiProperty $installer $sameMsi 'ProductCode')) -ne 5) { throw 'The same-version build is not installed' }
     $products = @($installer.RelatedProducts((Get-MsiProperty $installer $msi 'UpgradeCode')))

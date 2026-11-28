@@ -92,10 +92,17 @@ fn installed_profile_direct_input() -> Result<()> {
             while PeekMessageW(&mut msg, Some(window), WM_CHAR, WM_CHAR, PM_REMOVE).as_bool() {
                 DispatchMessageW(&msg);
             }
+            let release = LPARAM(0xc000_0001u32 as isize);
+            assert!(!keys.TestKeyUp(WPARAM(vk), release)?.as_bool());
+            DispatchMessageW(&MSG {
+                message: WM_KEYUP,
+                lParam: release,
+                ..press
+            });
         }
         let mut text = [0u16; 16];
         let n = GetWindowTextW(window, &mut text) as usize;
-        assert_eq!(String::from_utf16_lossy(&text[..n]), "abc123");
+        assert!(text[..n].iter().copied().eq("abc123".encode_utf16()));
         let start = Instant::now();
         while visible_hint(window).is_some() {
             assert!(
