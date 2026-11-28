@@ -191,6 +191,41 @@ jobs:
             !artifacts/windows/payload/**/*.gguf
             artifacts/mozc/
           if-no-files-found: ignore
+  macos-preview-install:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+          install_args: python
+      - uses: actions/download-artifact@v8
+        with:
+          name: kanade-ime-aarch64-apple-darwin.pkg
+          path: preview
+          skip-decompress: true
+      # Exercise the downloaded package as a user who has never trusted the CI signer.
+      - name: Install the preview in the current user's home
+        timeout-minutes: 5
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          test ! -e "$HOME/Library/Input Methods/Kanade.app"
+          test ! -e "$HOME/Library/LaunchAgents/dev.kanade.engine.plist"
+          /usr/sbin/installer -pkg "$PWD/preview/kanade-ime-aarch64-apple-darwin.pkg" -target CurrentUserHomeDirectory -verboseR -dumplog
+      - name: Verify the installed signature, version and payload hashes
+        timeout-minutes: 2
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          python3 .github/scripts/verify-macos-installer.py "$HOME/Library/Input Methods/Kanade.app" --installed-preview --version "$version"
+      - name: Query settings through the installed client
+        timeout-minutes: 1
+        run: '"$HOME/Library/Input Methods/Kanade.app/Contents/Helpers/Settings.app/Contents/MacOS/kanade-ui" settings >/dev/null'
   project-indexer:
     runs-on: macos-latest
     timeout-minutes: 60
