@@ -105,6 +105,26 @@ enum DownRoute {
 #[derive(Default)]
 struct Presses(BTreeMap<PhysicalKey, Rc<Cell<DownRoute>>>);
 
+fn key_down(key: VIRTUAL_KEY) -> bool {
+    #[cfg(test)]
+    if let Some(keys) = host::HOST_KEYBOARD.get() {
+        return keys
+            .get(usize::from(key.0))
+            .is_some_and(|state| state & 0x80 != 0);
+    }
+    unsafe { GetKeyState(i32::from(key.0)) < 0 }
+}
+
+fn keyboard_state() -> Result<[u8; 256]> {
+    #[cfg(test)]
+    if let Some(keys) = host::HOST_KEYBOARD.get() {
+        return Ok(keys);
+    }
+    let mut keys = [0; 256];
+    unsafe { GetKeyboardState(&mut keys)? };
+    Ok(keys)
+}
+
 impl Presses {
     // A callback may release or replace this press before Down returns. Its
     // result belongs to this cell even if the map now holds a newer press.
@@ -114,7 +134,7 @@ impl Presses {
         self.0.retain(|id, _| {
             // WPF omits the scan code and repeat bit for character keys.
             let fresh = *id == key && key.scan != 0 && !repeat;
-            !fresh && unsafe { GetKeyState(i32::from(id.vk)) < 0 }
+            !fresh && key_down(VIRTUAL_KEY(u16::from(id.vk)))
         });
         let press = self.0.entry(key).or_insert_with(|| {
             // A repeat can be the first Down seen by a newly attached sink.
@@ -2302,7 +2322,7 @@ fn translate(w: WPARAM, l: LPARAM) -> Option<Key> {
         (VK_LWIN, ipc::MOD_META),
         (VK_RWIN, ipc::MOD_META),
     ] {
-        if unsafe { GetKeyState(key.0 as i32) } < 0 {
+        if key_down(key) {
             modifiers |= mask;
         }
     }
@@ -2314,10 +2334,7 @@ fn translate(w: WPARAM, l: LPARAM) -> Option<Key> {
     } else if modifiers == ipc::MOD_CONTROL && matches!(vk, 0x55 | 0x49 | 0x4f | 0x50 | 0x54) {
         char::from_u32(vk)?.to_ascii_lowercase().to_string()
     } else {
-        let mut keys = [0u8; 256];
-        if unsafe { GetKeyboardState(&mut keys) }.is_err() {
-            return None;
-        }
+        let keys = keyboard_state().ok()?;
         let mut chars = [0u16; 8];
         let len = unsafe {
             ToUnicodeEx(

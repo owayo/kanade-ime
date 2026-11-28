@@ -52,9 +52,7 @@ pub(super) fn physical(vk: usize) -> Option<Command> {
         .find(|b| {
             b.key.uVKey as usize == vk
                 && (b.key.uModifiers != TF_MOD_ALT
-                    || (unsafe { GetKeyState(VK_MENU.0 as i32) } < 0
-                        && unsafe { GetKeyState(VK_CONTROL.0 as i32) } >= 0
-                        && unsafe { GetKeyState(VK_SHIFT.0 as i32) } >= 0))
+                    || (key_down(VK_MENU) && !key_down(VK_CONTROL) && !key_down(VK_SHIFT)))
         })
         .map(|b| b.command)
 }
