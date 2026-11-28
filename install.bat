@@ -2,8 +2,8 @@
 setlocal
 set "PSModulePath=%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
 if exist "%~dp0.git" goto checkout
-set "setup=%~dp0artifacts\release\kanade-ime-x86_64-pc-windows-msvc.exe"
-if not exist "%setup%" set "setup=%~dp0kanade-ime-x86_64-pc-windows-msvc.exe"
+set "setup=%~dp0kanade-ime-x86_64-pc-windows-msvc.exe"
+if not exist "%setup%" set "setup=%~dp0artifacts\release\kanade-ime-x86_64-pc-windows-msvc.exe"
 if not exist "%setup%" (
     echo Kanade Setup was not found. Place the Windows release EXE beside install.bat
     echo or build it with .github\scripts\package-windows.ps1.
