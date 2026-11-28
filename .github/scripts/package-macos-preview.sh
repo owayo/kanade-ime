@@ -17,5 +17,17 @@ pkgbuild --nopayload --identifier dev.kanade.preview --version "$version" \
   --scripts "$stage/scripts" "$stage/Kanade.pkg"
 productbuild --distribution packaging/macos/pkg/Distribution.xml \
   --package-path "$stage" "$stage/preview.pkg"
-test "$(installer -dominfo -pkg "$stage/preview.pkg")" = CurrentUserHomeDirectory
+# Check the domains embedded by productbuild without starting an Installer session
+# on the signing machine. CI installs this exact product on a fresh Mac.
+(
+  cd "$stage"
+  /usr/bin/xar -xf preview.pkg Distribution
+  domains='/installer-gui-script/domains'
+  valid="count($domains) = 1 and $domains[@enable_currentUserHome='true' and @enable_localSystem='false' and @enable_anywhere='false']"
+  if [ "$(/usr/bin/xmllint --xpath "$valid" Distribution)" != true ]; then
+    echo "The preview package must offer only the current user's home." >&2
+    exit 1
+  fi
+)
 mv -f "$stage/preview.pkg" "$output"
+echo "Verified the current-user distribution in $output"

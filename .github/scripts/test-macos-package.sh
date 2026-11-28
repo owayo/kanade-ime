@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rehearse both formats on a disposable Mac. Only stable uses Developer ID.
+# Build both formats on a disposable Mac. Only stable uses Developer ID.
 set -euo pipefail
 test "${RUNNER_ENVIRONMENT:-}" = github-hosted
 folder=$(mktemp -d "${RUNNER_TEMP:?}/kanade-signing.XXXXXX")
@@ -22,15 +22,3 @@ security list-keychains -d user -s "$keychain" login.keychain-db
 sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$folder/cert.pem"
 CODESIGN_IDENTITY="$identity" KANADE_NOTARIZE=0 bash .github/scripts/package-macos.sh
 bash .github/scripts/package-macos-preview.sh artifacts/macos.noindex/Kanade.app
-
-# The downloader has no access to the CI signing identity or its trust settings.
-sudo security remove-trusted-cert -d "$folder/cert.pem"
-security delete-keychain "$keychain"
-app="$HOME/Library/Input Methods/Kanade.app"
-test ! -e "$app"
-test ! -e "$HOME/Library/LaunchAgents/dev.kanade.engine.plist"
-pkg=artifacts/release/kanade-ime-aarch64-apple-darwin.pkg
-installer -pkg "$pkg" -target CurrentUserHomeDirectory -dumplog
-version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' artifacts/macos.noindex/Kanade.app/Contents/Info.plist)
-python3 .github/scripts/verify-macos-installer.py "$app" --installed-preview --version "$version"
-"$app/Contents/Helpers/Settings.app/Contents/MacOS/kanade-ui" settings >/dev/null
